@@ -220,7 +220,7 @@ class AppHost:
         await runner.setup()
         site = web.TCPSite(runner, '0.0.0.0', port)
         await site.start()
-        print(f"Web server started on port {port}")
+        print(f"Web server started on 0.0.0.0:{port}", flush=True)
         return runner
 
 
@@ -248,7 +248,7 @@ async def main():
     except:
         pass
     
-    web_port = config.get('web_port', 5000)
+    web_port = int(os.environ.get('PORT', config.get('web_port', 5000)))
     headless = config.get('headless', True)
     
     app = AppHost()

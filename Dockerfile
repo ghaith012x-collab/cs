@@ -44,4 +44,4 @@ EXPOSE 5000
 
 ENV PYTHONUNBUFFERED=1
 
-CMD ["xvfb-run", "-a", "python", "app.py"]
+CMD ["xvfb-run", "-a", "python", "-u", "app.py"]
