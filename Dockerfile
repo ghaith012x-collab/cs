@@ -22,8 +22,6 @@ RUN chmod +r ./test/site.html
 
 EXPOSE 3000
 
-VOLUME ["/app/screenshots"]
-
 ENV PYTHONUNBUFFERED=1
 
 CMD ["python", "app.py", "--headless"]
