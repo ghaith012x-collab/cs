@@ -5,6 +5,7 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y \
     wget \
     gnupg \
+    xvfb \
     libglib2.0-0 \
     libnss3 \
     libnspr4 \
@@ -42,4 +43,4 @@ EXPOSE 8080
 
 ENV PYTHONUNBUFFERED=1
 
-CMD ["python", "app.py", "--headless"]
+CMD ["xvfb-run", "-a", "python", "app.py", "--headless"]
