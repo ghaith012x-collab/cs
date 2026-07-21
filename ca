@@ -1965,30 +1965,32 @@ class Trainer:
         return self.metrics
     
     def _train_epoch(self, epoch: int) -> float:
-        """Train for one epoch."""
+        """Train for one epoch - placeholder for real training."""
         if not self.train_data:
             return 0.5
         
         total_loss = 0.0
         for sample in self.train_data:
             try:
-                confidence = sample.get('confidence', 0.5)
-                total_loss += abs(confidence - 0.5)
+                target = sample.get('label', 'unknown')
+                pred = sample.get('predicted', 'unknown')
+                total_loss += 0.0 if target == pred else 1.0
             except Exception:
                 continue
         
         return total_loss / max(1, len(self.train_data))
     
     def _validate(self, epoch: int) -> float:
-        """Validate the model."""
+        """Validate the model - placeholder for real validation."""
         if not self.val_data:
             return 0.5
         
         total_loss = 0.0
         for sample in self.val_data:
             try:
-                confidence = sample.get('confidence', 0.5)
-                total_loss += abs(confidence - 0.5)
+                target = sample.get('label', 'unknown')
+                pred = sample.get('predicted', 'unknown')
+                total_loss += 0.0 if target == pred else 1.0
             except Exception:
                 continue
         
