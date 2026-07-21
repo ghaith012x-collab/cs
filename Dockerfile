@@ -9,8 +9,8 @@ RUN apt-get update && apt-get install -y \
 
 RUN pip install --no-cache-dir \
     playwright==1.40.0 \
-    opencv-python==4.8.0.76 \
-    numpy==1.24.3 \
+    opencv-python-headless==4.9.0.80 \
+    numpy==1.26.4 \
     aiofiles==23.1.0 && \
     pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu torch==2.1.0
 
