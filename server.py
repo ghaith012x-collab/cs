@@ -126,29 +126,45 @@ class DiscordAutomation:
             return True
 
     async def _select_dob_combobox(self, label: str, option_text: str) -> bool:
-        """Click a combobox by label and select an option by text."""
+        """Click a combobox by aria-label and select an option by text."""
         try:
-            # Find combobox by aria-label or nearby text
-            combobox = self._page.locator(f'[role="combobox"][aria-label*="{label}"], [role="combobox"]:has-text("{label}")')
+            # Find combobox by exact aria-label
+            combobox = self._page.locator(f'[role="combobox"][aria-label="{label}"]')
             if await combobox.count() == 0:
-                combobox = self._page.locator(f'select[name="{label.lower()}"]')
+                print(f"[Activity] Combobox {label} not found")
+                return False
             
-            if await combobox.count() > 0:
-                await combobox.first.click()
-                await asyncio.sleep(0.5)
-                
-                # Find option in the dropdown (could be in a portal or menu)
-                option = self._page.locator(f'[role="option"]:has-text("{option_text}"), [role="menuitem"]:has-text("{option_text}"), div:has-text("{option_text}")').first
-                if await option.count() > 0:
-                    await option.first.click()
-                    return True
-                else:
-                    # Try with numeric value for day/month
-                    option = self._page.locator(f'[role="option"][value="{option_text}"], [role="menuitem"][value="{option_text}"]').first
-                    if await option.count() > 0:
-                        await option.first.click()
-                        return True
-            return False
+            print(f"[Activity] Clicking {label} combobox")
+            await combobox.first.click()
+            await asyncio.sleep(0.8)  # Wait for dropdown to open
+            
+            # Wait for menu/options to appear - try multiple selectors
+            option = self._page.locator(f'[role="option"]:has-text("{option_text}")').first
+            if await option.count() == 0:
+                option = self._page.locator(f'[role="menuitem"]:has-text("{option_text}")').first
+            if await option.count() == 0:
+                # Options might be in a portal/modal - search globally
+                option = self._page.locator(f'div[role="option"]:has-text("{option_text}")').first
+            if await option.count() == 0:
+                option = self._page.locator(f'[data-value="{option_text}"]').first
+            if await option.count() == 0:
+                # Try partial match
+                option = self._page.locator(f'*:has-text("{option_text}")').first
+            
+            if await option.count() > 0:
+                print(f"[Activity] Selecting {label}: {option_text}")
+                await option.first.click()
+                return True
+            else:
+                print(f"[Activity] Option {option_text} not found for {label}")
+                # Debug: list all options
+                all_options = self._page.locator('[role="option"], [role="menuitem"]')
+                count = await all_options.count()
+                if count > 0:
+                    for i in range(min(count, 20)):
+                        text = await all_options.nth(i).inner_text()
+                        print(f"[Activity]   Available option: {text[:50]}")
+                return False
         except Exception as e:
             print(f"[Activity] Failed to select {label} '{option_text}': {e}")
             return False
