@@ -96,8 +96,6 @@ class DiscordAutomation:
         if not self._page:
             await self.initialize()
         
-        await self.capture_screenshot()
-        
         success = await self._fill_registration_form()
         
         await self.capture_screenshot()
@@ -129,11 +127,13 @@ class DiscordAutomation:
     async def _fill_registration_form(self) -> bool:
         try:
             await self._page.goto('https://discord.com/register', wait_until='networkidle')
-            await asyncio.sleep(2)
+            await asyncio.sleep(3)
             
+            await self._page.wait_for_selector('input[name="email"]', timeout=15000)
             await self._page.locator('input[name="email"]').fill(self._email)
             await self._human_pause()
             
+            await self._page.wait_for_selector('input[name="global_name"]', timeout=10000)
             display_name = self._username[:15] if len(self._username) > 15 else self._username
             await self._page.locator('input[name="global_name"]').fill(display_name)
             await self._human_pause()
@@ -144,26 +144,31 @@ class DiscordAutomation:
             await self._page.locator('input[name="password"]').fill(self._password)
             await self._human_pause()
             
+            await asyncio.sleep(1)
+            
             month_select = self._page.locator('select[name="month"]')
+            await month_select.wait_for(timeout=10000)
             await month_select.click()
             month_val = str(random.randint(1, 12))
             await month_select.select_option(month_val)
             await self._human_pause()
             
             day_select = self._page.locator('select[name="day"]')
+            await day_select.wait_for(timeout=10000)
             await day_select.click()
             day_val = str(random.randint(1, 28))
             await day_select.select_option(day_val)
             await self._human_pause()
             
             year_select = self._page.locator('select[name="year"]')
+            await year_select.wait_for(timeout=10000)
             await year_select.click()
             year_val = str(random.randint(1990, 2003))
             await year_select.select_option(year_val)
             await self._human_pause()
             
             await self._page.getByRole("button", {"name": "Create Account"}).click()
-            await asyncio.sleep(3)
+            await asyncio.sleep(5)
             
             if await self._solve_hcaptcha_if_present():
                 return True
@@ -171,6 +176,8 @@ class DiscordAutomation:
             
         except Exception as e:
             print(f"Form filling error: {e}")
+            import traceback
+            traceback.print_exc()
             return False
 
     async def _human_click(self, element) -> None:
