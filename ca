@@ -1,28 +1,21 @@
-import os
 import sys
-import io
 import re
-import json
 import time
 import random
 import base64
-import hashlib
 import asyncio
 import warnings
 import logging
-import tempfile
 import urllib.request
 import urllib.error
 from pathlib import Path
-from typing import Optional, List, Dict, Tuple, Union, Callable, Any, Final
+from typing import Optional, List, Dict, Tuple, Any, Final
 from dataclasses import dataclass, field, replace
 from enum import Enum, auto
-from contextlib import asynccontextmanager
 import threading
-from functools import lru_cache
 import traceback
 
-# Configure logging with better defaults
+# Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format='[%(asctime)s] [%(levelname)s] [%(name)s] %(message)s',
@@ -34,54 +27,49 @@ logger = logging.getLogger('captchahub')
 # DEPENDENCY CHECKING
 # =============================================================================
 
-class MissingDependencyError(ImportError):
-    """Raised when a required dependency is missing."""
-    pass
-
 def _optional_import(module: str) -> Any:
-    """Import module if available, return None otherwise."""
     try:
         return __import__(module)
     except ImportError:
         return None
 
-# Core ML imports with validation
+# Core ML imports
 np = _optional_import('numpy')
 cv2 = _optional_import('cv2')
 torch = _optional_import('torch')
 PIL = _optional_import('PIL')
 
-# Browser automation - import specific functions
+# Browser automation - safe imports
 _playwright_async_api = _optional_import('playwright.async_api')
 _async_playwright = getattr(_playwright_async_api, 'async_playwright', None) if _playwright_async_api else None
 
 _selenium_pkg = _optional_import('selenium')
 webdriver = getattr(_selenium_pkg, 'webdriver', None) if _selenium_pkg else None
-_By = getattr(_selenium_pkg.webdriver.common.by, 'By', None) if _selenium_pkg and hasattr(_selenium_pkg.webdriver, 'common') else None
+_By = getattr(_selenium_pkg.webdriver.common.by, 'By', None) if _selenium_pkg else None
 _Options = getattr(_selenium_pkg.webdriver.chrome.options, 'Options', None) if _selenium_pkg else None
+_ActionChains = getattr(_selenium_pkg.webdriver.common.action_chains, 'ActionChains', None) if _selenium_pkg else None
 
 # Model imports
-ultralytics = _optional_import('ultralytics')
-transformers = _optional_import('transformers')
+ultralytics_pkg = _optional_import('ultralytics')
+transformers_pkg = _optional_import('transformers')
 onnxruntime = _optional_import('onnxruntime')
 
-# Validate core dependencies at module load
-def _validate_dependencies() -> None:
-    """Validate that essential dependencies are available."""
-    if np is None:
-        warnings.warn("numpy not installed. Image processing will be limited.")
-    if cv2 is None:
-        warnings.warn("opencv-python not installed. Image processing will be limited.")
-    if PIL is None:
-        warnings.warn("Pillow not installed. Image handling will be limited.")
-
-_validate_dependencies()
+# Safe attribute access
+YOLO = getattr(ultralytics_pkg, 'YOLO', None) if ultralytics_pkg else None
+CLIPModel = getattr(transformers_pkg, 'CLIPModel', None) if transformers_pkg else None
+CLIPProcessor = getattr(transformers_pkg, 'CLIPProcessor', None) if transformers_pkg else None
+AutoProcessor = getattr(transformers_pkg, 'AutoProcessor', None) if transformers_pkg else None
 
 PLAYWRIGHT_AVAILABLE: Final[bool] = _async_playwright is not None
-SELENIUM_AVAILABLE: Final[bool] = webdriver is not None and _By is not None
-ULTRALYTICS_AVAILABLE: Final[bool] = ultralytics is not None
-TRANSFORMERS_AVAILABLE: Final[bool] = transformers is not None
+SELENIUM_AVAILABLE: Final[bool] = webdriver is not None and _By is not None and _Options is not None
+ULTRALYTICS_AVAILABLE: Final[bool] = YOLO is not None
+TRANSFORMERS_AVAILABLE: Final[bool] = transformers_pkg is not None and (CLIPModel is not None or AutoProcessor is not None)
 ONNX_AVAILABLE: Final[bool] = onnxruntime is not None
+
+if np is None:
+    warnings.warn("numpy not installed. Install: pip install numpy")
+if cv2 is None:
+    warnings.warn("opencv-python not installed. Install: pip install opencv-python")
 
 # =============================================================================
 # ENUMS
@@ -90,13 +78,6 @@ ONNX_AVAILABLE: Final[bool] = onnxruntime is not None
 class ChallengeType(Enum):
     UNKNOWN = auto()
     HCAPTCHA_IMAGE_LABEL = auto()
-    HCAPTCHA_SPATIAL = auto()
-    HCAPTCHA_MULTISTEP = auto()
-    RECAPTCHA_IMAGE = auto()
-    RECAPTCHA_AUDIO = auto()
-    GEETEST_SLIDE = auto()
-    GEETEST_ICON = auto()
-    TEXT_IMAGE = auto()
 
 class BackendType(Enum):
     AUTO = "auto"
@@ -113,22 +94,16 @@ class SolverConfig:
     headless: bool = False
     stealth: bool = True
     user_data_dir: Optional[str] = None
-    confidence_threshold: float = 0.45
-    iou_threshold: float = 0.35
+    confidence_threshold: float = 0.5
+    iou_threshold: float = 0.45
     max_retries: int = 3
     challenge_timeout: int = 30
     viewport_width: int = 1920
     viewport_height: int = 1080
-    solve_hcaptcha: bool = True
-    solve_recaptcha: bool = True
-    solve_geetest: bool = True
-    solve_image_captcha: bool = True
     human_like_mouse: bool = True
     random_delays: bool = True
     viewport_jitter: bool = True
     model_dir: Optional[Path] = None
-    debug_screenshots: bool = False
-    cache_size: int = 100
     timeout: int = 30
 
     def __post_init__(self) -> None:
@@ -140,11 +115,14 @@ class SolverConfig:
             raise ValueError("Viewport dimensions must be positive")
         if self.max_retries < 0:
             raise ValueError("max_retries must be non-negative")
+        if self.timeout <= 0:
+            raise ValueError("timeout must be positive")
+        if self.browser_type not in ('chromium', 'firefox', 'webkit'):
+            raise ValueError("browser_type must be chromium, firefox, or webkit")
         if self.model_dir is None:
             object.__setattr__(self, 'model_dir', Path.home() / ".captcha_solver" / "models")
 
     def with_model_dir(self, model_dir: Path) -> 'SolverConfig':
-        """Return a new config with a different model directory."""
         return replace(self, model_dir=model_dir)
 
 # =============================================================================
@@ -176,21 +154,12 @@ class BoundingBox:
     def area(self) -> float:
         return self.width * self.height
 
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            'x1': self.x1, 'y1': self.y1,
-            'x2': self.x2, 'y2': self.y2,
-            'confidence': self.confidence, 'label': self.label
-        }
-
 @dataclass
 class ChallengeState:
     challenge_type: ChallengeType = ChallengeType.UNKNOWN
     target_label: str = ""
     instruction_text: str = ""
-    image_data: Optional[Any] = None
     grid_cells: List[BoundingBox] = field(default_factory=list)
-    candidates: List[BoundingBox] = field(default_factory=list)
     solved: bool = False
     attempts: int = 0
 
@@ -199,31 +168,21 @@ class ChallengeState:
 # =============================================================================
 
 class CaptchaHubError(Exception):
-    """Base exception for CaptchaHub."""
     pass
 
 class BrowserNotAvailableError(CaptchaHubError):
-    """Browser automation library not installed."""
     pass
 
 class ModelNotAvailableError(CaptchaHubError):
-    """ML model not available."""
     pass
 
 class ChallengeDetectionError(CaptchaHubError):
-    """Failed to detect challenge."""
     pass
 
 class SolveTimeoutError(CaptchaHubError):
-    """Challenge solve timed out."""
     pass
 
 class DownloadError(CaptchaHubError):
-    """Failed to download model or file."""
-    pass
-
-class ConfigurationError(CaptchaHubError):
-    """Invalid configuration."""
     pass
 
 # =============================================================================
@@ -231,35 +190,27 @@ class ConfigurationError(CaptchaHubError):
 # =============================================================================
 
 class ModelDownloader:
-    """Safe model downloader with integrity checking."""
-
     MODEL_SOURCES: Final[Dict[str, str]] = {
         'yolov8n': 'https://github.com/ultralytics/assets/releases/download/v0.0.0/yolov8n.pt',
     }
 
+    MODEL_CHECKSUMS: Final[Dict[str, str]] = {
+        'yolov8n': 'sha256:placeholder',  # Should be actual checksum
+    }
+
     @staticmethod
     def download(url: str, dest: Path, chunk_size: int = 8192, timeout: int = 60) -> bool:
-        """Download file with progress and integrity check."""
         try:
             dest.parent.mkdir(parents=True, exist_ok=True)
-            
             request = urllib.request.Request(url, headers={'User-Agent': 'CaptchaHub/1.0'})
             
             with urllib.request.urlopen(request, timeout=timeout) as response:
-                total_size = int(response.headers.get('content-length', 0))
-                downloaded = 0
-                
                 with open(dest, 'wb') as f:
                     while True:
                         chunk = response.read(chunk_size)
                         if not chunk:
                             break
                         f.write(chunk)
-                        downloaded += len(chunk)
-                        
-                        if total_size > 0:
-                            progress = downloaded / total_size
-                            logger.debug(f"Download progress: {progress:.1%}")
             
             logger.info(f"Downloaded model to {dest}")
             return True
@@ -290,12 +241,6 @@ class StealthPatcher:
         Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
         Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
         window.chrome = { runtime: {} };
-        const getParameter = WebGLRenderingContext.prototype.getParameter;
-        WebGLRenderingContext.prototype.getParameter = function(parameter) {
-            if (parameter === 37445) return 'Intel Inc.';
-            if (parameter === 37446) return 'Intel Iris OpenGL Engine';
-            return getParameter(parameter);
-        };
     })()
     """
 
@@ -318,7 +263,6 @@ class StealthPatcher:
                 '--disable-blink-features=AutomationControlled',
                 '--no-sandbox',
                 '--disable-setuid-sandbox',
-                '--disable-dev-shm-usage',
                 f'--window-size={viewport[0]},{viewport[1]}',
             ],
             'ignore_default_args': ['--enable-automation'],
@@ -327,7 +271,7 @@ class StealthPatcher:
     @staticmethod
     def get_selenium_options(config: SolverConfig) -> Any:
         if not SELENIUM_AVAILABLE:
-            raise BrowserNotAvailableError("Selenium not installed")
+            raise BrowserNotAvailableError("Selenium not installed. Run: pip install selenium")
         if _Options is None:
             raise BrowserNotAvailableError("Selenium Chrome options not available")
         
@@ -346,76 +290,80 @@ class StealthPatcher:
 # =============================================================================
 
 class VisionEngine:
-    """Multi-backend vision engine with caching and fallback chains."""
+    """Vision engine for CAPTCHA tile classification."""
 
-    # Specialized CAPTCHA labels (not COCO classes)
-    CAPTCHA_LABELS: Final[List[str]] = [
-        'bus', 'car', 'truck', 'train', 'boat', 'airplane', 'bicycle',
-        'motorcycle', 'traffic light', 'fire hydrant', 'stop sign',
-        'cat', 'dog', 'bird', 'horse', 'sheep', 'cow', 'elephant', 'bear',
-        'zebra', 'giraffe', 'potted plant', 'bench', 'chair', 'table',
-        'sports ball', 'frisbee', 'kite', 'skateboard', 'surfboard',
-        'tennis racket', 'bottle', 'cup', 'fork', 'knife', 'spoon', 'bowl',
-        'apple', 'banana', 'orange', 'pizza', 'cake', 'donut', 'sandwich',
-        'book', 'clock', 'vase', 'scissors', 'teddy bear', 'hair drier', 'toothbrush'
+    # COCO class names mapped to hCaptcha-relevant labels
+    COCO_LABELS: Final[List[str]] = [
+        'person', 'bicycle', 'car', 'motorcycle', 'airplane', 'bus', 'train',
+        'truck', 'boat', 'traffic light', 'fire hydrant', 'stop sign', 'parking meter',
+        'bench', 'bird', 'cat', 'dog', 'horse', 'sheep', 'cow', 'elephant', 'bear',
+        'zebra', 'giraffe', 'backpack', 'umbrella', 'handbag', 'tie', 'suitcase',
+        'frisbee', 'skis', 'snowboard', 'sports ball', 'kite', 'baseball bat',
+        'baseball glove', 'skateboard', 'surfboard', 'tennis racket', 'bottle',
+        'wine glass', 'cup', 'fork', 'knife', 'spoon', 'bowl', 'banana', 'apple',
+        'sandwich', 'orange', 'broccoli', 'carrot', 'hot dog', 'pizza', 'donut',
+        'cake', 'chair', 'couch', 'potted plant', 'bed', 'dining table', 'toilet',
+        'tv', 'laptop', 'mouse', 'remote', 'keyboard', 'cell phone', 'microwave',
+        'oven', 'toaster', 'sink', 'refrigerator', 'book', 'clock', 'vase',
+        'scissors', 'teddy bear', 'hair drier', 'toothbrush'
     ]
 
-    # Color mappings for heuristic matching
+    # hCaptcha label aliases (what prompts actually say)
+    HCAPTCHA_ALIASES: Final[Dict[str, str]] = {
+        'motorbus': 'bus',
+        'vehicle': 'car',
+        'traffic lights': 'traffic light',
+    }
+
+    # Color mappings for heuristic fallback
     COLOR_MAP: Final[Dict[str, Tuple[List[int], List[int]]]] = {
         'bus': ([10, 50, 50], [30, 255, 200]),
         'car': ([90, 50, 50], [130, 255, 200]),
         'traffic light': ([0, 100, 100], [10, 255, 255]),
         'fire hydrant': ([0, 50, 150], [30, 255, 255]),
-        'stop sign': ([0, 100, 100], [10, 255, 255]),
     }
 
     def __init__(self, config: SolverConfig):
         self.config = config
         self._device = torch.device('cuda' if torch and torch.cuda.is_available() else 'cpu') if torch else None
-        self._yolo_model: Optional[Any] = None
+        self._yolo_model = None
         self._clip_model = None
         self._clip_processor = None
         self._onnx_session = None
         self._model_lock = threading.RLock()
         self._model_dir = config.model_dir or Path.home() / ".captcha_solver" / "models"
+        self._yolo_ready = False
+        self._clip_ready = False
         self._init_models()
 
     def _init_models(self) -> None:
-        """Initialize ML models with fallback chain."""
         if not np or not cv2:
-            logger.warning("numpy or opencv not available, vision engine limited")
+            logger.warning("numpy or opencv not available")
             return
 
         self._model_dir.mkdir(parents=True, exist_ok=True)
 
-        if ULTRALYTICS_AVAILABLE and self._yolo_model is None:
+        if ULTRALYTICS_AVAILABLE and not self._yolo_ready:
             self._load_yolo()
 
-        if ONNX_AVAILABLE and self._onnx_session is None and self._yolo_model is None:
+        if ONNX_AVAILABLE and not self._yolo_ready:
             self._load_onnx()
 
     def _load_yolo(self) -> bool:
-        """Load YOLO model with safe download."""
         try:
             model_path = ModelDownloader.get_yolo_model_path(self._model_dir)
             
             if not model_path.exists():
                 logger.info(f"Downloading YOLOv8n to {model_path}")
-                success = ModelDownloader.download(
-                    ModelDownloader.MODEL_SOURCES['yolov8n'],
-                    model_path
-                )
-                if not success:
-                    logger.warning("YOLO download failed, falling back to ONNX or heuristic")
+                if not ModelDownloader.download(ModelDownloader.MODEL_SOURCES['yolov8n'], model_path):
                     return False
 
             with self._model_lock:
-                if self._yolo_model is None:
-                    if ultralytics is None:
-                        logger.warning("ultralytics not available")
+                if not self._yolo_ready:
+                    if YOLO is None:
                         return False
-                    from ultralytics import YOLO
                     self._yolo_model = YOLO(str(model_path))
+                    self._yolo_ready = True
                     logger.info(f"YOLOv8n loaded on {self._device}")
             return True
         except Exception as e:
@@ -423,14 +371,12 @@ class VisionEngine:
             return False
 
     def _load_onnx(self) -> bool:
-        """Load ONNX model."""
         try:
             model_path = self._model_dir / "yolov8n.onnx"
             if model_path.exists():
                 with self._model_lock:
                     if self._onnx_session is None:
                         if onnxruntime is None:
-                            logger.warning("onnxruntime not available")
                             return False
                         self._onnx_session = onnxruntime.InferenceSession(str(model_path))
                 logger.info("ONNX Runtime loaded")
@@ -440,19 +386,20 @@ class VisionEngine:
         return False
 
     def detect_objects(self, image: Any, target_classes: Optional[List[str]] = None) -> List[BoundingBox]:
-        """Detect objects with automatic backend selection."""
         if not np or not cv2:
+            return []
+        if image is None:
             return []
 
         with self._model_lock:
-            if self._yolo_model is not None:
+            if self._yolo_ready and self._yolo_model is not None:
                 return self._detect_yolo(image, target_classes)
             if self._onnx_session is not None:
                 return self._detect_onnx(image, target_classes)
         return self._detect_heuristic(image, target_classes)
 
     def _detect_yolo(self, image: Any, target_classes: Optional[List[str]]) -> List[BoundingBox]:
-        """Ultralytics YOLOv8 detection."""
+        """YOLOv8 detection with correct COCO class mapping."""
         results = self._yolo_model(image, verbose=False, conf=self.config.confidence_threshold)
         detections = []
 
@@ -461,7 +408,15 @@ class VisionEngine:
                 continue
             for box in result.boxes:
                 cls_id = int(box.cls[0])
-                label = self.CAPTCHA_LABELS[cls_id] if cls_id < len(self.CAPTCHA_LABELS) else f"class_{cls_id}"
+                # FIX: Use actual COCO class names, not wrong index into custom labels
+                if cls_id < len(self.COCO_LABELS):
+                    label = self.COCO_LABELS[cls_id]
+                else:
+                    label = f"class_{cls_id}"
+                
+                # Normalize labels
+                label = self.HCAPTCHA_ALIASES.get(label, label)
+                
                 conf = float(box.conf[0])
 
                 if target_classes and label not in target_classes:
@@ -477,8 +432,11 @@ class VisionEngine:
 
     def _detect_onnx(self, image: Any, target_classes: Optional[List[str]]) -> List[BoundingBox]:
         """ONNX Runtime inference with proper post-processing."""
+        if image is None:
+            return []
+            
+        original_h, original_w = image.shape[:2]
         input_img = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-        original_h, original_w = input_img.shape[:2]
         input_img = cv2.resize(input_img, (640, 640)).astype(np.float32) / 255.0
         input_img = np.transpose(input_img, (2, 0, 1))[np.newaxis, ...]
 
@@ -492,17 +450,14 @@ class VisionEngine:
         original_w: int,
         target_classes: Optional[List[str]]
     ) -> List[BoundingBox]:
-        """Post-process ONNX outputs: decode, NMS, filter."""
+        """Post-process ONNX outputs with proper format detection."""
         detections = []
         
         try:
             if len(outputs) == 0:
                 return detections
 
-            if isinstance(outputs, (list, tuple)):
-                output = outputs[0]
-            else:
-                output = outputs
+            output = outputs[0] if isinstance(outputs, (list, tuple)) else outputs
 
             if output.ndim == 3:
                 output = output[0]
@@ -512,27 +467,26 @@ class VisionEngine:
 
             predictions = []
             for pred in output:
+                # YOLO format: [x, y, w, h, conf, class_id, class_probs...]
                 x, y, w, h, conf = pred[:5]
-                class_probs = pred[5:]
-                
-                if conf < self.config.confidence_threshold:
-                    continue
-                
-                class_id = int(np.argmax(class_probs))
-                class_conf = float(class_probs[class_id])
+                class_id = int(np.argmax(pred[5:])) if len(pred) > 5 else 0
+                class_conf = float(pred[5 + class_id]) if len(pred) > 5 + class_id else 1.0
                 total_conf = conf * class_conf
-                
-                if target_classes:
-                    label = self.CAPTCHA_LABELS[class_id] if class_id < len(self.CAPTCHA_LABELS) else f"class_{class_id}"
-                    if label not in target_classes:
-                        continue
-                else:
-                    label = self.CAPTCHA_LABELS[class_id] if class_id < len(self.CAPTCHA_LABELS) else f"class_{class_id}"
 
+                if total_conf < self.config.confidence_threshold:
+                    continue
+
+                # Scale coordinates
                 x1 = float((x - w / 2) * original_w / 640)
                 y1 = float((y - h / 2) * original_h / 640)
                 x2 = float((x + w / 2) * original_w / 640)
                 y2 = float((y + h / 2) * original_h / 640)
+
+                label = self.COCO_LABELS[class_id] if class_id < len(self.COCO_LABELS) else f"class_{class_id}"
+                label = self.HCAPTCHA_ALIASES.get(label, label)
+
+                if target_classes and label not in target_classes:
+                    continue
 
                 predictions.append((x1, y1, x2, y2, total_conf, label))
 
@@ -544,7 +498,6 @@ class VisionEngine:
         return detections
 
     def _nms(self, predictions: List[Tuple], iou_threshold: float) -> List[BoundingBox]:
-        """Non-Maximum Suppression for bounding boxes."""
         if not predictions:
             return []
 
@@ -567,31 +520,32 @@ class VisionEngine:
         return kept
 
     def _calculate_iou(self, box1: Tuple, box2: Tuple) -> float:
-        """Calculate Intersection over Union."""
         x1 = max(box1[0], box2[0])
         y1 = max(box1[1], box2[1])
         x2 = min(box1[2], box2[2])
         y2 = min(box1[3], box2[3])
 
         intersection = max(0, x2 - x1) * max(0, y2 - y1)
-        area1 = (box1[2] - box1[0]) * (box1[3] - box1[1])
-        area2 = (box2[2] - box2[0]) * (box2[3] - box2[1])
+        area1 = max(0, box1[2] - box1[0]) * max(0, box1[3] - box1[1])
+        area2 = max(0, box2[2] - box2[0]) * max(0, box2[3] - box2[1])
         union = area1 + area2 - intersection
 
         return intersection / union if union > 0 else 0
 
     def _detect_heuristic(self, image: Any, target_classes: Optional[List[str]]) -> List[BoundingBox]:
-        """Pure OpenCV fallback using contour analysis."""
+        if image is None:
+            return []
+            
         detections = []
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+        blurred = cv2.GaussianBlur(gray, (3, 3), 0)
         edges = cv2.Canny(blurred, 50, 150)
 
         contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
         for cnt in contours:
             area = cv2.contourArea(cnt)
-            if area < 500:
+            if area < 200:
                 continue
 
             x, y, width, height = cv2.boundingRect(cnt)
@@ -601,7 +555,7 @@ class VisionEngine:
             if target_classes and label not in target_classes:
                 continue
 
-            confidence = min(1.0, area / 10000)
+            confidence = min(1.0, area / 5000)
 
             detections.append(BoundingBox(
                 x1=float(x), y1=float(y), x2=float(x + width), y2=float(y + height),
@@ -611,26 +565,18 @@ class VisionEngine:
         return detections
 
     def _classify_object(self, aspect: float, area: float, width: int, height: int) -> str:
-        """Heuristic object classification with better thresholds."""
-        if 0.8 < aspect < 1.2 and area > 3000:
+        if 0.8 < aspect < 1.2 and area > 1000:
             return 'sports ball'
-        if aspect > 2.5 and area > 4000:
+        if aspect > 2.0 and area > 1500:
             return 'bus' if width > height else 'bench'
-        if 1.5 < aspect < 2.5 and area > 3500:
+        if 1.2 < aspect < 2.0 and area > 1200:
             return 'car'
-        if 0.3 < aspect < 0.7 and area > 2500:
+        if 0.3 < aspect < 0.7 and area > 800:
             return 'traffic light'
-        if 0.5 < aspect < 1.0 and area > 2000:
-            return 'potted plant'
-        if aspect > 3.0:
-            return 'train'
-        if aspect < 0.3:
-            return 'stop sign'
         return 'object'
 
     def semantic_match(self, image: Any, text_query: str) -> float:
-        """Semantic similarity using CLIP or histogram fallback."""
-        if not text_query or not text_query.strip():
+        if not text_query or not text_query.strip() or image is None:
             return 0.0
 
         if self._clip_model is None and TRANSFORMERS_AVAILABLE:
@@ -641,29 +587,34 @@ class VisionEngine:
         return self._histogram_match(image, text_query)
 
     def _load_clip(self) -> None:
-        """Load CLIP model with caching."""
         try:
-            if transformers is None:
+            if not TRANSFORMERS_AVAILABLE:
                 return
-            from transformers import CLIPModel, CLIPProcessor
-            
-            model_name = "openai/clip-vit-base-patch32"
-            
+
             with self._model_lock:
                 if self._clip_model is not None:
                     return
-                    
+
+                if AutoProcessor is not None:
+                    processor_cls = AutoProcessor
+                elif CLIPProcessor is not None:
+                    processor_cls = CLIPProcessor
+                else:
+                    return
+
+                model_name = "openai/clip-vit-base-patch32"
                 self._clip_model = CLIPModel.from_pretrained(model_name)
-                self._clip_processor = CLIPProcessor.from_pretrained(model_name)
+                self._clip_processor = processor_cls.from_pretrained(model_name)
+                self._clip_ready = True
                 logger.info("CLIP model loaded")
         except Exception as e:
             logger.warning(f"CLIP init failed: {e}")
 
     def _clip_match(self, image: Any, text_query: str) -> float:
-        """CLIP-based semantic matching."""
         try:
-            if PIL is None:
+            if PIL is None or self._clip_processor is None or self._clip_model is None:
                 return 0.0
+            
             from PIL import Image
             
             inputs = self._clip_processor(
@@ -672,203 +623,145 @@ class VisionEngine:
                 return_tensors="pt", padding=True
             )
             outputs = self._clip_model(**inputs)
-            score = torch.sigmoid(outputs.logits_per_image[0][0]).item()
-            return score
-        except Exception as e:
-            logger.debug(f"CLIP match error: {e}")
+            return torch.sigmoid(outputs.logits_per_image[0][0]).item()
+        except Exception:
             return 0.0
 
     def _histogram_match(self, image: Any, text_query: str) -> float:
-        """Color histogram heuristic matching with calibration."""
-        hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
-
-        text_lower = text_query.lower()
-        
-        for keyword, (lower, upper) in self.COLOR_MAP.items():
-            if keyword in text_lower:
-                mask = cv2.inRange(hsv, np.array(lower), np.array(upper))
-                ratio = cv2.countNonZero(mask) / (image.shape[0] * image.shape[1])
-                return min(1.0, ratio * 3)
-        return 0.3
+        try:
+            hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+            text_lower = text_query.lower()
+            
+            for keyword, (lower, upper) in self.COLOR_MAP.items():
+                if keyword in text_lower:
+                    mask = cv2.inRange(hsv, np.array(lower), np.array(upper))
+                    ratio = cv2.countNonZero(mask) / max(1, image.shape[0] * image.shape[1])
+                    return min(1.0, ratio * 3)
+            return 0.0
+        except Exception:
+            return 0.0
 
     def preprocess_image(self, image: Any) -> Any:
-        """Image enhancement for better detection."""
         if image is None:
             return image
-        denoised = cv2.fastNlMeansDenoisingColored(image, None, 10, 10, 7, 21)
-        lab = cv2.cvtColor(denoised, cv2.COLOR_BGR2LAB)
-        l, a, b = cv2.split(lab)
-        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
-        enhanced = cv2.cvtColor(cv2.merge([clahe.apply(l), a, b]), cv2.COLOR_LAB2BGR)
-        return enhanced
-
-    def create_grid_cells(self, image: Any, rows: int = 3, cols: int = 3) -> List[BoundingBox]:
-        """Divide image into grid cells."""
-        if image is None:
-            return []
-        h, w = image.shape[:2]
-        cell_h, cell_w = h // rows, w // cols
-
-        cells = []
-        for r in range(rows):
-            for c in range(cols):
-                x2 = (c + 1) * cell_w if c < cols - 1 else w
-                y2 = (r + 1) * cell_h if r < rows - 1 else h
-                cells.append(BoundingBox(
-                    x1=float(c * cell_w), y1=float(r * cell_h),
-                    x2=float(x2), y2=float(y2)
-                ))
-        return cells
+        try:
+            denoised = cv2.fastNlMeansDenoisingColored(image, None, 10, 10, 7, 21)
+            lab = cv2.cvtColor(denoised, cv2.COLOR_BGR2LAB)
+            l, a, b = cv2.split(lab)
+            clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+            enhanced = cv2.cvtColor(cv2.merge([clahe.apply(l), a, b]), cv2.COLOR_LAB2BGR)
+            return enhanced
+        except Exception:
+            return image
 
 # =============================================================================
 # CHALLENGE DETECTOR
 # =============================================================================
 
 class ChallengeDetector:
-    """DOM-based challenge detection and classification."""
+    """DOM-based challenge detection."""
 
-    HCAPTCHA_SELECTORS: Final[Dict[str, List[str]]] = {
-        'frame': ['iframe[src*="hcaptcha.com"]', 'iframe[src*="captcha.hcaptcha.com"]'],
-        'checkbox': ['#checkbox', '.hcaptcha-checkbox'],
-        'challenge_container': ['.challenge-container', '#challenge', '.hcaptcha-challenge'],
-        'prompt_text': ['.prompt-text', '.challenge-title', '.instruction', 'h1'],
-        'image_grid': ['.task-image', '.challenge-image', 'img[alt*="image"]'],
-        'submit_button': ['.button-submit', '#submit-button', 'button[type="submit"]'],
-        'next_button': ['.button-next', '#next-button', 'button.next'],
-    }
+    HCAPTCHA_SELECTORS: Final[List[str]] = [
+        'iframe[src*="hcaptcha.com"]',
+        'iframe[src*="captcha.hcaptcha.com"]',
+    ]
 
-    RECAPTCHA_SELECTORS: Final[Dict[str, List[str]]] = {
-        'frame': ['iframe[src*="recaptcha"]', 'iframe[name="a-badge"]'],
-        'checkbox': ['.recaptcha-checkbox', '#recaptcha-anchor'],
-        'challenge_frame': ['iframe[title*="challenge"]', '.challenge-frame'],
-        'image_table': ['table.rc-imageselect-table', '.select-checkbox'],
-        'tile': ['.rc-imageselect-tile', 'div[role="checkbox"]'],
-        'prompt': ['.rc-imageselect-instructions', '.challenge-text'],
-        'verify_button': ['#recaptcha-verify-button', '.verify-button'],
-    }
+    RECAPTCHA_SELECTORS: Final[List[str]] = [
+        'iframe[src*="recaptcha"]',
+    ]
+
+    PROMPT_SELECTORS: Final[List[str]] = [
+        '.prompt-text',
+        '.challenge-title',
+        '.instruction',
+        'h1',
+    ]
+
+    SUBMIT_SELECTORS: Final[List[str]] = [
+        '.button-submit',
+        '#submit-button',
+        'button[type="submit"]',
+    ]
 
     def __init__(self, config: SolverConfig):
         self.config = config
 
-    def _find_element(self, page_or_driver: Any, selectors: List[str]) -> Any:
-        """Find element using multiple fallback selectors."""
-        if hasattr(page_or_driver, 'locator'):
-            for selector in selectors:
-                try:
-                    elem = page_or_driver.locator(selector).first
-                    if elem:
-                        count = elem.count() if hasattr(elem, 'count') else 0
-                        if count > 0:
-                            return elem
-                except Exception:
-                    continue
-            return None
-        else:
-            for selector in selectors:
-                try:
-                    elem = page_or_driver.find_element(_By.CSS_SELECTOR, selector)
-                    if elem is not None:
-                        return elem
-                except Exception:
-                    continue
-            return None
-
     async def detect_playwright(self, page: Any) -> Optional[ChallengeState]:
-        """Detect challenge using Playwright with robust error handling."""
         state = ChallengeState()
 
         try:
-            frame = self._find_element(page, self.HCAPTCHA_SELECTORS['frame'])
-            if frame is not None:
-                frame_count = await frame.count() if hasattr(frame, 'count') else 0
-                if frame_count > 0:
+            for selector in self.HCAPTCHA_SELECTORS:
+                frame = page.locator(selector).first
+                count = await frame.count()
+                if count > 0:
                     state.challenge_type = ChallengeType.HCAPTCHA_IMAGE_LABEL
                     content_frame = await frame.content_frame()
-                    if content_frame is not None:
-                        prompt_elem = self._find_element(content_frame, self.HCAPTCHA_SELECTORS['prompt_text'])
-                        if prompt_elem is not None:
-                            try:
-                                state.instruction_text = await prompt_elem.inner_text()
-                                state.target_label = self._extract_target(state.instruction_text)
-                            except Exception:
-                                pass
+                    if content_frame:
+                        for prompt_sel in self.PROMPT_SELECTORS:
+                            prompt = content_frame.locator(prompt_sel)
+                            if await prompt.count() > 0:
+                                try:
+                                    state.instruction_text = await prompt.inner_text()
+                                    state.target_label = self._extract_target(state.instruction_text)
+                                except Exception:
+                                    pass
+                                break
                     return state
-
-            frame = self._find_element(page, self.RECAPTCHA_SELECTORS['frame'])
-            if frame is not None:
-                frame_count = await frame.count() if hasattr(frame, 'count') else 0
-                if frame_count > 0:
-                    state.challenge_type = ChallengeType.RECAPTCHA_IMAGE
-                    content_frame = await frame.content_frame()
-                    if content_frame is not None:
-                        prompt_elem = self._find_element(content_frame, self.RECAPTCHA_SELECTORS['prompt'])
-                        if prompt_elem is not None:
-                            try:
-                                state.instruction_text = await prompt_elem.inner_text()
-                                state.target_label = self._extract_target(state.instruction_text)
-                            except Exception:
-                                pass
-                    return state
-
         except Exception as e:
-            logger.debug(f"Challenge detection error: {e}")
+            logger.debug(f"Detection error: {e}")
 
-        return None if state.challenge_type == ChallengeType.UNKNOWN else state
+        return None
 
     def detect_selenium(self, driver: Any) -> Optional[ChallengeState]:
-        """Detect challenge using Selenium with proper frame handling."""
         state = ChallengeState()
 
         try:
-            frames = driver.find_elements(_By.CSS_SELECTOR, self.HCAPTCHA_SELECTORS['frame'][0])
-
-            if frames:
-                state.challenge_type = ChallengeType.HCAPTCHA_IMAGE_LABEL
-                driver.switch_to.default_content()
-                driver.switch_to.frame(frames[0])
-                try:
-                    prompt = self._find_element(driver, self.HCAPTCHA_SELECTORS['prompt_text'])
-                    if prompt:
-                        state.instruction_text = prompt.text
-                        state.target_label = self._extract_target(state.instruction_text)
-                except Exception:
-                    pass
-                finally:
+            for selector in self.HCAPTCHA_SELECTORS:
+                frames = driver.find_elements(_By.CSS_SELECTOR, selector)
+                if frames:
+                    state.challenge_type = ChallengeType.HCAPTCHA_IMAGE_LABEL
                     driver.switch_to.default_content()
-                return state
-
+                    driver.switch_to.frame(frames[0])
+                    try:
+                        for prompt_sel in self.PROMPT_SELECTORS:
+                            try:
+                                prompt = driver.find_element(_By.CSS_SELECTOR, prompt_sel)
+                                state.instruction_text = prompt.text
+                                state.target_label = self._extract_target(state.instruction_text)
+                                break
+                            except Exception:
+                                continue
+                    finally:
+                        driver.switch_to.default_content()
+                    return state
         except Exception as e:
-            logger.error(f"Selenium detection error: {e}\n{traceback.format_exc()}")
+            logger.error(f"Selenium detection error: {e}")
 
-        return None if state.challenge_type == ChallengeType.UNKNOWN else state
+        return None
 
     def _extract_target(self, prompt: str) -> str:
-        """Extract target object from challenge instruction."""
         if not prompt:
             return ""
 
         prompt_lower = prompt.lower()
+        prompt_lower = self.HCAPTCHA_ALIASES.get(prompt_lower, prompt_lower)
 
         patterns = [
             r'containing (?:a|an? )?([\w\s]+?)(?:\s*[?.]|$)',
             r'with ([\w\s]+?)(?:\s*[?.]|$)',
             r'(?:click|select) on .*? ([\w\s]+?)(?:\s*[?.]|$)',
-            r'identify (?:all )?(?:images with? )?([\w\s]+?)(?:\s*[?.]|$)',
             r'select (?:all )?([\w\s]+?)(?:\s*[?.]|$)',
         ]
 
         for pattern in patterns:
             match = re.search(pattern, prompt_lower)
             if match:
-                target = match.group(1).strip().rstrip('.')
-                target = target.replace('motorbus', 'bus')
-                target = target.replace('vehicles', 'car')
-                target = target.replace('a ', '').replace('an ', '')
+                target = match.group(1).strip().rstrip('.').replace('motorbus', 'bus')
                 return target
 
-        for keyword in VisionEngine.CAPTCHA_LABELS:
-            if keyword in prompt_lower:
-                return keyword
+        for label in VisionEngine.COCO_LABELS:
+            if label in prompt_lower:
+                return label
 
         return ""
 
@@ -877,10 +770,7 @@ class ChallengeDetector:
 # =============================================================================
 
 class PlaywrightSolver:
-    """Async Playwright-based CAPTCHA solver with robust lifecycle management."""
-
-    DEFAULT_TIMEOUT = 30000
-    MAX_RETRIES = 3
+    """Playwright-based CAPTCHA solver."""
 
     def __init__(self, config: SolverConfig):
         self.config = config
@@ -895,7 +785,7 @@ class PlaywrightSolver:
         await self.initialize()
         return self
 
-    async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
+    async def __aexit__(self, *args) -> None:
         await self.close()
 
     async def initialize(self) -> None:
@@ -908,7 +798,8 @@ class PlaywrightSolver:
             return
 
         try:
-            self._playwright = _async_playwright().start()
+            # FIX: Properly await the async context manager
+            self._playwright = await _async_playwright().start()
             browser_type = getattr(self._playwright, self.config.browser_type)
             args = StealthPatcher.get_stealth_args(self.config)
 
@@ -925,15 +816,14 @@ class PlaywrightSolver:
 
             await self._context.add_init_script(StealthPatcher.STEALTH_SCRIPT)
             self._initialized = True
-            logger.info("Playwright initialized with stealth")
+            logger.info("Playwright initialized")
 
         except Exception as e:
-            logger.error(f"Playwright initialization failed: {e}")
+            logger.error(f"Playwright init failed: {e}")
             await self._safe_close()
             raise
 
     async def _safe_close(self) -> None:
-        """Safe close that handles already-closed resources."""
         try:
             if self._context and not getattr(self._context, 'is_closed', lambda: False)():
                 await self._context.close()
@@ -951,7 +841,6 @@ class PlaywrightSolver:
             pass
 
     async def solve(self, url: str) -> bool:
-        """Solve CAPTCHA at given URL with timeout handling."""
         page = None
         try:
             page = await self._context.new_page()
@@ -959,28 +848,22 @@ class PlaywrightSolver:
             await asyncio.sleep(2)
 
             if await self._click_checkbox(page):
-                logger.info("Checkbox clicked, waiting for challenge")
                 await asyncio.sleep(2)
 
             for attempt in range(self.config.max_retries):
                 state = await self._detector.detect_playwright(page)
                 if state is None or not state.target_label:
-                    logger.info("No active challenge detected")
                     return True
 
-                logger.info(f"Attempt {attempt + 1}: {state.challenge_type.name} - {state.target_label}")
+                logger.info(f"Attempt {attempt + 1}: {state.target_label}")
 
                 if await self._solve_image_challenge(page, state):
-                    logger.info("Challenge solved successfully")
                     return True
 
                 await asyncio.sleep(1)
 
             return False
 
-        except asyncio.TimeoutError:
-            logger.error("Page load timed out")
-            return False
         except Exception as e:
             logger.error(f"Solve error: {e}\n{traceback.format_exc()}")
             return False
@@ -992,53 +875,64 @@ class PlaywrightSolver:
                     pass
 
     async def _click_checkbox(self, page: Any) -> bool:
-        """Click the initial checkbox with robust error handling."""
         try:
-            frame = self._detector._find_element(page, self._detector.HCAPTCHA_SELECTORS['frame'])
+            frame = None
+            for selector in self._detector.HCAPTCHA_SELECTORS:
+                frame = page.locator(selector).first
+                if await frame.count() > 0:
+                    break
+
             if frame is None:
                 return False
 
-            if hasattr(frame, 'count'):
-                count = await frame.count()
-                if count == 0:
-                    return False
-            else:
-                return False
-
             content_frame = await frame.content_frame()
-            if content_frame is None:
+            if not content_frame:
                 return False
 
-            checkbox = self._detector._find_element(content_frame, self._detector.HCAPTCHA_SELECTORS['checkbox'])
+            checkbox = None
+            for selector in self._detector.PROMPT_SELECTORS:
+                checkbox = content_frame.locator(selector).first
+                if await checkbox.count() > 0:
+                    break
+
             if checkbox is None:
                 return False
 
-            if hasattr(checkbox, 'count'):
-                cb_count = await checkbox.count()
-                if cb_count > 0:
-                    await self._human_click(content_frame, checkbox)
-                    return True
+            box = await checkbox.bounding_box()
+            if box:
+                x = box['x'] + random.uniform(box['width'] * 0.25, box['width'] * 0.75)
+                y = box['y'] + random.uniform(box['height'] * 0.25, box['height'] * 0.75)
+                steps = random.randint(8, 20) if self.config.human_like_mouse else 1
+                await content_frame.mouse.move(x, y, steps=steps)
+                await asyncio.sleep(random.uniform(0.05, 0.15))
+                await content_frame.mouse.down()
+                await asyncio.sleep(random.uniform(0.03, 0.1))
+                await content_frame.mouse.up()
+                return True
 
-        except Exception as e:
-            logger.debug(f"Checkbox click error: {e}")
+        except Exception:
+            pass
         return False
 
     async def _solve_image_challenge(self, page: Any, state: ChallengeState) -> bool:
-        """Solve image grid challenge with improved detection."""
         try:
-            frame = self._detector._find_element(page, self._detector.HCAPTCHA_SELECTORS['frame'])
+            frame = None
+            for selector in self._detector.HCAPTCHA_SELECTORS:
+                frame = page.locator(selector).first
+                if await frame.count() > 0:
+                    break
+
             if frame is None:
                 return False
 
             content_frame = await frame.content_frame()
-            if content_frame is None:
+            if not content_frame:
                 return False
 
             cells = content_frame.locator('.task-image')
             cell_count = await cells.count()
 
             if cell_count == 0:
-                logger.debug("No image cells found")
                 return False
 
             to_click = []
@@ -1062,26 +956,28 @@ class PlaywrightSolver:
 
                 target = state.target_label
                 detections = self._vision.detect_objects(image, [target] if target else None)
-                
-                semantic = 0.0
-                if target:
-                    semantic = self._vision.semantic_match(image, target)
+                semantic = self._vision.semantic_match(image, target) if target else 0.0
 
                 confidence = max(
-                    max(d.confidence for d in detections) if detections else 0,
+                    max((d.confidence for d in detections), default=0),
                     semantic
                 )
 
                 if confidence > self.config.confidence_threshold:
                     to_click.append(cell)
-                    logger.debug(f"Cell {i}: confidence={confidence:.2f}, detections={len(detections)}")
+                    logger.debug(f"Cell {i}: confidence={confidence:.2f}")
 
             for cell in to_click:
                 await self._human_click(content_frame, cell)
                 await asyncio.sleep(random.uniform(0.3, 0.8))
 
-            submit = self._detector._find_element(content_frame, self._detector.HCAPTCHA_SELECTORS['submit_button'])
-            if submit is not None:
+            submit = None
+            for selector in self._detector.SUBMIT_SELECTORS:
+                submit = content_frame.locator(selector).first
+                if await submit.count() > 0:
+                    break
+
+            if submit:
                 await self._human_click(content_frame, submit)
 
             await asyncio.sleep(3)
@@ -1089,11 +985,10 @@ class PlaywrightSolver:
             return result is None
 
         except Exception as e:
-            logger.error(f"Image challenge solve error: {e}\n{traceback.format_exc()}")
+            logger.error(f"Image solve error: {e}\n{traceback.format_exc()}")
             return False
 
     async def _human_click(self, frame: Any, locator: Any) -> None:
-        """Human-like mouse click simulation."""
         try:
             box = await locator.bounding_box()
             if not box:
@@ -1109,7 +1004,6 @@ class PlaywrightSolver:
             await frame.mouse.down()
             await asyncio.sleep(random.uniform(0.03, 0.1))
             await frame.mouse.up()
-
         except Exception:
             try:
                 await locator.click(force=True)
@@ -1125,7 +1019,7 @@ class PlaywrightSolver:
 # =============================================================================
 
 class SeleniumSolverWrapper:
-    """Synchronous Selenium-based CAPTCHA solver with robust frame handling."""
+    """Selenium-based CAPTCHA solver."""
 
     def __init__(self, config: SolverConfig):
         self.config = config
@@ -1146,7 +1040,7 @@ class SeleniumSolverWrapper:
                 if not state or not state.target_label:
                     return True
 
-                logger.info(f"Attempt {attempt + 1}: {state.challenge_type.name}")
+                logger.info(f"Attempt {attempt + 1}: {state.target_label}")
 
                 if self._solve_hcaptcha(state):
                     return True
@@ -1160,9 +1054,7 @@ class SeleniumSolverWrapper:
 
     def _init_driver(self) -> None:
         if not SELENIUM_AVAILABLE:
-            raise BrowserNotAvailableError(
-                "Selenium not installed. Run: pip install selenium"
-            )
+            raise BrowserNotAvailableError("Selenium not installed. Run: pip install selenium")
 
         try:
             options = StealthPatcher.get_selenium_options(self.config)
@@ -1172,18 +1064,23 @@ class SeleniumSolverWrapper:
             })
             logger.info("Selenium initialized")
         except Exception as e:
-            logger.error(f"Selenium driver init failed: {e}")
+            logger.error(f"Driver init failed: {e}")
             raise
 
     def _solve_hcaptcha(self, state: ChallengeState) -> bool:
         try:
-            frames = self._driver.find_elements(_By.CSS_SELECTOR, self._detector.HCAPTCHA_SELECTORS['frame'][0])
-            if not frames:
-                logger.debug("No hCaptcha frame found")
+            frame = None
+            for selector in self._detector.HCAPTCHA_SELECTORS:
+                frames = self._driver.find_elements(_By.CSS_SELECTOR, selector)
+                if frames:
+                    frame = frames[0]
+                    break
+
+            if not frame:
                 return False
 
             self._driver.switch_to.default_content()
-            self._driver.switch_to.frame(frames[0])
+            self._driver.switch_to.frame(frame)
 
             try:
                 images = self._driver.find_elements(_By.CSS_SELECTOR, 'img')
@@ -1205,9 +1102,8 @@ class SeleniumSolverWrapper:
                             image = self._vision.preprocess_image(image)
                             detections = self._vision.detect_objects(image, [state.target_label])
                             
-                            if detections:
-                                from selenium.webdriver.common.action_chains import ActionChains
-                                ActionChains(self._driver).move_to_element(img).pause(
+                            if detections and _ActionChains:
+                                _ActionChains(self._driver).move_to_element(img).pause(
                                     random.uniform(0.2, 0.4)
                                 ).click().perform()
                                 time.sleep(random.uniform(0.3, 0.6))
@@ -1215,15 +1111,19 @@ class SeleniumSolverWrapper:
                     except Exception:
                         continue
 
-                submit = self._driver.find_elements(
-                    _By.CSS_SELECTOR, self._detector.HCAPTCHA_SELECTORS['submit_button'][0]
-                )
+                submit = None
+                for selector in self._detector.SUBMIT_SELECTORS:
+                    try:
+                        submit = self._driver.find_element(_By.CSS_SELECTOR, selector)
+                        if submit:
+                            break
+                    except Exception:
+                        continue
+
                 if submit:
-                    submit[0].click()
+                    submit.click()
 
                 time.sleep(3)
-                
-                self._driver.switch_to.default_content()
                 result = self._detector.detect_selenium(self._driver)
                 return result is None
 
@@ -1231,7 +1131,7 @@ class SeleniumSolverWrapper:
                 self._driver.switch_to.default_content()
 
         except Exception as e:
-            logger.error(f"Selenium hCaptcha solve error: {e}\n{traceback.format_exc()}")
+            logger.error(f"hCaptcha solve error: {e}\n{traceback.format_exc()}")
             try:
                 self._driver.switch_to.default_content()
             except Exception:
@@ -1255,13 +1155,13 @@ class GodSolver:
 
     def __init__(self, config: Optional[SolverConfig] = None):
         self.config = config if config is not None else SolverConfig()
-        self._active_solver: Optional[Any] = None
+        self._active_solver = None
         self._backend: Optional[BackendType] = None
 
     async def __aenter__(self) -> 'GodSolver':
         return self
 
-    async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
+    async def __aexit__(self, *args) -> None:
         await self.close()
 
     async def solve(self, url: str, backend: str = "auto") -> bool:
@@ -1304,21 +1204,16 @@ async def main() -> None:
     import argparse
 
     parser = argparse.ArgumentParser(
-        description='The Godly CAPTCHA Solver - Advanced ML-powered solver',
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  python ca https://example.com --backend playwright
-  python ca https://example.com --headless --debug
-        """
+        description='CAPTCHA Solver - hCaptcha image challenges',
+        formatter_class=argparse.RawDescriptionHelpFormatter
     )
     parser.add_argument('url', nargs='?', help='Target URL with CAPTCHA')
     parser.add_argument('--backend', choices=['auto', 'playwright', 'selenium'], default='auto')
     parser.add_argument('--headless', action='store_true', help='Run in headless mode')
     parser.add_argument('--model-dir', type=str, help='Custom model directory')
     parser.add_argument('--debug', action='store_true', help='Enable debug logging')
-    parser.add_argument('--timeout', type=int, default=30, help='Page load timeout in seconds')
-    parser.add_argument('--confidence', type=float, default=0.45, help='Detection confidence threshold')
+    parser.add_argument('--timeout', type=int, default=30, help='Page load timeout')
+    parser.add_argument('--confidence', type=float, default=0.5, help='Detection threshold')
 
     args = parser.parse_args()
 
@@ -1340,7 +1235,7 @@ Examples:
                 logger.info(f"RESULT: {'SOLVED' if success else 'FAILED'}")
                 sys.exit(0 if success else 1)
             except KeyboardInterrupt:
-                logger.info("Interrupted by user")
+                logger.info("Interrupted")
                 sys.exit(130)
             except Exception as e:
                 logger.error(f"Fatal error: {e}\n{traceback.format_exc()}")
