@@ -144,23 +144,22 @@ class DiscordAutomation:
             await self._page.locator('input[name="password"]').fill(self._password)
             await self._human_pause()
             
-            month_select = self._page.getByRole("combobox", {"name": "Month"})
+            month_select = self._page.locator('select[name="month"]')
             await month_select.click()
-            months = ['January', 'February', 'March', 'April', 'May', 'June',
-                     'July', 'August', 'September', 'October', 'November', 'December']
-            await self._page.getByRole("option", {"name": random.choice(months)}).click()
+            month_val = str(random.randint(1, 12))
+            await month_select.select_option(month_val)
             await self._human_pause()
             
-            day_select = self._page.getByRole("combobox", {"name": "Day"})
+            day_select = self._page.locator('select[name="day"]')
             await day_select.click()
-            day = random.randint(1, 28)
-            await self._page.getByRole("option", {"name": str(day)}).click()
+            day_val = str(random.randint(1, 28))
+            await day_select.select_option(day_val)
             await self._human_pause()
             
-            year_select = self._page.getByRole("combobox", {"name": "Year"})
+            year_select = self._page.locator('select[name="year"]')
             await year_select.click()
-            year = random.randint(1990, 2003)
-            await self._page.getByRole("option", {"name": str(year)}).click()
+            year_val = str(random.randint(1990, 2003))
+            await year_select.select_option(year_val)
             await self._human_pause()
             
             await self._page.getByRole("button", {"name": "Create Account"}).click()
