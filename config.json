@@ -2,6 +2,7 @@
     "email": "test@example.com",
     "username": "discord_user_1234",
     "password": "SecurePassword123!",
-    "headless": false,
-    "camera_interval": 3
+    "headless": true,
+    "camera_interval": 3,
+    "web_port": 8080
 }
