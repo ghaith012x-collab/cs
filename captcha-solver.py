@@ -1,10 +1,3 @@
-#!/usr/bin/env python3
-"""
-Captcha-Solver.py
-The Godly Autonomous CAPTCHA Solver
-Local inference only. No APIs. No keys. Pure browser automation + vision.
-"""
-
 import os
 import sys
 import io
