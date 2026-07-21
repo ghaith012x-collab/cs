@@ -4,5 +4,5 @@
     "password": "SecurePassword123!",
     "headless": true,
     "camera_interval": 3,
-    "web_port": 8080
+    "web_port": 5000
 }
