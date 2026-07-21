@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 from typing import Optional
 
+from aiohttp import web
 from server import DiscordAutomation, run_discord_automation
 
 
@@ -13,14 +14,17 @@ class AppHost:
         self._automation: Optional[DiscordAutomation] = None
         self._running = False
         self._config_path = "config.json"
+        self._web_server = None
+        self._web_port = 8080
 
     def load_config(self, path: str = "config.json") -> dict:
         default_config = {
             "email": "test@example.com",
             "username": "user_{random}",
             "password": "Password123!",
-            "headless": False,
-            "camera_interval": 3
+            "headless": True,
+            "camera_interval": 3,
+            "web_port": 8080
         }
         
         if os.path.exists(path):
@@ -72,7 +76,7 @@ class AppHost:
         
         config = self.load_config(self._config_path)
         
-        self._automation = DiscordAutomation(headless=config.get('headless', False))
+        self._automation = DiscordAutomation(headless=config.get('headless', True))
         self._running = True
         
         try:
@@ -172,14 +176,54 @@ class AppHost:
             except Exception as e:
                 print(f"Error: {e}")
 
+    async def start_web_server(self, port: int = 8080) -> None:
+        self._web_port = port
+        
+        async def handle_status(request):
+            if self._automation:
+                return web.json_response({
+                    "running": self._running,
+                    "screenshots": len(self._automation.get_screenshots()),
+                    "email": self._automation._email if self._automation else "",
+                    "username": self._automation._username if self._automation else ""
+                })
+            return web.json_response({"running": False, "screenshots": 0})
+
+        async def handle_screenshot(request):
+            if self._automation:
+                b64 = self._automation.get_latest_screenshot()
+                if b64:
+                    return web.Response(text=b64, content_type='text/plain')
+            return web.Response(status=404)
+
+        async def handle_latest_screenshot(request):
+            if self._automation:
+                b64 = self._automation.get_latest_screenshot()
+                if b64:
+                    return web.Response(text=b64, content_type='image/png')
+            return web.Response(status=404)
+
+        app = web.Application()
+        app.router.add_get('/status', handle_status)
+        app.router.add_get('/screenshot', handle_screenshot)
+        app.router.add_get('/latest', handle_latest_screenshot)
+        
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, '0.0.0.0', port)
+        await site.start()
+        print(f"Web server started on port {port}")
+        return runner
+
 
 def create_sample_config() -> None:
     config = {
         "email": "test@example.com",
         "username": "discord_user_1234",
         "password": "SecurePassword123!",
-        "headless": False,
-        "camera_interval": 3
+        "headless": True,
+        "camera_interval": 3,
+        "web_port": 8080
     }
     
     with open("config.json", 'w') as f:
@@ -189,6 +233,21 @@ def create_sample_config() -> None:
 
 
 async def main():
+    import threading
+    
+    config = {}
+    try:
+        with open("config.json", 'r') as f:
+            config = json.load(f)
+    except:
+        pass
+    
+    web_port = config.get('web_port', 8080)
+    
+    app = AppHost()
+    
+    web_task = asyncio.create_task(app.start_web_server(web_port))
+    
     if len(sys.argv) > 1:
         arg = sys.argv[1]
         
@@ -197,7 +256,6 @@ async def main():
             return
         
         if arg == '--headless':
-            app = AppHost()
             config = app.load_config()
             config['headless'] = True
             app.save_config(config)
@@ -208,7 +266,6 @@ async def main():
             await run_discord_automation()
             return
     
-    app = AppHost()
     await app.run_shell()
 
 

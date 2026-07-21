@@ -29,7 +29,8 @@ RUN pip install --no-cache-dir \
     playwright==1.40.0 \
     opencv-python-headless==4.9.0.80 \
     numpy==1.26.4 \
-    aiofiles==23.1.0 && \
+    aiofiles==23.1.0 \
+    aiohttp==3.9.1 && \
     pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu torch==2.1.0
 
 RUN python -m playwright install chromium
