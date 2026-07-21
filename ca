@@ -158,8 +158,8 @@ class SolverConfig:
     headless: bool = False
     stealth: bool = True
     user_data_dir: Optional[str] = None
-    confidence_threshold: float = 0.42
-    medium_threshold: float = 0.3
+    confidence_threshold: float = 0.65
+    medium_threshold: float = 0.45
     iou_threshold: float = 0.45
     max_retries: int = 3
     challenge_timeout: int = 30
@@ -170,15 +170,8 @@ class SolverConfig:
     model_dir: Optional[Path] = None
     model_name: str = "yolo11s"
     viewport_jitter: bool = True
-    iou_threshold: float = 0.45
-    max_retries: int = 3
-    challenge_timeout: int = 30
-    viewport_width: int = 1920
-    viewport_height: int = 1080
-    human_like_mouse: bool = True
-    timeout: int = 30
-    model_dir: Optional[Path] = None
-    model_name: str = "yolo11s"
+    rate_limit_delay: float = 3.0
+    max_concurrent_sessions: int = 1
 
     def __post_init__(self) -> None:
         """Validate configuration after initialization."""
@@ -1404,16 +1397,23 @@ class PlaywrightSolver:
 # =============================================================================
 
 class SeleniumSolver:
-    """Selenium-based CAPTCHA solver."""
+    """Selenium-based CAPTCHA solver with rate limiting."""
 
     def __init__(self, config: SolverConfig):
         self.config = config
         self._scorer = Scorer(config)
         self._detector = ChallengeDetector(config)
         self._driver = None
+        self._last_solve_time = 0.0
 
     def solve(self, url: str) -> bool:
-        """Solve CAPTCHA at given URL."""
+        """Solve CAPTCHA at given URL with rate limiting."""
+        now = time.time()
+        wait_time = self.config.rate_limit_delay - (now - self._last_solve_time)
+        if wait_time > 0:
+            time.sleep(wait_time)
+        self._last_solve_time = time.time()
+        
         if not self._driver:
             self._init_driver()
 
@@ -1430,7 +1430,7 @@ class SeleniumSolver:
 
                 if self._solve_hcaptcha(state):
                     return True
-                time.sleep(1)
+                time.sleep(2)
 
             return False
 
@@ -1624,9 +1624,7 @@ class StealthPatcher:
                 '--disable-setuid-sandbox',
                 f'--window-size={viewport[0]},{viewport[1]}',
                 '--disable-webgl',
-                '--disable-web-security',
                 '--disable-features=IsolateOrigins,site-per-process',
-                '--disable-features=SameSiteByDefaultCookies,CookiesWithoutSameSiteMustBeSecure',
             ],
             'ignore_default_args': ['--enable-automation'],
         }
@@ -1646,9 +1644,7 @@ class StealthPatcher:
         options.add_argument(f'--window-size={config.viewport_width},{config.viewport_height}')
         options.add_argument(f'--user-agent={random.choice(StealthPatcher.USER_AGENTS)}')
         options.add_argument('--disable-webgl')
-        options.add_argument('--disable-web-security')
         options.add_argument('--disable-features=IsolateOrigins,site-per-process')
-        options.add_argument('--disable-features=SameSiteByDefaultCookies,CookiesWithoutSameSiteMustBeSecure')
         options.add_experimental_option('excludeSwitches', ['enable-automation'])
         options.add_experimental_option('useAutomationExtension', False)
         return options
@@ -1796,8 +1792,9 @@ class ShapeMatcher:
                 continue
             
             similarity = cv2.matchShapes(target_contours[0], cand_contours[0], cv2.CONTOURS_MATCH_I1)
+            shape_similarity = 1.0 / (1.0 + similarity)
             
-            if similarity < (1 - threshold):
+            if shape_similarity >= threshold:
                 matches.append(i)
         
         return matches
@@ -1967,13 +1964,35 @@ class Trainer:
         
         return self.metrics
     
-    def _train_epoch(self) -> float:
+    def _train_epoch(self, epoch: int) -> float:
         """Train for one epoch."""
-        return 0.5
+        if not self.train_data:
+            return 0.5
+        
+        total_loss = 0.0
+        for sample in self.train_data:
+            try:
+                confidence = sample.get('confidence', 0.5)
+                total_loss += abs(confidence - 0.5)
+            except Exception:
+                continue
+        
+        return total_loss / max(1, len(self.train_data))
     
-    def _validate(self) -> float:
+    def _validate(self, epoch: int) -> float:
         """Validate the model."""
-        return 0.45
+        if not self.val_data:
+            return 0.5
+        
+        total_loss = 0.0
+        for sample in self.val_data:
+            try:
+                confidence = sample.get('confidence', 0.5)
+                total_loss += abs(confidence - 0.5)
+            except Exception:
+                continue
+        
+        return total_loss / max(1, len(self.val_data))
 
 
 # =============================================================================
@@ -2094,10 +2113,11 @@ Examples:
     parser.add_argument('--model-dir', type=str, help='Custom model directory')
     parser.add_argument('--debug', action='store_true', help='Enable debug logging')
     parser.add_argument('--timeout', type=int, default=30, help='Page load timeout')
-    parser.add_argument('--confidence', type=float, default=0.42, help='Detection threshold')
+    parser.add_argument('--confidence', type=float, default=0.65, help='Detection threshold')
     parser.add_argument('--model-name', type=str, default='yolo11s',
                         choices=['yolov8n', 'yolo11s', 'yolo11m', 'yolo11l'],
                         help='YOLO model to use')
+    parser.add_argument('--rate-limit', type=float, default=3.0, help='Rate limit delay in seconds')
     parser.add_argument('--train', action='store_true', help='Run training mode')
     parser.add_argument('--train-data', type=str, help='Training data directory')
 
@@ -2111,6 +2131,7 @@ Examples:
         timeout=args.timeout,
         confidence_threshold=args.confidence,
         model_name=args.model_name,
+        rate_limit_delay=args.rate_limit,
     )
     if args.model_dir:
         config = config.with_model_dir(Path(args.model_dir))
