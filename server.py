@@ -96,9 +96,6 @@ class DiscordAutomation:
         if not self._page:
             await self.initialize()
         
-        await self._page.goto('https://discord.com/register', wait_until='networkidle')
-        await asyncio.sleep(2)
-        
         await self.capture_screenshot()
         
         success = await self._fill_registration_form()
@@ -131,85 +128,46 @@ class DiscordAutomation:
 
     async def _fill_registration_form(self) -> bool:
         try:
-            email_input = await self._page.wait_for_selector(
-                'input[type="email"], input[name="email"], #email',
-                timeout=10000
-            )
+            await self._page.goto('https://discord.com/register', wait_until='networkidle')
+            await asyncio.sleep(2)
             
-            email = self._email or await self.read_email_from_file('test/site.html')
-            await email_input.fill(email)
+            await self._page.locator('input[name="email"]').fill(self._email)
             await self._human_pause()
             
-            username_input = await self._page.wait_for_selector(
-                'input[autocomplete="username"], input[name="username"], #username',
-                timeout=10000
-            )
-            await username_input.fill(self._username)
+            display_name = self._username[:15] if len(self._username) > 15 else self._username
+            await self._page.locator('input[name="global_name"]').fill(display_name)
             await self._human_pause()
             
-            password_input = await self._page.wait_for_selector(
-                'input[type="password"], input[name="password"], #password',
-                timeout=10000
-            )
-            await password_input.fill(self._password)
+            await self._page.locator('input[name="username"]').fill(self._username)
             await self._human_pause()
             
-            confirm_input = await self._page.query_selector(
-                'input[autocomplete="new-password"], input[name="password-confirm"], #password-confirm'
-            )
-            if confirm_input:
-                await confirm_input.fill(self._password)
-                await self._human_pause()
+            await self._page.locator('input[name="password"]').fill(self._password)
+            await self._human_pause()
             
-            dob_selectors = [
-                'select[name="day"], select#day',
-                'select[name="month"], select#month',
-                'select[name="year"], select#year'
-            ]
+            month_select = self._page.getByRole("combobox", {"name": "Month"})
+            await month_select.click()
+            months = ['January', 'February', 'March', 'April', 'May', 'June',
+                     'July', 'August', 'September', 'October', 'November', 'December']
+            await self._page.getByRole("option", {"name": random.choice(months)}).click()
+            await self._human_pause()
             
-            day_select = await self._page.query_selector(dob_selectors[0])
-            month_select = await self._page.query_selector(dob_selectors[1])
-            year_select = await self._page.query_selector(dob_selectors[2])
+            day_select = self._page.getByRole("combobox", {"name": "Day"})
+            await day_select.click()
+            day = random.randint(1, 28)
+            await self._page.getByRole("option", {"name": str(day)}).click()
+            await self._human_pause()
             
-            if day_select:
-                await day_select.select_option(str(random.randint(1, 28)))
-                await self._human_pause()
+            year_select = self._page.getByRole("combobox", {"name": "Year"})
+            await year_select.click()
+            year = random.randint(1990, 2003)
+            await self._page.getByRole("option", {"name": str(year)}).click()
+            await self._human_pause()
             
-            if month_select:
-                await month_select.select_option(str(random.randint(1, 12)))
-                await self._human_pause()
+            await self._page.getByRole("button", {"name": "Create Account"}).click()
+            await asyncio.sleep(3)
             
-            if year_select:
-                years = [str(y) for y in range(1990, 2005)]
-                await year_select.select_option(random.choice(years))
-                await self._human_pause()
-            
-            submit_selectors = [
-                'button[type="submit"]',
-                'button[name="submit"]',
-                '#provided-choices-recaptcha-response button',
-                'div[role="button"]:has-text("Next")',
-                'div[role="button"]:has-text("Continue")'
-            ]
-            
-            submit_btn = None
-            for selector in submit_selectors:
-                try:
-                    submit_btn = await self._page.query_selector(selector)
-                    if submit_btn:
-                        break
-                except:
-                    continue
-            
-            if submit_btn:
-                await self._human_click(submit_btn)
-                await asyncio.sleep(3)
-                
-                if await self._solve_hcaptcha_if_present():
-                    return True
-                else:
-                    return False
-            
+            if await self._solve_hcaptcha_if_present():
+                return True
             return False
             
         except Exception as e:
