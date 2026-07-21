@@ -10,7 +10,7 @@ import urllib.request
 import urllib.error
 import hashlib
 from pathlib import Path
-from typing import Optional, List, Dict, Tuple, Any, Final, Protocol
+from typing import Optional, List, Dict, Tuple, Any, Final, Protocol, Union
 from dataclasses import dataclass, field, replace
 from enum import Enum, auto
 from threading import RLock
