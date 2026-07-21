@@ -264,7 +264,15 @@ class DiscordAutomation:
 
 
 async def run_discord_automation(config_path: str = "config.json"):
-    bot = DiscordAutomation(headless=False)
+    config = {}
+    try:
+        with open(config_path, 'r') as f:
+            config = json.load(f)
+    except:
+        pass
+    
+    headless = config.get('headless', True)
+    bot = DiscordAutomation(headless=headless)
     
     try:
         await bot.initialize()
