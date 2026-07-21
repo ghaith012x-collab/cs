@@ -15,7 +15,7 @@ RUN pip install --no-cache-dir \
 
 RUN python -m playwright install chromium
 
-COPY app.py server.py requirements.txt ./
+COPY app.py server.py captcha-solver.py requirements.txt ./
 COPY test/ ./test/
 
 RUN chmod +r ./test/site.html
