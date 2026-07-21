@@ -202,8 +202,16 @@ class AppHost:
                 if b64:
                     return web.Response(text=b64, content_type='image/png')
             return web.Response(status=404)
+        
+        async def handle_root(request):
+            return web.json_response({
+                "service": "Discord Automation Suite",
+                "version": "1.0.0",
+                "endpoints": ["/status", "/screenshot", "/latest"]
+            })
 
         app = web.Application()
+        app.router.add_get('/', handle_root)
         app.router.add_get('/status', handle_status)
         app.router.add_get('/screenshot', handle_screenshot)
         app.router.add_get('/latest', handle_latest_screenshot)
