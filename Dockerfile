@@ -11,7 +11,7 @@ RUN pip install --no-cache-dir \
     playwright==1.40.0 \
     opencv-python==4.8.0.76 \
     numpy==1.24.3 \
-    aiofiles==23.0.0
+    aiofiles==23.1.0
 
 RUN python -m playwright install chromium
 
