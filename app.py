@@ -248,13 +248,12 @@ async def main():
     except:
         pass
     
-    web_port = config.get('web_port', 8080)
+    web_port = config.get('web_port', 5000)
+    headless = config.get('headless', True)
     
     app = AppHost()
     
-    headless = config.get('headless', True)
-    
-    web_task = asyncio.create_task(app.start_web_server(web_port))
+    await app.start_web_server(web_port)
     
     if len(sys.argv) > 1:
         arg = sys.argv[1]
@@ -267,8 +266,15 @@ async def main():
             await run_discord_automation()
             return
     
-    await app.start_automation()
-    await app.run_shell()
+    if headless:
+        await app.start_automation()
+        try:
+            while True:
+                await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            pass
+    else:
+        await app.run_shell()
 
 
 if __name__ == "__main__":
