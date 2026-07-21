@@ -1,24 +1,3 @@
-"""
-Advanced CAPTCHA Solver - hCaptcha image challenges with ML intelligence.
-
-This module provides a vision pipeline optimized for CAPTCHA tile classification
-using YOLO11, CLIP embeddings, ensemble voting, and calibrated probabilities.
-
-Key improvements:
-1. YOLO11s/m for better small object detection on CAPTCHA tiles
-2. Calibrated confidence thresholds via ROC analysis
-3. Multi-model ensemble with quality-aware voting
-4. Additional solvers: Slider, Shape matching, Object alignment
-5. Training loop for continuous improvement
-6. Advanced stealth with fingerprint spoofing
-
-Architecture:
-- Detector: YOLO11 for object detection on tiles
-- EmbeddingModel: CLIP/ViT for semantic embeddings
-- Preprocessor: Multi-representation image processing
-- Scorer: Ensemble voting with calibrated thresholds
-"""
-
 import sys
 import re
 import time
