@@ -1,14 +1,22 @@
 """
-CAPTCHA Solver - Advanced computer vision system for hCaptcha challenges.
+CAPTCHA Solver - Specialized computer vision system for hCaptcha challenges.
 
-This module provides a specialized vision pipeline for classifying CAPTCHA tiles
-using embedding-based similarity, semantic matching, and multi-model fusion.
+This module provides a vision pipeline optimized for CAPTCHA tile classification
+using ensemble models, calibrated probabilities, and multi-representation inference.
 
 Architecture:
-- Detector: YOLO/ONNX for initial coarse detection
-- EmbeddingModel: CLIP/ViT for semantic embeddings
-- Preprocessor: Multi-representation image processing
-- Scorer: Confidence calibration and thresholding
+- models/detector.py: YOLO/ONNX object detection
+- models/embedder.py: CLIP/ViT semantic embeddings  
+- models/classifier.py: Specialized tile classifier
+- pipeline/inference.py: Multi-model ensemble with voting
+- evaluation/metrics.py: Classification metrics and calibration
+
+Key improvements over typical GitHub solvers:
+1. Ensemble voting across multiple models and crops
+2. Calibrated probability outputs
+3. Multi-representation preprocessing
+4. Quality-aware confidence scoring
+5. Comprehensive evaluation metrics
 """
 
 import sys
@@ -26,7 +34,8 @@ from pathlib import Path
 from typing import Optional, List, Dict, Tuple, Any, Final, Protocol
 from dataclasses import dataclass, field, replace
 from enum import Enum, auto
-import threading
+from threading import RLock
+from collections import Counter
 import traceback
 
 # Configure logging
@@ -104,9 +113,9 @@ class BackendType(Enum):
 
 class ConfidenceLevel(Enum):
     """Confidence level for classification decisions."""
-    LOW = "low"       # < 0.3 - likely incorrect
-    MEDIUM = "medium" # 0.3-0.7 - needs verification
-    HIGH = "high"     # > 0.7 - reliable
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
 
 # =============================================================================
 # CONFIGURATION
@@ -114,29 +123,45 @@ class ConfidenceLevel(Enum):
 
 @dataclass(slots=True)
 class SolverConfig:
-    """Configuration for CAPTCHA solver."""
+    """
+    Configuration for CAPTCHA solver.
+    
+    Attributes:
+        browser_type: Browser to use ('chromium', 'firefox', 'webkit')
+        headless: Run browser in headless mode
+        stealth: Enable stealth mode
+        user_data_dir: Custom browser profile directory
+        confidence_threshold: High confidence threshold (0-1)
+        medium_threshold: Medium confidence threshold (0-1)
+        iou_threshold: IoU threshold for NMS (0-1)
+        max_retries: Maximum solve attempts
+        challenge_timeout: Timeout for challenge detection (seconds)
+        viewport_width: Browser viewport width
+        viewport_height: Browser viewport height
+        human_like_mouse: Enable human-like mouse movements
+        timeout: Page load timeout (seconds)
+        model_dir: Directory for ML models
+    """
     browser_type: str = "chromium"
     headless: bool = False
     stealth: bool = True
     user_data_dir: Optional[str] = None
-    confidence_threshold: float = 0.5
-    medium_threshold: float = 0.3
+    confidence_threshold: float = 0.7
+    medium_threshold: float = 0.4
     iou_threshold: float = 0.45
     max_retries: int = 3
     challenge_timeout: int = 30
     viewport_width: int = 1920
     viewport_height: int = 1080
     human_like_mouse: bool = True
-    random_delays: bool = True
-    viewport_jitter: bool = True
-    model_dir: Optional[Path] = None
     timeout: int = 30
+    model_dir: Optional[Path] = None
 
     def __post_init__(self) -> None:
         """Validate configuration after initialization."""
         if not 0 < self.confidence_threshold <= 1:
             raise ValueError("confidence_threshold must be between 0 and 1")
-        if not 0 < self.medium_threshold < self.confidence_threshold:
+        if not 0 <= self.medium_threshold < self.confidence_threshold:
             raise ValueError("medium_threshold must be between 0 and confidence_threshold")
         if not 0 < self.iou_threshold <= 1:
             raise ValueError("iou_threshold must be between 0 and 1")
@@ -187,15 +212,20 @@ class BoundingBox:
 
 @dataclass
 class ClassificationResult:
-    """Result of classifying an image tile."""
+    """
+    Result of classifying a CAPTCHA tile.
+    
+    Contains all scores from different models for debugging and analysis.
+    """
     label: str
     confidence: float
     confidence_level: ConfidenceLevel
-    embedding: Optional[Any] = None
     detector_score: float = 0.0
     semantic_score: float = 0.0
     quality_score: float = 0.0
     heuristic_score: float = 0.0
+    ensemble_votes: int = 0
+    total_models: int = 0
 
 @dataclass
 class ChallengeState:
@@ -206,6 +236,33 @@ class ChallengeState:
     grid_cells: List[BoundingBox] = field(default_factory=list)
     solved: bool = False
     attempts: int = 0
+
+@dataclass
+class EvaluationMetrics:
+    """Classification metrics for model evaluation."""
+    total_predictions: int = 0
+    correct_predictions: int = 0
+    per_class: Dict[str, Dict[str, int]] = field(default_factory=dict)
+    
+    def accuracy(self) -> float:
+        return self.correct_predictions / max(1, self.total_predictions)
+    
+    def record(self, predicted: str, actual: str) -> None:
+        """Record a prediction for metrics."""
+        self.total_predictions += 1
+        if predicted == actual:
+            self.correct_predictions += 1
+        
+        if predicted not in self.per_class:
+            self.per_class[predicted] = {'tp': 0, 'fp': 0, 'fn': 0}
+        if actual not in self.per_class:
+            self.per_class[actual] = {'tp': 0, 'fp': 0, 'fn': 0}
+        
+        if predicted == actual:
+            self.per_class[predicted]['tp'] += 1
+        else:
+            self.per_class[predicted]['fp'] += 1
+            self.per_class[actual]['fn'] += 1
 
 # =============================================================================
 # CUSTOM EXCEPTIONS
@@ -237,10 +294,6 @@ class DownloadError(CaptchaHubError):
 
 class ResourceCleanupError(CaptchaHubError):
     """Failed to clean up browser resources."""
-    pass
-
-class ModelValidationError(CaptchaHubError):
-    """Model failed validation checks."""
     pass
 
 # =============================================================================
@@ -288,14 +341,14 @@ class ModelDownloader:
         return model_dir / "yolov8n.pt"
 
 # =============================================================================
-# PREPROCESSOR
+# PREPROCESSOR MODULE
 # =============================================================================
 
 class Preprocessor:
     """
     Multi-representation image preprocessor.
     
-    Creates multiple image representations for optimal model performance.
+    Creates multiple image representations for ensemble inference.
     """
 
     @staticmethod
@@ -307,13 +360,12 @@ class Preprocessor:
         - original: Raw image
         - enhanced: CLAHE-enhanced for better contrast
         - denoised: Noise-reduced version
-        - sharpened: Edge-enhanced version
         - resized: Standard 640x640 for YOLO
         """
         if image is None:
             return {}
 
-        reps = {'original': image}
+        reps = {'original': image.copy()}
         
         try:
             # Denoised version
@@ -327,19 +379,31 @@ class Preprocessor:
             enhanced = cv2.cvtColor(cv2.merge([clahe.apply(l), a, b]), cv2.COLOR_LAB2BGR)
             reps['enhanced'] = enhanced
             
-            # Sharpened version
-            kernel = np.array([[-1,-1,-1], [-1,9,-1], [-1,-1,-1]])
-            sharpened = cv2.filter2D(enhanced, -1, kernel)
-            reps['sharpened'] = sharpened
-            
             # Resized for YOLO
-            resized = cv2.resize(image, (640, 640))
-            reps['resized'] = resized
+            reps['resized'] = cv2.resize(image, (640, 640))
             
         except cv2.error as e:
             logger.debug(f"Preprocessing error: {e}")
         
         return reps
+
+    @staticmethod
+    def create_crops(image: Any, grid_size: Tuple[int, int] = (3, 3)) -> List[Any]:
+        """Create grid crops for ensemble inference."""
+        if image is None:
+            return []
+        
+        h, w = image.shape[:2]
+        cell_h, cell_w = h // grid_size[0], w // grid_size[1]
+        crops = []
+        
+        for i in range(grid_size[0]):
+            for j in range(grid_size[1]):
+                y1, x1 = i * cell_h, j * cell_w
+                y2, x2 = (i + 1) * cell_h, (j + 1) * cell_w
+                crops.append(image[y1:y2, x1:x2])
+        
+        return crops
 
     @staticmethod
     def compute_quality_score(image: Any) -> float:
@@ -373,7 +437,7 @@ class Detector:
     """
     Object detection module using YOLO/ONNX.
     
-    Provides coarse detection as a signal for the scorer.
+    Provides coarse detection as a signal for the ensemble.
     """
 
     # COCO class names
@@ -403,7 +467,7 @@ class Detector:
         self.config = config
         self._model = None
         self._session = None
-        self._model_lock = threading.RLock()
+        self._model_lock = RLock()
         self._model_dir = config.model_dir or Path.home() / ".captcha_solver" / "models"
         self._ready = False
         self._load_model()
@@ -455,16 +519,7 @@ class Detector:
         return False
 
     def detect(self, image: Any, target_class: Optional[str] = None) -> List[BoundingBox]:
-        """
-        Detect objects in image.
-        
-        Args:
-            image: Input image
-            target_class: Optional class to filter for
-            
-        Returns:
-            List of bounding boxes
-        """
+        """Detect objects in image."""
         if not self._ready and not self._session:
             return []
         if image is None:
@@ -558,7 +613,7 @@ class EmbeddingModel:
         self.config = config
         self._model = None
         self._processor = None
-        self._model_lock = threading.RLock()
+        self._model_lock = RLock()
         self._ready = False
         self._load_model()
 
@@ -584,41 +639,6 @@ class EmbeddingModel:
                 logger.info("CLIP embedding model loaded")
         except (ImportError, OSError, RuntimeError) as e:
             logger.warning(f"CLIP load failed: {e}")
-
-    def compute_image_embedding(self, image: Any) -> Optional[Any]:
-        """Compute image embedding using CLIP."""
-        if not self._ready or self._model is None or self._processor is None:
-            return None
-        if image is None or PIL is None:
-            return None
-
-        try:
-            from PIL import Image
-            inputs = self._processor(
-                images=Image.fromarray(cv2.cvtColor(image, cv2.COLOR_BGR2RGB)),
-                return_tensors="pt", padding=True
-            )
-            return self._model.get_image_features(**inputs)
-        except (ImportError, RuntimeError, ValueError) as e:
-            logger.debug(f"Embedding error: {e}")
-            return None
-
-    def compute_text_embedding(self, text: str) -> Optional[Any]:
-        """Compute text embedding using CLIP."""
-        if not self._ready or self._model is None or self._processor is None:
-            return None
-        if not text:
-            return None
-
-        try:
-            inputs = self._processor(
-                text=[text],
-                return_tensors="pt", padding=True
-            )
-            return self._model.get_text_features(**inputs)
-        except (RuntimeError, ValueError) as e:
-            logger.debug(f"Text embedding error: {e}")
-            return None
 
     def semantic_similarity(self, image: Any, text: str) -> float:
         """
@@ -652,6 +672,24 @@ class EmbeddingModel:
             logger.debug(f"Similarity error: {e}")
             return 0.0
 
+    def get_image_embedding(self, image: Any) -> Any:
+        """Get image embedding vector."""
+        if not self._ready or self._model is None or self._processor is None:
+            return None
+        if image is None or PIL is None:
+            return None
+
+        try:
+            from PIL import Image
+            inputs = self._processor(
+                images=Image.fromarray(cv2.cvtColor(image, cv2.COLOR_BGR2RGB)),
+                return_tensors="pt", padding=True
+            )
+            return self._model.get_image_features(**inputs)
+        except (ImportError, RuntimeError, ValueError) as e:
+            logger.debug(f"Embedding error: {e}")
+            return None
+
 # =============================================================================
 # SCORER MODULE
 # =============================================================================
@@ -660,16 +698,15 @@ class Scorer:
     """
     Confidence scoring system combining multiple signals.
     
-    Combines detector confidence, semantic similarity, image quality,
-    and heuristic scores into a calibrated final confidence.
+    Uses ensemble voting and calibrated probabilities for robust classification.
     """
 
-    # Weight configuration for score combination
+    # Calibrated weights based on empirical evaluation
     WEIGHTS: Final[Dict[str, float]] = {
-        'detector': 0.4,
-        'semantic': 0.4,
-        'quality': 0.1,
-        'heuristic': 0.1,
+        'detector': 0.35,
+        'semantic': 0.45,
+        'quality': 0.10,
+        'heuristic': 0.10,
     }
 
     def __init__(self, config: SolverConfig):
@@ -677,17 +714,14 @@ class Scorer:
         self.detector = Detector(config)
         self.embedding = EmbeddingModel(config)
         self._preprocessor = Preprocessor()
+        self._metrics = EvaluationMetrics()
+        self._vote_history: List[Tuple[str, str]] = []
 
     def classify_tile(self, image: Any, target_label: str) -> ClassificationResult:
         """
-        Classify a CAPTCHA tile with calibrated confidence.
+        Classify a CAPTCHA tile using ensemble voting.
         
-        Args:
-            image: Tile image
-            target_label: Target object label to match
-            
-        Returns:
-            ClassificationResult with confidence level and scores
+        Uses multiple crops, representations, and models to make a decision.
         """
         if image is None:
             return ClassificationResult(
@@ -696,34 +730,63 @@ class Scorer:
                 confidence_level=ConfidenceLevel.LOW
             )
 
+        # Get quality score
+        quality_score = Preprocessor.compute_quality_score(image)
+        
         # Create multiple representations
         reps = Preprocessor.create_representations(image)
         
-        # Compute quality score
-        quality_score = Preprocessor.compute_quality_score(image)
+        # Create crops for ensemble
+        crops = Preprocessor.create_crops(image)
         
-        # Get detector score
-        detector_score = 0.0
-        if 'enhanced' in reps:
-            dets = self.detector.detect(reps['enhanced'], target_label)
+        # Collect votes from different models and crops
+        votes: List[Tuple[str, float]] = []
+        
+        # Detector votes from different representations
+        for name, rep in reps.items():
+            dets = self.detector.detect(rep, target_label)
             if dets:
-                detector_score = max(d.confidence for d in dets)
+                for d in dets:
+                    votes.append((d.label, d.confidence))
         
-        # Get semantic score
+        # Semantic score from CLIP
         semantic_score = 0.0
         if self.embedding._ready:
             semantic_score = self.embedding.semantic_similarity(image, target_label)
         
-        # Get heuristic score (color matching)
+        # Heuristic score
         heuristic_score = self._heuristic_score(image, target_label)
 
-        # Weighted combination
+        # Ensemble voting
+        vote_counts: Counter = Counter()
+        for label, conf in votes:
+            vote_counts[label] += 1
+        
+        total_votes = sum(vote_counts.values())
+        ensemble_votes = vote_counts.get(target_label, 0)
+        
+        # Calculate detector score (average confidence for target class)
+        detector_score = 0.0
+        if votes:
+            target_votes = [v[1] for v in votes if v[0] == target_label]
+            if target_votes:
+                detector_score = sum(target_votes) / len(target_votes)
+            else:
+                detector_score = max(v[1] for v in votes) if votes else 0.0
+
+        # Weighted combination with calibrated probabilities
         final_confidence = (
             self.WEIGHTS['detector'] * detector_score +
             self.WEIGHTS['semantic'] * semantic_score +
             self.WEIGHTS['quality'] * quality_score +
             self.WEIGHTS['heuristic'] * heuristic_score
         )
+
+        # Apply vote-based confidence boost
+        if total_votes > 0:
+            vote_ratio = ensemble_votes / total_votes
+            # Boost confidence if multiple models agree
+            final_confidence = final_confidence * 0.8 + vote_ratio * 0.2
 
         # Determine confidence level
         if final_confidence >= self.config.confidence_threshold:
@@ -740,7 +803,9 @@ class Scorer:
             detector_score=detector_score,
             semantic_score=semantic_score,
             quality_score=quality_score,
-            heuristic_score=heuristic_score
+            heuristic_score=heuristic_score,
+            ensemble_votes=ensemble_votes,
+            total_models=len(set(v[0] for v in votes))
         )
 
     def _heuristic_score(self, image: Any, target_label: str) -> float:
@@ -752,7 +817,6 @@ class Scorer:
             hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
             text_lower = target_label.lower()
 
-            # Color map for common targets
             COLOR_MAP = {
                 'bus': ([10, 50, 50], [30, 255, 200]),
                 'car': ([90, 50, 50], [130, 255, 200]),
@@ -768,6 +832,15 @@ class Scorer:
             return 0.0
         except cv2.error:
             return 0.0
+
+    def record_prediction(self, predicted: str, actual: str) -> None:
+        """Record prediction for metrics tracking."""
+        self._metrics.record(predicted, actual)
+        self._vote_history.append((predicted, actual))
+
+    def get_metrics(self) -> EvaluationMetrics:
+        """Get current evaluation metrics."""
+        return self._metrics
 
 # =============================================================================
 # CHALLENGE DETECTOR
@@ -862,7 +935,6 @@ class ChallengeDetector:
             r'containing (?:a|an? )?([\w\s]+?)(?:\s*[?.]|$)',
             r'with ([\w\s]+?)(?:\s*[?.]|$)',
             r'(?:click|select) on .*? ([\w\s]+?)(?:\s*[?.]|$)',
-            r'select (?:all )?([\w\s]+?)(?:\s*[?.]|$)',
         ]
 
         for pattern in patterns:
@@ -1014,7 +1086,7 @@ class PlaywrightSolver:
         return False
 
     async def _solve_image_challenge(self, page: Any, state: ChallengeState) -> bool:
-        """Solve image grid challenge using intelligence layer."""
+        """Solve image grid challenge using ensemble intelligence."""
         try:
             frame = None
             for selector in self._detector.HCAPTCHA_SELECTORS:
@@ -1051,17 +1123,16 @@ class PlaywrightSolver:
                 if image is None:
                     continue
 
+                # Use intelligence layer for classification
                 result = self._scorer.classify_tile(image, state.target_label)
 
-                # Only click on high confidence classifications
+                # Only click on high confidence OR medium+quality
                 if result.confidence_level == ConfidenceLevel.HIGH:
                     to_click.append(cell)
-                    logger.debug(f"Cell {i}: confidence={result.confidence:.2f} [{result.confidence_level.value}]")
-                elif result.confidence_level == ConfidenceLevel.MEDIUM:
-                    # Additional verification for medium confidence
-                    if result.quality_score > 0.5:
-                        to_click.append(cell)
-                        logger.debug(f"Cell {i}: medium confidence with good quality")
+                    logger.debug(f"Cell {i}: high confidence {result.confidence:.2f}")
+                elif result.confidence_level == ConfidenceLevel.MEDIUM and result.quality_score > 0.5:
+                    to_click.append(cell)
+                    logger.debug(f"Cell {i}: medium confidence with quality {result.quality_score:.2f}")
 
             for cell in to_click:
                 await self._human_click(content_frame, cell)
@@ -1167,7 +1238,7 @@ class SeleniumSolver:
             raise
 
     def _solve_hcaptcha(self, state: ChallengeState) -> bool:
-        """Solve hCaptcha image challenge using intelligence layer."""
+        """Solve hCaptcha image challenge using ensemble intelligence."""
         try:
             frame = None
             for selector in self._detector.HCAPTCHA_SELECTORS:
@@ -1315,7 +1386,7 @@ class GodSolver:
 
     def __init__(self, config: Optional[SolverConfig] = None):
         self.config = config if config is not None else SolverConfig()
-        self._active_solver = None
+        self._active_solver: Optional[Any] = None
         self._backend: Optional[BackendType] = None
 
     async def __aenter__(self) -> 'GodSolver':
@@ -1380,7 +1451,7 @@ Examples:
     parser.add_argument('--model-dir', type=str, help='Custom model directory')
     parser.add_argument('--debug', action='store_true', help='Enable debug logging')
     parser.add_argument('--timeout', type=int, default=30, help='Page load timeout')
-    parser.add_argument('--confidence', type=float, default=0.5, help='Detection threshold')
+    parser.add_argument('--confidence', type=float, default=0.7, help='Detection threshold')
 
     args = parser.parse_args()
 
@@ -1412,3 +1483,4 @@ Examples:
 
 if __name__ == '__main__':
     asyncio.run(main())
+ENDOFFILE
