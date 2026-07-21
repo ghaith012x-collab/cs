@@ -20,7 +20,7 @@ COPY test/ ./test/
 
 RUN chmod +r ./test/site.html
 
-EXPOSE 3000
+EXPOSE 8080
 
 ENV PYTHONUNBUFFERED=1
 
