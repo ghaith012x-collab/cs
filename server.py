@@ -58,8 +58,12 @@ class DiscordAutomation:
             config = json.load(f)
         
         self._email = config.get('email', '')
-        self._username = config.get('username', f'user_{random.randint(1000, 9999)}')
+        self._username = config.get('username', self._generate_username())
         self._password = config.get('password', self._generate_password())
+    
+    def _generate_username(self) -> str:
+        chars = 'abcdefghijklmnopqrstuvwxyz'
+        return ''.join(random.choice(chars) for _ in range(8))
 
     def _generate_password(self) -> str:
         chars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%^&*'
@@ -172,9 +176,7 @@ class DiscordAutomation:
                 await self._human_pause()
             
             if month_select:
-                months = ['January', 'February', 'March', 'April', 'May', 'June',
-                         'July', 'August', 'September', 'October', 'November', 'December']
-                await month_select.select_option(random.choice(months))
+                await month_select.select_option(str(random.randint(1, 12)))
                 await self._human_pause()
             
             if year_select:
