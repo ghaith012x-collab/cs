@@ -233,8 +233,6 @@ def create_sample_config() -> None:
 
 
 async def main():
-    import threading
-    
     config = {}
     try:
         with open("config.json", 'r') as f:
@@ -246,6 +244,8 @@ async def main():
     
     app = AppHost()
     
+    headless = config.get('headless', True)
+    
     web_task = asyncio.create_task(app.start_web_server(web_port))
     
     if len(sys.argv) > 1:
@@ -255,17 +255,11 @@ async def main():
             create_sample_config()
             return
         
-        if arg == '--headless':
-            config = app.load_config()
-            config['headless'] = True
-            app.save_config(config)
-            await run_discord_automation()
-            return
-        
         if arg == '--single':
             await run_discord_automation()
             return
     
+    await app.start_automation()
     await app.run_shell()
 
 
