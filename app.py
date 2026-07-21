@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import json
 import os
 import sys
@@ -201,11 +202,14 @@ class AppHost:
             if self._automation:
                 b64 = self._automation.get_latest_screenshot()
                 if b64:
-                    return web.Response(text=b64, content_type='image/png')
+                    try:
+                        return web.Response(body=base64.b64decode(b64), content_type='image/png')
+                    except Exception as e:
+                        print(f"Screenshot decode error: {e}", flush=True)
             return web.Response(status=404)
         
         async def handle_root(request):
-            return web.Response(text="""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>Discord Automation</title><style>body{font-family:system-ui;background:#111827;color:#f9fafb;max-width:760px;margin:0 auto;padding:28px}input,button{font-size:16px;padding:12px;border-radius:8px;border:0;margin:5px 0}input{width:calc(100% - 24px)}button{cursor:pointer;background:#5865f2;color:white;margin-right:8px}.stop{background:#ef4444}#status{margin:18px 0;color:#a7f3d0}img{width:100%;min-height:180px;object-fit:contain;background:#000;border-radius:10px}small{color:#9ca3af}</style></head><body><h1>Discord Automation</h1><p><small>Railway live dashboard</small></p><label>Email</label><input id="email" type="email" placeholder="your email"><div><button onclick="start()">Start</button><button class="stop" onclick="stop()">Stop</button></div><div id="status">Checking status…</div><img id="shot" alt="Live view will appear here"><script>async function api(path,opts){return fetch(path,opts)}async function start(){let email=document.getElementById('email').value;let r=await api('/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email})});document.getElementById('status').textContent=await r.text()}async function stop(){let r=await api('/stop',{method:'POST'});document.getElementById('status').textContent=await r.text()}async function refresh(){try{let r=await api('/status');let x=await r.json();document.getElementById('status').textContent=x.running?'Running':'Stopped';if(x.running)document.getElementById('shot').src='/latest?'+Date.now()}catch(e){document.getElementById('status').textContent='Unable to reach service'}}setInterval(refresh,3000);refresh()</script></body></html>""", content_type='text/html')
+            return web.Response(text="""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>Discord Automation</title><style>body{font-family:system-ui;background:#111827;color:#f9fafb;max-width:760px;margin:0 auto;padding:28px}input,button{font-size:16px;padding:12px;border-radius:8px;border:0;margin:5px 0}input{width:calc(100% - 24px)}button{cursor:pointer;background:#5865f2;color:white;margin-right:8px}.stop{background:#ef4444}#status{margin:18px 0;color:#a7f3d0}img{width:100%;min-height:180px;object-fit:contain;background:#000;border-radius:10px}small{color:#9ca3af}</style></head><body><h1>Discord Automation</h1><p><small>Railway live dashboard</small></p><label>Email</label><input id="email" type="email" placeholder="your email"><div><button onclick="start()">Start</button><button class="stop" onclick="stop()">Stop</button></div><div id="status">Checking status…</div><img id="shot" alt="Live view will appear here"><script>async function api(path,opts){return fetch(path,opts)}async function start(){let email=document.getElementById('email').value;let r=await api('/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email})});document.getElementById('status').textContent=await r.text()}async function stop(){let r=await api('/stop',{method:'POST'});document.getElementById('status').textContent=await r.text()}async function refresh(){try{let r=await api('/status');let x=await r.json();document.getElementById('status').textContent=x.running?(x.screenshots?'Running · '+x.screenshots+' screenshot(s)':'Running · waiting for first screenshot'):'Stopped';if(x.screenshots)document.getElementById('shot').src='/latest?'+Date.now()}catch(e){document.getElementById('status').textContent='Unable to reach service'}}setInterval(refresh,3000);refresh()</script></body></html>""", content_type='text/html')
 
         async def handle_start(request):
             if self._running:
