@@ -44,4 +44,4 @@ EXPOSE 8080
 
 ENV PYTHONUNBUFFERED=1
 
-CMD ["xvfb-run", "-a", "python", "app.py", "--headless"]
+CMD ["xvfb-run", "-a", "python", "app.py"]
