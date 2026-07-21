@@ -152,6 +152,7 @@ class SolverConfig:
         timeout: Page load timeout (seconds)
         model_dir: Directory for ML models
         model_name: YOLO model to use (yolov8n, yolo11s, yolo11m)
+        viewport_jitter: Add random viewport jitter for stealth
     """
     browser_type: str = "chromium"
     headless: bool = False
@@ -159,6 +160,16 @@ class SolverConfig:
     user_data_dir: Optional[str] = None
     confidence_threshold: float = 0.42
     medium_threshold: float = 0.3
+    iou_threshold: float = 0.45
+    max_retries: int = 3
+    challenge_timeout: int = 30
+    viewport_width: int = 1920
+    viewport_height: int = 1080
+    human_like_mouse: bool = True
+    timeout: int = 30
+    model_dir: Optional[Path] = None
+    model_name: str = "yolo11s"
+    viewport_jitter: bool = True
     iou_threshold: float = 0.45
     max_retries: int = 3
     challenge_timeout: int = 30
@@ -502,6 +513,7 @@ class Detector:
         self._model_lock = RLock()
         self._model_dir = config.model_dir or Path.home() / ".captcha_solver" / "models"
         self._ready = False
+        self._model_name = getattr(config, 'model_name', 'yolo11s')
         self._load_model()
 
     def _load_model(self) -> None:
@@ -518,19 +530,22 @@ class Detector:
             self._load_onnx()
 
     def _load_yolo(self) -> bool:
-        """Load YOLOv8 model."""
+        """Load YOLO model (supports both v8 and v11)."""
         try:
-            model_path = ModelDownloader.get_yolo_model_path(self._model_dir)
+            model_path = ModelDownloader.get_yolo_model_path(self._model_dir, self._model_name)
             if not model_path.exists():
-                logger.info(f"Downloading YOLOv8n to {model_path}")
-                if not ModelDownloader.download(ModelDownloader.MODEL_SOURCES['yolov8n'], model_path):
-                    return False
+                model_source = ModelDownloader.MODEL_SOURCES.get(self._model_name)
+                if model_source:
+                    logger.info(f"Downloading {self._model_name} to {model_path}")
+                    if not ModelDownloader.download(model_source, model_path):
+                        return False
 
             with self._model_lock:
                 if not self._ready:
                     self._model = YOLO(str(model_path))
+                    self._model.to(self.device)
                     self._ready = True
-                    logger.info("YOLO model loaded")
+                    logger.info(f"YOLO model loaded: {model_path}")
             return True
         except (ImportError, OSError) as e:
             logger.warning(f"YOLO load failed: {e}")
@@ -539,7 +554,7 @@ class Detector:
     def _load_onnx(self) -> bool:
         """Load ONNX model."""
         try:
-            model_path = self._model_dir / "yolov8n.onnx"
+            model_path = self._model_dir / f"{self._model_name}.onnx"
             if model_path.exists():
                 with self._model_lock:
                     if self._session is None:
@@ -629,6 +644,176 @@ class Detector:
         except (IndexError, ValueError, TypeError) as e:
             logger.error(f"ONNX postprocess error: {e}")
         return detections
+
+# =============================================================================
+# YOLO11 DETECTOR MODULE
+# =============================================================================
+
+class YOLO11Detector:
+    """
+    YOLO11-based object detector optimized for hCaptcha tiles.
+    
+    Uses YOLO11s/m models trained on specialized CAPTCHA data.
+    Supports confidence calibration via ROC analysis.
+    """
+
+    # COCO class names
+    COCO_LABELS: Final[List[str]] = [
+        'person', 'bicycle', 'car', 'motorcycle', 'airplane', 'bus', 'train',
+        'truck', 'boat', 'traffic light', 'fire hydrant', 'stop sign', 'parking meter',
+        'bench', 'bird', 'cat', 'dog', 'horse', 'sheep', 'cow', 'elephant', 'bear',
+        'zebra', 'giraffe', 'backpack', 'umbrella', 'handbag', 'tie', 'suitcase',
+        'frisbee', 'skis', 'snowboard', 'sports ball', 'kite', 'baseball bat',
+        'baseball glove', 'skateboard', 'surfboard', 'tennis racket', 'bottle',
+        'wine glass', 'cup', 'fork', 'knife', 'spoon', 'bowl', 'banana', 'apple',
+        'sandwich', 'orange', 'broccoli', 'carrot', 'hot dog', 'pizza', 'donut',
+        'cake', 'chair', 'couch', 'potted plant', 'bed', 'dining table', 'toilet',
+        'tv', 'laptop', 'mouse', 'remote', 'keyboard', 'cell phone', 'microwave',
+        'oven', 'toaster', 'sink', 'refrigerator', 'book', 'clock', 'vase',
+    ]
+
+    # hCaptcha label aliases
+    HCAPTCHA_ALIASES: Final[Dict[str, str]] = {
+        'motorbus': 'bus',
+        'vehicles': 'car',
+        'traffic lights': 'traffic light',
+        'traffic light': 'traffic light',
+    }
+
+    def __init__(
+        self,
+        model_path: Optional[str] = None,
+        model_name: str = "yolo11s",
+        device: str = "cuda" if torch.cuda.is_available() else "cpu",
+        conf_threshold: float = 0.25,
+        iou_threshold: float = 0.45,
+    ):
+        self.device = device
+        self.conf_threshold = conf_threshold
+        self.iou_threshold = iou_threshold
+        self.model_name = model_name
+        self.model = None
+        self._model_lock = RLock()
+        self._calibration_data: Dict[str, Any] = {}
+        
+        if model_path and Path(model_path).exists():
+            self._load_model(model_path)
+        else:
+            self._load_default_model()
+
+    def _load_default_model(self) -> None:
+        """Load default YOLO11 model."""
+        if not ULTRALYTICS_AVAILABLE:
+            logger.warning("Ultralytics not available, using fallback detection")
+            return
+        
+        model_dir = Path.home() / ".captcha_solver" / "models"
+        model_path = model_dir / f"{self.model_name}.pt"
+        
+        if model_path.exists():
+            self._load_model(str(model_path))
+        else:
+            logger.info(f"Downloading {self.model_name} to {model_path}")
+            if ModelDownloader.download(
+                ModelDownloader.MODEL_SOURCES.get(self.model_name, 
+                    ModelDownloader.MODEL_SOURCES['yolo11s']),
+                model_path
+            ):
+                self._load_model(str(model_path))
+
+    def _load_model(self, model_path: str) -> None:
+        """Load a YOLO model."""
+        with self._model_lock:
+            if self.model is None:
+                self.model = YOLO(model_path)
+                self.model.to(self.device)
+                logger.info(f"Loaded YOLO model: {model_path}")
+
+    def detect(
+        self,
+        image: np.ndarray,
+        target_classes: Optional[List[str]] = None,
+    ) -> List[Dict]:
+        """
+        Detect objects in an image.
+        
+        Args:
+            image: Input image as numpy array (H, W, C)
+            target_classes: List of class names to filter detections
+            
+        Returns:
+            List of detection dictionaries with keys:
+                - bbox: [x1, y1, x2, y2]
+                - confidence: float
+                - class_id: int
+                - class_name: str
+        """
+        if self.model is None:
+            return []
+        
+        results = self.model(image, conf=self.conf_threshold, iou=self.iou_threshold)
+        
+        detections = []
+        for result in results:
+            boxes = result.boxes
+            if boxes is None:
+                continue
+            for box in boxes:
+                x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
+                conf = box.conf[0].cpu().item()
+                cls_id = int(box.cls[0].cpu().item())
+                
+                class_name = result.names.get(cls_id, f"class_{cls_id}")
+                class_name = self.HCAPTCHA_ALIASES.get(class_name, class_name)
+                
+                if target_classes and class_name not in target_classes:
+                    continue
+                
+                detections.append({
+                    "bbox": [float(x1), float(y1), float(x2), float(y2)],
+                    "confidence": conf,
+                    "class_id": cls_id,
+                    "class_name": class_name,
+                })
+        
+        return detections
+
+    def calibrate_confidence(
+        self,
+        predictions: List[float],
+        labels: List[bool],
+    ) -> Tuple[float, float]:
+        """
+        Calibrate confidence thresholds using ROC analysis.
+        
+        Args:
+            predictions: Model confidence scores
+            labels: Ground truth labels (True=positive, False=negative)
+            
+        Returns:
+            Tuple of (optimal_threshold, auc_score)
+        """
+        if not SKLEARN_AVAILABLE or roc_curve is None or auc is None:
+            logger.warning("sklearn not available for calibration")
+            return self.conf_threshold, 0.0
+        
+        fpr, tpr, thresholds = roc_curve(labels, predictions)
+        roc_auc = auc(fpr, tpr)
+        
+        # Youden's J statistic for optimal threshold
+        youden_j = tpr - fpr
+        optimal_idx = np.argmax(youden_j)
+        optimal_threshold = thresholds[optimal_idx]
+        
+        self.conf_threshold = optimal_threshold
+        self._calibration_data = {
+            "threshold": optimal_threshold,
+            "auc": roc_auc,
+            "fpr": fpr.tolist(),
+            "tpr": tpr.tolist(),
+        }
+        
+        return optimal_threshold, roc_auc
 
 # =============================================================================
 # EMBEDDING MODEL MODULE
