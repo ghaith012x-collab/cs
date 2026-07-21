@@ -24,7 +24,8 @@ class AppHost:
             "password": "Password123!",
             "headless": True,
             "camera_interval": 3,
-            "web_port": 8080
+            "web_port": 8080,
+            "run_automation": False
         }
         
         if os.path.exists(path):
@@ -267,7 +268,7 @@ async def main():
             return
     
     if headless:
-        if config.get('run_automation', True):
+        if config.get('run_automation', False):
             await app.start_automation()
         try:
             while True:
