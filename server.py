@@ -125,6 +125,22 @@ class DiscordAutomation:
             print(f"hCaptcha solve error: {e}")
             return True
 
+    async def _select_combobox_option(self, label_text: str, option_value: str) -> bool:
+        """Click a combobox and select an option by text content."""
+        try:
+            combobox = self._page.get_by_role("combobox", {"name": label_text})
+            await combobox.wait_for(state="visible", timeout=10000)
+            await combobox.click()
+            await asyncio.sleep(0.5)
+            
+            option = self._page.get_by_role("option", {"name": option_value})
+            await option.wait_for(state="visible", timeout=5000)
+            await option.click()
+            return True
+        except Exception as e:
+            print(f"[Activity] Failed to select {label_text} option {option_value}: {e}")
+            return False
+
     async def _fill_registration_form(self) -> bool:
         try:
             print("[Activity] Navigating to Discord registration page...")
@@ -150,53 +166,29 @@ class DiscordAutomation:
             await self._page.locator('input[name="password"]').fill(self._password)
             await self._human_pause()
             
-            await asyncio.sleep(1)
-            
             month_val = str(random.randint(1, 12))
             day_val = str(random.randint(1, 28))
             year_val = str(random.randint(1990, 2003))
             print(f"[Activity] Selecting DOB: {month_val}/{day_val}/{year_val}")
             
-            try:
-                month_select = self._page.locator('select[name="month"]')
-                await month_select.wait_for(timeout=5000)
-                await month_select.select_option(value=month_val)
-                print("[Activity] Month selected")
-            except Exception as e:
-                print(f"[Activity] Month select not found, trying combobox: {e}")
-                month_combo = self._page.locator('[role="combobox"][aria-label*="Month"], [aria-label="Month"]')
-                if await month_combo.count() > 0:
-                    await month_combo.click()
-                    await self._page.locator(f'[role="option"][value="{month_val}"]').click()
+            # Month - click combobox then select option
+            if not await self._select_combobox_option("Month", month_val):
+                months = ['January', 'February', 'March', 'April', 'May', 'June',
+                         'July', 'August', 'September', 'October', 'November', 'December']
+                await self._select_combobox_option("Month", months[int(month_val) - 1])
             
-            try:
-                day_select = self._page.locator('select[name="day"]')
-                await day_select.wait_for(timeout=5000)
-                await day_select.select_option(value=day_val)
-                print("[Activity] Day selected")
-            except Exception as e:
-                print(f"[Activity] Day select not found, trying combobox: {e}")
-                day_combo = self._page.locator('[role="combobox"][aria-label*="Day"], [aria-label="Day"]')
-                if await day_combo.count() > 0:
-                    await day_combo.click()
-                    await self._page.locator(f'[role="option"][value="{day_val}"]').click()
+            # Day - click combobox then select option
+            if not await self._select_combobox_option("Day", day_val):
+                pass  # day_val is already numeric string
             
-            try:
-                year_select = self._page.locator('select[name="year"]')
-                await year_select.wait_for(timeout=5000)
-                await year_select.select_option(value=year_val)
-                print("[Activity] Year selected")
-            except Exception as e:
-                print(f"[Activity] Year select not found, trying combobox: {e}")
-                year_combo = self._page.locator('[role="combobox"][aria-label*="Year"], [aria-label="Year"]')
-                if await year_combo.count() > 0:
-                    await year_combo.click()
-                    await self._page.locator(f'[role="option"][value="{year_val}"]').click()
+            # Year - click combobox then select option
+            if not await self._select_combobox_option("Year", year_val):
+                pass  # year_val is already string
             
             await self._human_pause()
             
             print("[Activity] Clicking Create Account button")
-            await self._page.getByRole("button", {"name": "Create Account"}).click()
+            await self._page.get_by_role("button", {"name": "Create Account"}).click()
             await asyncio.sleep(5)
             
             if await self._solve_hcaptcha_if_present():
