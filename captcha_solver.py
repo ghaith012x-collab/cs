@@ -656,10 +656,12 @@ class YOLO11Detector:
         self,
         model_path: Optional[str] = None,
         model_name: str = "yolo11s",
-        device: str = "cuda" if torch.cuda.is_available() else "cpu",
+        device: str = "cpu",
         conf_threshold: float = 0.25,
         iou_threshold: float = 0.45,
     ):
+        if torch is not None and hasattr(torch, 'cuda') and torch.cuda.is_available():
+            device = "cuda"
         self.device = device
         self.conf_threshold = conf_threshold
         self.iou_threshold = iou_threshold
@@ -1903,10 +1905,12 @@ class Trainer:
         train_data: List[Dict],
         val_data: Optional[List[Dict]] = None,
         output_dir: str = "./checkpoints",
-        device: str = "cuda" if torch.cuda.is_available() else "cpu",
+        device: str = "cpu",
         learning_rate: float = 1e-4,
         num_epochs: int = 50,
     ):
+        if torch is not None and hasattr(torch, 'cuda') and torch.cuda.is_available():
+            device = "cuda"
         self.model = model
         self.train_data = train_data
         self.val_data = val_data or []
