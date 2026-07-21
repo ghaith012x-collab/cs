@@ -267,7 +267,8 @@ async def main():
             return
     
     if headless:
-        await app.start_automation()
+        if config.get('run_automation', True):
+            await app.start_automation()
         try:
             while True:
                 await asyncio.sleep(3600)
