@@ -126,9 +126,8 @@ class DiscordAutomation:
             return True
 
     async def _select_dob_combobox(self, label: str, option_text: str) -> bool:
-        """Click a combobox by aria-label and select an option by text."""
+        """Click a combobox by aria-label, type the option text, press Enter."""
         try:
-            # Find combobox by exact aria-label
             combobox = self._page.locator(f'[role="combobox"][aria-label="{label}"]')
             if await combobox.count() == 0:
                 print(f"[Activity] Combobox {label} not found")
@@ -136,35 +135,20 @@ class DiscordAutomation:
             
             print(f"[Activity] Clicking {label} combobox")
             await combobox.first.click()
-            await asyncio.sleep(0.8)  # Wait for dropdown to open
+            await asyncio.sleep(0.5)
             
-            # Wait for menu/options to appear - try multiple selectors
-            option = self._page.locator(f'[role="option"]:has-text("{option_text}")').first
-            if await option.count() == 0:
-                option = self._page.locator(f'[role="menuitem"]:has-text("{option_text}")').first
-            if await option.count() == 0:
-                # Options might be in a portal/modal - search globally
-                option = self._page.locator(f'div[role="option"]:has-text("{option_text}")').first
-            if await option.count() == 0:
-                option = self._page.locator(f'[data-value="{option_text}"]').first
-            if await option.count() == 0:
-                # Try partial match
-                option = self._page.locator(f'*:has-text("{option_text}")').first
+            # Find the input inside the combobox (react-select pattern)
+            input_loc = self._page.locator(f'[role="combobox"][aria-label="{label}"] input, [id^="react-select-"][id$="-input"]')
+            if await input_loc.count() == 0:
+                # Fallback: the combobox itself might be the input
+                input_loc = combobox.first
             
-            if await option.count() > 0:
-                print(f"[Activity] Selecting {label}: {option_text}")
-                await option.first.click()
-                return True
-            else:
-                print(f"[Activity] Option {option_text} not found for {label}")
-                # Debug: list all options
-                all_options = self._page.locator('[role="option"], [role="menuitem"]')
-                count = await all_options.count()
-                if count > 0:
-                    for i in range(min(count, 20)):
-                        text = await all_options.nth(i).inner_text()
-                        print(f"[Activity]   Available option: {text[:50]}")
-                return False
+            print(f"[Activity] Typing {label}: {option_text}")
+            await input_loc.first.fill(option_text)
+            await asyncio.sleep(0.3)
+            await input_loc.first.press("Enter")
+            await asyncio.sleep(0.3)
+            return True
         except Exception as e:
             print(f"[Activity] Failed to select {label} '{option_text}': {e}")
             return False
@@ -202,15 +186,15 @@ class DiscordAutomation:
             month_name = months[month_val - 1]
             print(f"[Activity] Selecting DOB: {month_name} {day_val}, {year_val}")
             
-            # Month - click combobox then select option by month name
+            # Month - click combobox then type month name + Enter
             await self._select_dob_combobox("Month", month_name)
             await self._human_pause()
             
-            # Day - click combobox then select option
+            # Day - click combobox then type day + Enter
             await self._select_dob_combobox("Day", day_val)
             await self._human_pause()
             
-            # Year - click combobox then select option
+            # Year - click combobox then type year + Enter
             await self._select_dob_combobox("Year", year_val)
             await self._human_pause()
             
