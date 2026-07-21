@@ -1,0 +1,7 @@
+{
+    "email": "test@example.com",
+    "username": "discord_user_1234",
+    "password": "SecurePassword123!",
+    "headless": false,
+    "camera_interval": 3
+}

@@ -1,0 +1,29 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y \
+    wget \
+    gnupg \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN pip install --no-cache-dir \
+    playwright==1.40.0 \
+    opencv-python==4.8.0.76 \
+    numpy==1.24.3 \
+    aiofiles==23.0.0
+
+RUN python -m playwright install chromium
+
+COPY app.py server.py requirements.txt ./
+COPY test/ ./test/
+
+RUN chmod +r ./test/site.html
+
+EXPOSE 3000
+
+VOLUME ["/app/screenshots"]
+
+ENV PYTHONUNBUFFERED=1
+
+CMD ["python", "app.py", "--headless"]
