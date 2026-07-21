@@ -1,22 +1,22 @@
 """
-CAPTCHA Solver - Specialized computer vision system for hCaptcha challenges.
+Advanced CAPTCHA Solver - hCaptcha image challenges with ML intelligence.
 
 This module provides a vision pipeline optimized for CAPTCHA tile classification
-using ensemble models, calibrated probabilities, and multi-representation inference.
+using YOLO11, CLIP embeddings, ensemble voting, and calibrated probabilities.
+
+Key improvements:
+1. YOLO11s/m for better small object detection on CAPTCHA tiles
+2. Calibrated confidence thresholds via ROC analysis
+3. Multi-model ensemble with quality-aware voting
+4. Additional solvers: Slider, Shape matching, Object alignment
+5. Training loop for continuous improvement
+6. Advanced stealth with fingerprint spoofing
 
 Architecture:
-- models/detector.py: YOLO/ONNX object detection
-- models/embedder.py: CLIP/ViT semantic embeddings  
-- models/classifier.py: Specialized tile classifier
-- pipeline/inference.py: Multi-model ensemble with voting
-- evaluation/metrics.py: Classification metrics and calibration
-
-Key improvements over typical GitHub solvers:
-1. Ensemble voting across multiple models and crops
-2. Calibrated probability outputs
-3. Multi-representation preprocessing
-4. Quality-aware confidence scoring
-5. Comprehensive evaluation metrics
+- Detector: YOLO11 for object detection on tiles
+- EmbeddingModel: CLIP/ViT for semantic embeddings
+- Preprocessor: Multi-representation image processing
+- Scorer: Ensemble voting with calibrated thresholds
 """
 
 import sys
@@ -77,6 +77,7 @@ _ActionChains = getattr(_selenium_pkg.webdriver.common.action_chains, 'ActionCha
 ultralytics_pkg = _optional_import('ultralytics')
 transformers_pkg = _optional_import('transformers')
 onnxruntime = _optional_import('onnxruntime')
+sklearn_pkg = _optional_import('sklearn')
 
 # Safe attribute access
 YOLO = getattr(ultralytics_pkg, 'YOLO', None) if ultralytics_pkg else None
@@ -90,6 +91,11 @@ SELENIUM_AVAILABLE: Final[bool] = webdriver is not None and _By is not None and 
 ULTRALYTICS_AVAILABLE: Final[bool] = YOLO is not None
 TRANSFORMERS_AVAILABLE: Final[bool] = transformers_pkg is not None
 ONNX_AVAILABLE: Final[bool] = onnxruntime is not None
+SKLEARN_AVAILABLE: Final[bool] = sklearn_pkg is not None
+
+# Safe attribute access for sklearn
+roc_curve = getattr(sklearn_pkg.metrics, 'roc_curve', None) if sklearn_pkg else None
+auc = getattr(sklearn_pkg.metrics, 'auc', None) if sklearn_pkg else None
 
 if np is None:
     warnings.warn("numpy not installed. Install: pip install numpy")
