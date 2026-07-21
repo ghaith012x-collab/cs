@@ -40,8 +40,9 @@ COPY test/ ./test/
 
 RUN chmod +r ./test/site.html
 
-EXPOSE 5000
-
+EXPOSE 8080
 ENV PYTHONUNBUFFERED=1
+ENV PORT=8080
 
-CMD ["xvfb-run", "-a", "python", "-u", "app.py"]
+# Headless Playwright does not need xvfb; start the web process directly.
+CMD ["python", "-u", "app.py"]
