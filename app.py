@@ -205,14 +205,31 @@ class AppHost:
             return web.Response(status=404)
         
         async def handle_root(request):
-            return web.json_response({
-                "service": "Discord Automation Suite",
-                "version": "1.0.0",
-                "endpoints": ["/status", "/screenshot", "/latest"]
-            })
+            return web.Response(text="""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>Discord Automation</title><style>body{font-family:system-ui;background:#111827;color:#f9fafb;max-width:760px;margin:0 auto;padding:28px}input,button{font-size:16px;padding:12px;border-radius:8px;border:0;margin:5px 0}input{width:calc(100% - 24px)}button{cursor:pointer;background:#5865f2;color:white;margin-right:8px}.stop{background:#ef4444}#status{margin:18px 0;color:#a7f3d0}img{width:100%;min-height:180px;object-fit:contain;background:#000;border-radius:10px}small{color:#9ca3af}</style></head><body><h1>Discord Automation</h1><p><small>Railway live dashboard</small></p><label>Email</label><input id="email" type="email" placeholder="your email"><div><button onclick="start()">Start</button><button class="stop" onclick="stop()">Stop</button></div><div id="status">Checking status…</div><img id="shot" alt="Live view will appear here"><script>async function api(path,opts){return fetch(path,opts)}async function start(){let email=document.getElementById('email').value;let r=await api('/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email})});document.getElementById('status').textContent=await r.text()}async function stop(){let r=await api('/stop',{method:'POST'});document.getElementById('status').textContent=await r.text()}async function refresh(){try{let r=await api('/status');let x=await r.json();document.getElementById('status').textContent=x.running?'Running':'Stopped';if(x.running)document.getElementById('shot').src='/latest?'+Date.now()}catch(e){document.getElementById('status').textContent='Unable to reach service'}}setInterval(refresh,3000);refresh()</script></body></html>""", content_type='text/html')
+
+        async def handle_start(request):
+            if self._running:
+                return web.Response(text="Automation is already running")
+            try:
+                data = await request.json()
+                email = data.get('email', '').strip()
+                config = self.load_config(self._config_path)
+                if email: config['email'] = email
+                config['run_automation'] = True
+                self.save_config(config, self._config_path)
+                asyncio.create_task(self.start_automation())
+                return web.Response(text="Automation started")
+            except Exception as e:
+                return web.Response(status=400, text=f"Start failed: {e}")
+
+        async def handle_stop(request):
+            await self.stop_automation()
+            return web.Response(text="Automation stopped")
 
         app = web.Application()
         app.router.add_get('/', handle_root)
+        app.router.add_post('/start', handle_start)
+        app.router.add_post('/stop', handle_stop)
         app.router.add_get('/status', handle_status)
         app.router.add_get('/screenshot', handle_screenshot)
         app.router.add_get('/latest', handle_latest_screenshot)
