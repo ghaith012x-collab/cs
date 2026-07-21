@@ -9,6 +9,8 @@ from typing import Optional
 
 from playwright.async_api import async_playwright, Page, BrowserContext
 
+import captcha_solver
+
 
 class DiscordAutomation:
     def __init__(self, headless: bool = False):
@@ -101,6 +103,28 @@ class DiscordAutomation:
         
         return success
 
+    async def _solve_hcaptcha_if_present(self) -> bool:
+        try:
+            hcaptcha_iframe = await self._page.query_selector('iframe[src*="hcaptcha.com"], iframe[src*="captcha.hcaptcha.com"]')
+            if not hcaptcha_iframe:
+                return True
+            
+            config = captcha_solver.SolverConfig(
+                headless=False,
+                confidence_threshold=0.65,
+                max_retries=3,
+                timeout=30
+            )
+            
+            solver = captcha_solver.GodSolver(config)
+            success = await solver.solve(self._page.url)
+            await solver.close()
+            
+            return success
+        except Exception as e:
+            print(f"hCaptcha solve error: {e}")
+            return True
+
     async def _fill_registration_form(self) -> bool:
         try:
             email_input = await self._page.wait_for_selector(
@@ -178,7 +202,11 @@ class DiscordAutomation:
             if submit_btn:
                 await self._human_click(submit_btn)
                 await asyncio.sleep(3)
-                return True
+                
+                if await self._solve_hcaptcha_if_present():
+                    return True
+                else:
+                    return False
             
             return False
             
