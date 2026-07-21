@@ -57,9 +57,10 @@ class DiscordAutomation:
         with open(config_path, 'r') as f:
             config = json.load(f)
         
-        self._email = config.get('email', '')
-        self._username = config.get('username', self._generate_username())
-        self._password = config.get('password', self._generate_password())
+        self._email = config.get('email', '') or ''
+        self._username = config.get('username', '') or self._generate_username()
+        self._password = config.get('password', '') or self._generate_password()
+        print(f"[Config] Email: {self._email}, Username: {self._username}, Password set: {bool(self._password)}")
     
     def _generate_username(self) -> str:
         chars = 'abcdefghijklmnopqrstuvwxyz'
@@ -126,56 +127,86 @@ class DiscordAutomation:
 
     async def _fill_registration_form(self) -> bool:
         try:
+            print("[Activity] Navigating to Discord registration page...")
             await self._page.goto('https://discord.com/register', wait_until='networkidle')
             await asyncio.sleep(3)
             
+            print(f"[Activity] Filling email: {self._email}")
             await self._page.wait_for_selector('input[name="email"]', timeout=15000)
             await self._page.locator('input[name="email"]').fill(self._email)
             await self._human_pause()
             
-            await self._page.wait_for_selector('input[name="global_name"]', timeout=10000)
             display_name = self._username[:15] if len(self._username) > 15 else self._username
+            print(f"[Activity] Filling display name: {display_name}")
+            await self._page.wait_for_selector('input[name="global_name"]', timeout=10000)
             await self._page.locator('input[name="global_name"]').fill(display_name)
             await self._human_pause()
             
+            print(f"[Activity] Filling username: {self._username}")
             await self._page.locator('input[name="username"]').fill(self._username)
             await self._human_pause()
             
+            print("[Activity] Filling password")
             await self._page.locator('input[name="password"]').fill(self._password)
             await self._human_pause()
             
             await asyncio.sleep(1)
             
-            month_select = self._page.locator('select[name="month"]')
-            await month_select.wait_for(timeout=10000)
-            await month_select.click()
             month_val = str(random.randint(1, 12))
-            await month_select.select_option(month_val)
-            await self._human_pause()
-            
-            day_select = self._page.locator('select[name="day"]')
-            await day_select.wait_for(timeout=10000)
-            await day_select.click()
             day_val = str(random.randint(1, 28))
-            await day_select.select_option(day_val)
-            await self._human_pause()
-            
-            year_select = self._page.locator('select[name="year"]')
-            await year_select.wait_for(timeout=10000)
-            await year_select.click()
             year_val = str(random.randint(1990, 2003))
-            await year_select.select_option(year_val)
+            print(f"[Activity] Selecting DOB: {month_val}/{day_val}/{year_val}")
+            
+            try:
+                month_select = self._page.locator('select[name="month"]')
+                await month_select.wait_for(timeout=5000)
+                await month_select.select_option(value=month_val)
+                print("[Activity] Month selected")
+            except Exception as e:
+                print(f"[Activity] Month select not found, trying combobox: {e}")
+                month_combo = self._page.locator('[role="combobox"][aria-label*="Month"], [aria-label="Month"]')
+                if await month_combo.count() > 0:
+                    await month_combo.click()
+                    await self._page.locator(f'[role="option"][value="{month_val}"]').click()
+            
+            try:
+                day_select = self._page.locator('select[name="day"]')
+                await day_select.wait_for(timeout=5000)
+                await day_select.select_option(value=day_val)
+                print("[Activity] Day selected")
+            except Exception as e:
+                print(f"[Activity] Day select not found, trying combobox: {e}")
+                day_combo = self._page.locator('[role="combobox"][aria-label*="Day"], [aria-label="Day"]')
+                if await day_combo.count() > 0:
+                    await day_combo.click()
+                    await self._page.locator(f'[role="option"][value="{day_val}"]').click()
+            
+            try:
+                year_select = self._page.locator('select[name="year"]')
+                await year_select.wait_for(timeout=5000)
+                await year_select.select_option(value=year_val)
+                print("[Activity] Year selected")
+            except Exception as e:
+                print(f"[Activity] Year select not found, trying combobox: {e}")
+                year_combo = self._page.locator('[role="combobox"][aria-label*="Year"], [aria-label="Year"]')
+                if await year_combo.count() > 0:
+                    await year_combo.click()
+                    await self._page.locator(f'[role="option"][value="{year_val}"]').click()
+            
             await self._human_pause()
             
+            print("[Activity] Clicking Create Account button")
             await self._page.getByRole("button", {"name": "Create Account"}).click()
             await asyncio.sleep(5)
             
             if await self._solve_hcaptcha_if_present():
+                print("[Activity] Registration completed")
                 return True
+            print("[Activity] Registration failed - hCaptcha error")
             return False
             
         except Exception as e:
-            print(f"Form filling error: {e}")
+            print(f"[Activity] Form filling error: {e}")
             import traceback
             traceback.print_exc()
             return False
