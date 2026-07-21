@@ -178,25 +178,24 @@ class DiscordAutomation:
             await self._page.locator('input[name="password"]').fill(self._password)
             await self._human_pause()
             
-            month_val = str(random.randint(1, 12))
+            month_val = random.randint(1, 12)
             day_val = str(random.randint(1, 28))
             year_val = str(random.randint(1990, 2003))
-            print(f"[Activity] Selecting DOB: {month_val}/{day_val}/{year_val}")
+            months = ['January', 'February', 'March', 'April', 'May', 'June',
+                     'July', 'August', 'September', 'October', 'November', 'December']
+            month_name = months[month_val - 1]
+            print(f"[Activity] Selecting DOB: {month_name} {day_val}, {year_val}")
             
-            # Month - click combobox then select option
-            if not await self._select_combobox_option("Month", month_val):
-                months = ['January', 'February', 'March', 'April', 'May', 'June',
-                         'July', 'August', 'September', 'October', 'November', 'December']
-                await self._select_combobox_option("Month", months[int(month_val) - 1])
+            # Month - click combobox then select option by month name
+            await self._select_dob_combobox("Month", month_name)
+            await self._human_pause()
             
             # Day - click combobox then select option
-            if not await self._select_combobox_option("Day", day_val):
-                pass  # day_val is already numeric string
+            await self._select_dob_combobox("Day", day_val)
+            await self._human_pause()
             
             # Year - click combobox then select option
-            if not await self._select_combobox_option("Year", year_val):
-                pass  # year_val is already string
-            
+            await self._select_dob_combobox("Year", year_val)
             await self._human_pause()
             
             print("[Activity] Clicking Create Account button")
