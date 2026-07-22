@@ -1,6 +1,7 @@
 
 import asyncio
 import base64
+import io
 import os
 import re
 import random
@@ -684,7 +685,7 @@ class GodSolver(CaptchaSolver):
     async def _get_tile_images(self, iframe: Page) -> List[Image.Image]:
         # This assumes the tiles are presented as background images or <img> tags
         # You might need to adjust selectors based on actual hCaptcha implementation
-        tiles_data = await iframe.evaluate("""
+        tiles_data = await iframe.evaluate(r"""
             () => {
                 const tiles = Array.from(document.querySelectorAll('.challenge-image .image-wrapper .image'));
                 return tiles.map(tile => {
@@ -986,6 +987,6 @@ async def main():
         await solver.close()
 
 if __name__ == "__main__":
-    import io
+
     asyncio.run(main())
 
