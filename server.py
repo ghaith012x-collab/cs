@@ -93,7 +93,7 @@ class DiscordAutomation:
         
         self._email = config.get('email', '') or ''
         self._username = self._generate_username()  # Always generate fresh random username
-        self._password = config.get('password', '') or self._generate_password()
+        self._password = self._generate_password()  # Always generate strong password
         self._log(f"Config: Email: {self._email}, Username: {self._username}, Password set: {bool(self._password)}")
     
     def _generate_username(self) -> str:
@@ -114,8 +114,26 @@ class DiscordAutomation:
         return username
 
     def _generate_password(self) -> str:
-        chars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%^&*'
-        return ''.join(random.choice(chars) for _ in range(16))
+        """Generate a strong password that looks natural.
+        Format: Capital letter start + random lowercase blend + special chars + digits
+        Example: Jxhaishdbd!3, Kqmvtpwle@7, Bznhcxfwoj#9
+        """
+        # Start with a capital letter
+        first = random.choice('ABCDEFGHJKLMNPQRSTUVWXYZ')
+        # Random lowercase blend (8-11 chars, consonant-heavy like username)
+        consonants = 'bcdfghjklmnpqrstvwxyz'
+        vowels = 'aeiou'
+        body_len = random.randint(8, 11)
+        body = ''
+        for _ in range(body_len):
+            if random.random() < 0.35:
+                body += random.choice(vowels)
+            else:
+                body += random.choice(consonants)
+        # Add 1-2 special chars and 1-2 digits at the end
+        specials = '!@#$%&*'
+        tail = random.choice(specials) + str(random.randint(1, 99))
+        return first + body + tail
 
     async def read_email_from_file(self, file_path: str) -> str:
         with open(file_path, 'r') as f:
