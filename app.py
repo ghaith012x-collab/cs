@@ -21,7 +21,7 @@ class AppHost:
     def load_config(self, path: str = "config.json") -> dict:
         default_config = {
             "email": "test@example.com",
-            "username": "user_{random}",
+            "username": "",
             "password": "Password123!",
             "headless": True,
             "camera_interval": 3,
