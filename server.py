@@ -264,7 +264,7 @@ class DiscordAutomation:
             
             # First, check if there's a checkbox to click before the challenge appears
             try:
-                checkbox_frame = self._page.frame_locator('iframe[src*="hcaptcha.com/hcaptcha"], iframe[title*="Widget containing checkbox"]')
+                checkbox_frame = self._page.frame_locator('iframe[src*="hcaptcha"], iframe[title*="Widget containing checkbox"], iframe[title*="hCaptcha"]')}]))ोबर
                 checkbox = checkbox_frame.locator('#checkbox, [role="checkbox"]')
                 if await checkbox.count() > 0:
                     self._log("Clicking hCaptcha checkbox...")
@@ -292,19 +292,11 @@ class DiscordAutomation:
                 timeout=45
             )
             
-            # 1. Try DragSolver first (for slider/drag puzzles)
-            self._log("Attempting DragSolver...")
-            drag_solver = captcha_solver.DragSolver(config)
-            success = await drag_solver.solve(self._page)
-            
-            # 2. Fallback to GodSolver (for hCaptcha grid/other types)
-            if not success:
-                self._log("DragSolver failed or not applicable, falling back to GodSolver...")
-                god_solver = captcha_solver.GodSolver(config)
-                success = await god_solver.solve(self._page)
-                await god_solver.close()
-            else:
-                self._log("DragSolver succeeded!")
+            # Use GodSolver directly (handles hCaptcha grid challenges)
+            self._log("Attempting GodSolver for hCaptcha...")
+            god_solver = captcha_solver.GodSolver(config)
+            success = await god_solver.solve(self._page)
+            await god_solver.close()
             
             if success:
                 self._log("hCaptcha SOLVED!")
@@ -586,12 +578,8 @@ class DiscordAutomation:
             # Take screenshot to see what happened
             await self.capture_screenshot()
             
-            # Wait for and solve hCaptcha (it always appears after Create Account)
-            if await self._solve_hcaptcha_if_present():
-                self._log("Registration completed")
-                return True
-            self._log("Registration failed - hCaptcha error")
-            return False
+            # Return True - captcha solving is handled by start_discord_signup()
+            return True
             
         except Exception as e:
             self._log(f"Form filling error: {e}")
