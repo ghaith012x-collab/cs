@@ -1377,6 +1377,137 @@ class GodSolver(CaptchaSolver):
 # SELENIUM SOLVER (Placeholder)
 # =============================================================================
 
+class DragSolver(CaptchaSolver):
+    """
+    Advanced Drag-based CAPTCHA solver.
+    Uses computer vision to detect source and target, and human-like drag trajectories.
+    """
+
+    def __init__(self, config: SolverConfig):
+        super().__init__(config)
+        self.slider_solver = SliderSolver()
+
+    async def solve(self, page: Page) -> bool:
+        """
+        Main solve loop for drag-based captchas.
+        """
+        print("Starting DragSolver...")
+        
+        for round_num in range(self.config.max_challenge_rounds):
+            print(f"Drag solve attempt {round_num + 1}/{self.config.max_challenge_rounds}")
+            
+            # 1. Detect the drag captcha elements
+            # Common selectors for drag captchas (GeeTest, Arkose, etc.)
+            selectors = [
+                '.geetest_slider_button', 
+                '.arkose_drag_handle', 
+                '[class*="slider-button"]', 
+                '[id*="slider"]',
+                '.ctp-checkbox-label' # Some custom ones
+            ]
+            
+            handle = None
+            for sel in selectors:
+                try:
+                    handle = page.locator(sel)
+                    if await handle.count() > 0:
+                        print(f"Found drag handle via: {sel}")
+                        break
+                except:
+                    continue
+            
+            if not handle or await handle.count() == 0:
+                # Try to find via images if selectors fail
+                print("No explicit drag handle found via selectors, checking for images...")
+                # This would involve more complex CV logic
+                await asyncio.sleep(2)
+                continue
+
+            # 2. Get the bounding box of the handle
+            box = await handle.bounding_box()
+            if not box:
+                print("Could not get bounding box for drag handle.")
+                continue
+
+            # 3. Detect the target location
+            # For a generic drag solver, we might need to take a screenshot and analyze it
+            # Let's try to use the existing SliderSolver if images are available
+            puzzle_el = page.locator('.geetest_canvas_slice, .puzzle-piece, [class*="slice"]')
+            bg_el = page.locator('.geetest_canvas_bg, .captcha-bg, [class*="bg"]')
+            
+            offset = 0
+            if await puzzle_el.count() > 0 and await bg_el.count() > 0:
+                print("Puzzle and background images detected, calculating offset...")
+                puzzle_bytes = await puzzle_el.screenshot()
+                bg_bytes = await bg_el.screenshot()
+                offset = self.slider_solver.solve(puzzle_bytes, bg_bytes)
+            else:
+                # Fallback: look for a gap in the track or a specific target element
+                print("Images not found, attempting fallback target detection...")
+                # For now, let's assume a default or randomized offset for testing
+                # In a real "OP" solver, we'd do edge detection on the whole page screenshot
+                offset = random.randint(100, 200) 
+
+            if offset <= 0:
+                print("Failed to calculate a valid offset.")
+                offset = random.randint(150, 250) # Last resort guess
+
+            # 4. Perform human-like drag
+            print(f"Performing human-like drag with offset: {offset}")
+            
+            start_x = box['x'] + box['width'] / 2
+            start_y = box['y'] + box['height'] / 2
+            end_x = start_x + offset
+            end_y = start_y + random.uniform(-5, 5) # Slight vertical variance
+
+            await page.mouse.move(start_x, start_y)
+            await asyncio.sleep(random.uniform(0.2, 0.5))
+            await page.mouse.down()
+            await asyncio.sleep(random.uniform(0.1, 0.2))
+
+            # Generate a non-linear path with jitter and overshoot
+            steps = random.randint(30, 60)
+            overshoot = random.uniform(5, 15)
+            
+            for i in range(steps):
+                progress = i / steps
+                # Bezier-like curve for X
+                if progress < 0.8:
+                    curr_x = start_x + (offset + overshoot) * (1 - (1 - progress)**2)
+                else:
+                    # Correction phase
+                    correction_prog = (progress - 0.8) / 0.2
+                    curr_x = start_x + offset + overshoot * (1 - correction_prog)
+                
+                # Add some Y jitter
+                curr_y = start_y + math.sin(progress * math.pi) * 2 + random.uniform(-1, 1)
+                
+                await page.mouse.move(curr_x, curr_y)
+                
+                # Variable speed: slow-fast-slow
+                delay = 0.01 + 0.02 * (1 - math.sin(progress * math.pi))
+                await asyncio.sleep(delay)
+
+            # Final hold and release
+            await asyncio.sleep(random.uniform(0.2, 0.4))
+            await page.mouse.up()
+            
+            # 5. Verify success
+            await asyncio.sleep(2)
+            # Check if the handle is gone or if a success message appears
+            if await handle.count() == 0:
+                print("Drag handle disappeared, assuming success!")
+                return True
+            
+            success_indicators = ['.geetest_success', '.arkose_success', ':has-text("Success")', ':has-text("Verified")']
+            for ind in success_indicators:
+                if await page.locator(ind).count() > 0:
+                    print(f"Success indicator found: {ind}")
+                    return True
+
+        print("DragSolver failed after multiple attempts.")
+        return False
+
 class SeleniumSolver(CaptchaSolver):
     async def solve(self, page) -> bool:
         print("SeleniumSolver not implemented.")

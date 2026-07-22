@@ -292,9 +292,19 @@ class DiscordAutomation:
                 timeout=45
             )
             
-            solver = captcha_solver.GodSolver(config)
-            success = await solver.solve(self._page)
-            await solver.close()
+            # 1. Try DragSolver first (for slider/drag puzzles)
+            self._log("Attempting DragSolver...")
+            drag_solver = captcha_solver.DragSolver(config)
+            success = await drag_solver.solve(self._page)
+            
+            # 2. Fallback to GodSolver (for hCaptcha grid/other types)
+            if not success:
+                self._log("DragSolver failed or not applicable, falling back to GodSolver...")
+                god_solver = captcha_solver.GodSolver(config)
+                success = await god_solver.solve(self._page)
+                await god_solver.close()
+            else:
+                self._log("DragSolver succeeded!")
             
             if success:
                 self._log("hCaptcha SOLVED!")
