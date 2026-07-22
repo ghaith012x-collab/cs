@@ -28,7 +28,7 @@ class DiscordAutomation:
         self._playwright = await async_playwright().start()
         
         args = [
-            '--disable-blink-features=AutomationControlled',
+            '--disable-blink-features=AutomationDetected',
             '--no-sandbox',
             '--disable-setuid-sandbox',
             '--disable-webgl',
@@ -125,33 +125,72 @@ class DiscordAutomation:
             print(f"hCaptcha solve error: {e}")
             return True
 
-    async def _select_dob_combobox(self, label: str, option_text: str) -> bool:
-        """Click a combobox by aria-label, type the option text, press Enter."""
+    async def _select_dob(self, label: str, option_text: str) -> bool:
+        """Select DOB using multiple strategies: click+type+Enter, keyboard nav, JS."""
         try:
             combobox = self._page.locator(f'[role="combobox"][aria-label="{label}"]')
             if await combobox.count() == 0:
                 print(f"[Activity] Combobox {label} not found")
                 return False
             
-            print(f"[Activity] Clicking {label} combobox")
+            print(f"[Activity] Selecting {label}: {option_text}")
+            
+            # Strategy 1: Click combobox, find input, type, press Enter
             await combobox.first.click()
             await asyncio.sleep(0.5)
             
-            # Find the input inside the combobox (react-select pattern)
-            input_loc = self._page.locator(f'[role="combobox"][aria-label="{label}"] input, [id^="react-select-"][id$="-input"]')
+            # Find input inside combobox
+            input_loc = self._page.locator(f'[role="combobox"][aria-label="{label}"] input')
             if await input_loc.count() == 0:
-                # Fallback: the combobox itself might be the input
+                input_loc = self._page.locator(f'[id^="react-select-"][id$="-input"]')
+            if await input_loc.count() == 0:
                 input_loc = combobox.first
             
-            print(f"[Activity] Typing {label}: {option_text}")
             await input_loc.first.fill(option_text)
             await asyncio.sleep(0.3)
             await input_loc.first.press("Enter")
-            await asyncio.sleep(0.3)
+            await asyncio.sleep(0.5)
             return True
+            
         except Exception as e:
-            print(f"[Activity] Failed to select {label} '{option_text}': {e}")
-            return False
+            print(f"[Activity] Strategy 1 failed for {label}: {e}")
+            
+            # Strategy 2: Keyboard navigation - click, ArrowDown, Enter
+            try:
+                await combobox.first.click()
+                await asyncio.sleep(0.5)
+                await self._page.keyboard.press("ArrowDown")
+                await asyncio.sleep(0.2)
+                await self._page.keyboard.press("Enter")
+                await asyncio.sleep(0.5)
+                return True
+            except Exception as e2:
+                print(f"[Activity] Strategy 2 failed for {label}: {e2}")
+                
+                # Strategy 3: JavaScript click on option
+                try:
+                    result = await self._page.evaluate(f"""
+                        () => {{
+                            const cb = document.querySelector('[role="combobox"][aria-label="{label}"]');
+                            if (!cb) return false;
+                            cb.click();
+                            setTimeout(() => {{
+                                const options = document.querySelectorAll('[role="option"]');
+                                for (const opt of options) {{
+                                    if (opt.textContent && opt.textContent.includes("{option_text}")) {{
+                                        opt.click();
+                                        return true;
+                                    }}
+                                }}
+                                return false;
+                            }}, 500);
+                        }}
+                    """)
+                    await asyncio.sleep(0.5)
+                    return True
+                except Exception as e3:
+                    print(f"[Activity] All strategies failed for {label}: {e3}")
+                    return False
 
     async def _fill_registration_form(self) -> bool:
         try:
@@ -186,16 +225,13 @@ class DiscordAutomation:
             month_name = months[month_val - 1]
             print(f"[Activity] Selecting DOB: {month_name} {day_val}, {year_val}")
             
-            # Month - click combobox then type month name + Enter
-            await self._select_dob_combobox("Month", month_name)
+            await self._select_dob("Month", month_name)
             await self._human_pause()
             
-            # Day - click combobox then type day + Enter
-            await self._select_dob_combobox("Day", day_val)
+            await self._select_dob("Day", day_val)
             await self._human_pause()
             
-            # Year - click combobox then type year + Enter
-            await self._select_dob_combobox("Year", year_val)
+            await self._select_dob("Year", year_val)
             await self._human_pause()
             
             print("[Activity] Clicking Create Account button")
