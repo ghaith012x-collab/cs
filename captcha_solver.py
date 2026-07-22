@@ -1,1639 +1,991 @@
-"""Improved hCaptcha Solver"""
 
-import sys
-import re
-import time
-import random
-import base64
 import asyncio
-import warnings
-import logging
-import urllib.request
-import urllib.error
-import hashlib
-from pathlib import Path
-from typing import Optional, List, Dict, Tuple, Any, Final, Protocol, Union
-from dataclasses import dataclass, field, replace
-from enum import Enum, auto
-from threading import RLock
-from collections import Counter
-import traceback
-import math
+import base64
+import os
+import re
+import random
+import time
+from collections import defaultdict
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Tuple
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='[%(asctime)s] [%(levelname)s] [%(name)s] %(message)s',
-    datefmt='%H:%M:%S'
-)
-logger = logging.getLogger('captchahub')
+import numpy as np
+import torch
+import open_clip
+from PIL import Image
+from playwright.async_api import async_playwright, Page, BrowserContext
 
-# =============================================================================
-# DEPENDENCY CHECKING
-# =============================================================================
-
-def _optional_import(module: str) -> Any:
-    """Safely import a module if available, return None otherwise."""
-    try:
-        return __import__(module)
-    except ImportError:
-        return None
-
-# Core ML imports
-np = _optional_import('numpy')
-cv2 = _optional_import('cv2')
-torch = _optional_import('torch')
-PIL = _optional_import('PIL') # Pillow for CLIP image processing
-
-# Browser automation
-_playwright_async_api = _optional_import('playwright.async_api')
-_async_playwright = getattr(_playwright_async_api, 'async_playwright', None) if _playwright_async_api else None
-
-_selenium_pkg = _optional_import('selenium')
-webdriver = getattr(_selenium_pkg, 'webdriver', None) if _selenium_pkg else None
-_By = getattr(_selenium_pkg.webdriver.common.by, 'By', None) if _selenium_pkg else None
-_Options = getattr(_selenium_pkg.webdriver.chrome.options, 'Options', None) if _selenium_pkg else None
-_ActionChains = getattr(_selenium_pkg.webdriver.common.action_chains, 'ActionChains', None) if _selenium_pkg else None
-
-# Model imports
-ultralytics_pkg = _optional_import('ultralytics')
-transformers_pkg = _optional_import('transformers')
-onnxruntime = _optional_import('onnxruntime')
-
-# Safe attribute access
-YOLO = getattr(ultralytics_pkg, 'YOLO', None) if ultralytics_pkg else None
-CLIPModel = getattr(transformers_pkg, 'CLIPModel', None) if transformers_pkg else None
-CLIPProcessor = getattr(transformers_pkg, 'CLIPProcessor', None) if transformers_pkg else None
-AutoProcessor = getattr(transformers_pkg, 'AutoProcessor', None) if transformers_pkg else None
-
-# Availability flags
-PLAYWRIGHT_AVAILABLE: Final[bool] = _async_playwright is not None
-SELENIUM_AVAILABLE: Final[bool] = webdriver is not None and _By is not None and _Options is not None
-ULTRALYTICS_AVAILABLE: Final[bool] = YOLO is not None
-TRANSFORMERS_AVAILABLE: Final[bool] = transformers_pkg is not None
-ONNX_AVAILABLE: Final[bool] = onnxruntime is not None
-
-# Check essential dependencies
-if np is None:
-    warnings.warn("numpy not installed. Install: pip install numpy")
-if cv2 is None:
-    warnings.warn("opencv-python not installed. Install: pip install opencv-python")
-if PIL is None:
-    warnings.warn("Pillow not installed. Install: pip install Pillow")
-if torch is None:
-    warnings.warn("torch not installed. Install: pip install torch")
-if not TRANSFORMERS_AVAILABLE:
-    warnings.warn("transformers not installed. CLIP functionality will be disabled. Install: pip install transformers")
-
-# =============================================================================
-# ENUMS
-# =============================================================================
-
-class ChallengeType(Enum):
-    """Types of CAPTCHA challenges supported."""
-    UNKNOWN = auto()
-    HCAPTCHA_IMAGE_LABEL = auto()
-    SLIDER_CAPTCHA = auto()
-    SHAPE_MATCHING = auto()
-    OBJECT_ALIGNMENT = auto()
-    DRAG_AND_DROP = auto()
-
-class BackendType(Enum):
-    """Available automation backends."""
-    AUTO = "auto"
-    PLAYWRIGHT = "playwright"
-    SELENIUM = "selenium"
-
-class ConfidenceLevel(Enum):
-    """Confidence level for classification decisions."""
-    LOW = "low"       # < 0.3 - likely incorrect
-    MEDIUM = "medium" # 0.3-0.7 - needs verification  
-    HIGH = "high"     # > 0.7 - reliable
-
-# =============================================================================
-# CONFIGURATION
-# =============================================================================
-
-@dataclass(slots=True)
+# --- Configuration --- #
+@dataclass
 class SolverConfig:
-    """
-    Configuration for CAPTCHA solver.
-    
-    Attributes:
-        browser_type: Browser to use ('chromium', 'firefox', 'webkit')
-        headless: Run browser in headless mode
-        stealth: Enable stealth mode
-        user_data_dir: Custom browser profile directory
-        clip_confidence_threshold: Confidence threshold for CLIP (0-1)
-        yolo_confidence_threshold: Confidence threshold for YOLO (0-1)
-        iou_threshold: IoU threshold for NMS (0-1)
-        max_challenge_rounds: Maximum solve attempts for hCaptcha rounds
-        challenge_timeout: Timeout for challenge detection (seconds)
-        viewport_width: Browser viewport width
-        viewport_height: Browser viewport height
-        human_like_mouse: Enable human-like mouse movements
-        timeout: Page load timeout (seconds)
-        model_dir: Directory for ML models
-        yolo_model_name: YOLO model to use (yolov8n, yolo11s, yolo11m)
-        viewport_jitter: Add random viewport jitter for stealth
-        rate_limit_min_delay: Minimum delay between actions for rate limiting (seconds)
-        rate_limit_max_delay: Maximum delay between actions for rate limiting (seconds)
-        min_solve_time_per_round: Minimum time to spend solving a single challenge round (seconds)
-        max_concurrent_sessions: Maximum concurrent browser sessions
-    """
-    browser_type: str = "chromium"
-    headless: bool = False
-    stealth: bool = True
-    user_data_dir: Optional[str] = None
-    clip_confidence_threshold: float = 0.75 # Higher default for CLIP-first
-    yolo_confidence_threshold: float = 0.25 # Lower default for YOLO as secondary
-    iou_threshold: float = 0.45
-    max_challenge_rounds: int = 4 # Support up to 4 rounds
-    challenge_timeout: int = 30
-    viewport_width: int = 1920
-    viewport_height: int = 1080
-    human_like_mouse: bool = True
-    timeout: int = 30
-    model_dir: Optional[Path] = None
-    yolo_model_name: str = "yolo11s"
-    viewport_jitter: bool = True
-    rate_limit_min_delay: float = 0.5 # Min delay between clicks
-    rate_limit_max_delay: float = 1.5 # Max delay between clicks
-    min_solve_time_per_round: float = 8.0 # Minimum 8 seconds per round
-    max_concurrent_sessions: int = 1
+    clip_confidence_threshold: float = 0.55
+    max_challenge_rounds: int = 3
+    timeout: int = 30  # seconds
+    headless: bool = True
+    browser_type: str = "chromium"  # chromium, firefox, webkit
+    rate_limit_min_delay: float = 0.1  # seconds
+    rate_limit_max_delay: float = 0.35  # seconds
+    min_solve_time_per_round: float = 2.5 # seconds
 
-    def __post_init__(self) -> None:
-        """Validate configuration after initialization."""
-        if not 0 < self.clip_confidence_threshold <= 1:
-            raise ValueError("clip_confidence_threshold must be between 0 and 1")
-        if not 0 < self.yolo_confidence_threshold <= 1:
-            raise ValueError("yolo_confidence_threshold must be between 0 and 1")
-        if not 0 < self.iou_threshold <= 1:
-            raise ValueError("iou_threshold must be between 0 and 1")
-        if self.max_challenge_rounds <= 0:
-            raise ValueError("max_challenge_rounds must be positive")
-        if self.viewport_width <= 0 or self.viewport_height <= 0:
-            raise ValueError("Viewport dimensions must be positive")
-        if self.timeout <= 0:
-            raise ValueError("timeout must be positive")
-        if self.browser_type not in ('chromium', 'firefox', 'webkit'):
-            raise ValueError("browser_type must be chromium, firefox, or webkit")
-        if self.yolo_model_name not in ('yolov8n', 'yolo11s', 'yolo11m', 'yolo11l'):
-            raise ValueError("yolo_model_name must be yolov8n, yolo11s, yolo11m, or yolo11l")
-        if self.model_dir is None:
-            object.__setattr__(self, 'model_dir', Path.home() / ".captcha_solver" / "models")
-        if not 0 <= self.rate_limit_min_delay <= self.rate_limit_max_delay:
-            raise ValueError("rate_limit_min_delay must be less than or equal to rate_limit_max_delay")
-        if self.min_solve_time_per_round <= 0:
-            raise ValueError("min_solve_time_per_round must be positive")
-
-    def with_model_dir(self, model_dir: Path) -> 'SolverConfig':
-        """Return a new config with a different model directory."""
-        return replace(self, model_dir=model_dir)
-
-# =============================================================================
-# DATA STRUCTURES
-# =============================================================================
-
-@dataclass(slots=True)
-class BoundingBox:
-    """Represents a detected object bounding box."""
-    x1: float
-    y1: float
-    x2: float
-    y2: float
-    confidence: float = 0.0
-    label: str = ""
-
-    @property
-    def width(self) -> float:
-        return max(0, self.x2 - self.x1)
-
-    @property
-    def height(self) -> float:
-        return max(0, self.y2 - self.y1)
-
-    @property
-    def center(self) -> Tuple[float, float]:
-        return ((self.x1 + self.x2) / 2, (self.y1 + self.y2) / 2)
-
-    @property
-    def area(self) -> float:
-        return self.width * self.height
-
-@dataclass
-class ClassificationResult:
-    """
-    Result of classifying a CAPTCHA tile.
-    
-    Contains all scores from different models for debugging and analysis.
-    """
-    label: str
-    confidence: float
-    confidence_level: ConfidenceLevel
-    clip_score: float = 0.0
-    yolo_score: float = 0.0
-    # Removed quality_score and heuristic_score as per design
-
-@dataclass
-class ChallengeState:
-    """State of a detected CAPTCHA challenge."""
-    challenge_type: ChallengeType = ChallengeType.UNKNOWN
-    target_label: str = ""
-    instruction_text: str = ""
-    grid_cells: List[BoundingBox] = field(default_factory=list)
-    solved: bool = False
-    attempts: int = 0
-    challenge_round: int = 0 # New: Track challenge rounds
-
-# Removed EvaluationMetrics as per design
-
-# =============================================================================
-# CUSTOM EXCEPTIONS
-# =============================================================================
-
-class CaptchaHubError(Exception):
-    """Base exception for CaptchaHub."""
-    pass
-
-class BrowserNotAvailableError(CaptchaHubError):
-    """Browser automation library not installed."""
-    pass
-
-class ModelNotAvailableError(CaptchaHubError):
-    """ML model not available."""
-    pass
-
-class ChallengeDetectionError(CaptchaHubError):
-    """Failed to detect challenge."""
-    pass
-
-class SolveTimeoutError(CaptchaHubError):
-    """Challenge solve timed out."""
-    pass
-
-class DownloadError(CaptchaHubError):
-    """Failed to download model or file."""
-    pass
-
-class ResourceCleanupError(CaptchaHubError):
-    """Failed to clean up browser resources."""
-    pass
-
-# =============================================================================
-# FILE DOWNLOADER
-# =============================================================================
-
-class ModelDownloader:
-    """Safe model downloader with integrity verification."""
-
-    MODEL_SOURCES: Final[Dict[str, str]] = {
-        'yolov8n': 'https://github.com/ultralytics/assets/releases/download/v0.0.0/yolov8n.pt',
-        'yolo11s': 'https://github.com/ultralytics/assets/releases/download/v0.0.0/yolo11s.pt',
-        'yolo11m': 'https://github.com/ultralytics/assets/releases/download/v0.0.0/yolo11m.pt',
-    }
-
-    @staticmethod
-    def download(url: str, dest: Path, chunk_size: int = 8192, timeout: int = 60) -> bool:
-        """Download file with progress tracking."""
-        try:
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            request = urllib.request.Request(url, headers={'User-Agent': 'CaptchaHub/1.0'})
-            
-            with urllib.request.urlopen(request, timeout=timeout) as response:
-                with open(dest, 'wb') as f:
-                    while True:
-                        chunk = response.read(chunk_size)
-                        if not chunk:
-                            break
-                        f.write(chunk)
-            
-            logger.info(f"Downloaded model to {dest}")
-            return True
-            
-        except urllib.error.URLError as e:
-            logger.error(f"Download failed: {e}")
-            if dest.exists():
-                dest.unlink()
-            return False
-        except (IOError, OSError) as e:
-            logger.error(f"File error: {e}")
-            if dest.exists():
-                dest.unlink()
-            return False
+# --- CLIP Model Loading --- #
+class ClipModel:
+    _instance = None
 
     @classmethod
-    def get_yolo_model_path(cls, model_dir: Path, model_name: str = "yolo11s") -> Path:
-        """Get path for YOLO model."""
-        return model_dir / f"{model_name}.pt"
+    async def get_instance(cls):
+        if cls._instance is None:
+            cls._instance = cls()
+            await cls._instance._load_model()
+        return cls._instance
 
-# =============================================================================
-# PREPROCESSOR MODULE
-# =============================================================================
-
-class Preprocessor:
-    """
-    Multi-representation image preprocessor.
-    
-    Creates multiple image representations for ensemble inference.
-    """
-
-    @staticmethod
-    def create_crops(image: Any) -> Dict[str, Any]:
-        """
-        Create multiple image representations for CLIP evaluation.
-        
-        Returns dict with:
-        - original: Raw image
-        - center_crop: 80% center crop
-        - padded: Padded version (e.g., 10% padding)
-        """
-        if image is None:
-            return {}
-
-        h, w, _ = image.shape
-        crops = {'original': image.copy()}
-
-        # Center crop (e.g., 80% of image)
-        center_h, center_w = int(h * 0.8), int(w * 0.8)
-        start_h, start_w = (h - center_h) // 2, (w - center_w) // 2
-        center_crop = image[start_h:start_h + center_h, start_w:start_w + center_w]
-        crops['center_crop'] = center_crop
-
-        # Padded version (e.g., 10% padding)
-        pad_h, pad_w = int(h * 0.1), int(w * 0.1)
-        padded_image = cv2.copyMakeBorder(image, pad_h, pad_h, pad_w, pad_w, cv2.BORDER_CONSTANT, value=[0, 0, 0])
-        crops['padded'] = padded_image
-        
-        return crops
-
-# =============================================================================
-# EMBEDDING MODEL MODULE (CLIP)
-# =============================================================================
-
-class EmbeddingModel:
-    """
-    Vision-language embedding model for semantic similarity (CLIP).
-    
-    Uses CLIP to compute image and text embeddings for comparison.
-    """
-
-    def __init__(self, config: SolverConfig):
-        self.config = config
-        self._model = None
-        self._processor = None
-        self._model_lock = RLock()
-        self._ready = False
-        self._load_model()
-        self.prompt_templates = [
-            "a photo of a {}",
-            "a {} in the image",
-            "an image containing {}",
-            "picture of a {}",
-            "this is a {}"
-        ]
-
-    def _load_model(self) -> None:
-        """Load CLIP model."""
-        if not TRANSFORMERS_AVAILABLE or CLIPModel is None or CLIPProcessor is None:
-            logger.warning("Transformers or CLIP models not available, embedding model disabled.")
-            return
-
-        try:
-            with self._model_lock:
-                if self._ready:
-                    return
-                    
-                model_name = "openai/clip-vit-base-patch32"
-                self._model = CLIPModel.from_pretrained(model_name)
-                self._processor = CLIPProcessor.from_pretrained(model_name)
-                self._ready = True
-                logger.info("CLIP embedding model loaded.")
-        except (ImportError, OSError, RuntimeError) as e:
-            logger.warning(f"CLIP load failed: {e}")
-
-    def semantic_similarity(self, image: Any, target_label: str) -> float:
-        """
-        Compute semantic similarity between image and text using multiple prompt templates.
-        
-        Returns averaged cosine similarity between embeddings (0-1).
-        """
-        if not self._ready or self._model is None or self._processor is None:
-            return 0.0
-        if not target_label or image is None or PIL is None:
-            return 0.0
-
-        try:
-            from PIL import Image
-            
-            # Generate multiple prompts
-            prompts = [template.format(target_label) for template in self.prompt_templates]
-
-            # Process image and texts
-            inputs = self._processor(
-                text=prompts,
-                images=Image.fromarray(cv2.cvtColor(image, cv2.COLOR_BGR2RGB)),
-                return_tensors="pt", padding=True
-            )
-            outputs = self._model(**inputs)
-            
-            # Normalize embeddings
-            image_emb = outputs.image_embeds / outputs.image_embeds.norm(dim=-1, keepdim=True)
-            text_emb = outputs.text_embeds / outputs.text_embeds.norm(dim=-1, keepdim=True)
-            
-            # Compute cosine similarity for each prompt and average
-            similarities = (image_emb * text_emb).sum(dim=-1).tolist()
-            avg_similarity = sum(similarities) / len(similarities)
-
-            return max(0.0, min(1.0, avg_similarity))
-        except (ImportError, RuntimeError, ValueError) as e:
-            logger.debug(f"CLIP similarity error: {e}")
-            return 0.0
-
-# =============================================================================
-# YOLO DETECTOR MODULE (SECONDARY)
-# =============================================================================
-
-class YOLODetector:
-    """
-    YOLO-based object detector, now secondary to CLIP.
-    """
-
-    # Expanded hCaptcha label aliases
-    HCAPTCHA_ALIASES: Final[Dict[str, str]] = {
-        'motorbus': 'bus',
-        'vehicles': 'vehicle',
-        'traffic lights': 'traffic light',
-        'traffic light': 'traffic light',
-        'crosswalk': 'pedestrian crossing',
-        'crosswalks': 'pedestrian crossing',
-        'seaplane': 'seaplane',
-        'chimney': 'chimney',
-        'chimneys': 'chimney',
-        'stairs': 'stairs',
-        'staircase': 'stairs',
-        'motorized vehicles': 'vehicle',
-        'motorized vehicle': 'vehicle',
-        'bicycle': 'bicycle',
-        'bicycles': 'bicycle',
-        'boat': 'boat',
-        'boats': 'boat',
-        'airplane': 'airplane',
-        'airplanes': 'airplane',
-        'fire hydrant': 'fire hydrant',
-        'fire hydrants': 'fire hydrant',
-        'bus': 'bus',
-        'buses': 'bus',
-        'car': 'car',
-        'cars': 'car',
-        'truck': 'truck',
-        'trucks': 'truck',
-        'motorcycle': 'motorcycle',
-        'motorcycles': 'motorcycle',
-        'train': 'train',
-        'trains': 'train',
-        'person': 'person',
-        'people': 'person',
-        'tree': 'tree',
-        'trees': 'tree',
-        'building': 'building',
-        'buildings': 'building',
-        'mountain': 'mountain',
-        'mountains': 'mountain',
-        'bridge': 'bridge',
-        'bridges': 'bridge',
-        'road': 'road',
-        'roads': 'road',
-        'sign': 'sign',
-        'signs': 'sign',
-        'lamp': 'lamp',
-        'lamps': 'lamp',
-        'street light': 'street light',
-        'street lights': 'street light',
-        'parking meter': 'parking meter',
-        'parking meters': 'parking meter',
-        'bench': 'bench',
-        'benches': 'bench',
-        'cat': 'cat',
-        'cats': 'cat',
-        'dog': 'dog',
-        'dogs': 'dog',
-        'horse': 'horse',
-        'horses': 'horse',
-        'sheep': 'sheep',
-        'sheeps': 'sheep',
-        'cow': 'cow',
-        'cows': 'cow',
-        'elephant': 'elephant',
-        'elephants': 'elephant',
-        'bear': 'bear',
-        'bears': 'bear',
-        'zebra': 'zebra',
-        'zebras': 'zebra',
-        'giraffe': 'giraffe',
-        'giraffes': 'giraffe',
-        'backpack': 'backpack',
-        'backpacks': 'backpack',
-        'umbrella': 'umbrella',
-        'umbrellas': 'umbrella',
-        'handbag': 'handbag',
-        'handbags': 'handbag',
-        'tie': 'tie',
-        'ties': 'tie',
-        'suitcase': 'suitcase',
-        'suitcases': 'suitcase',
-        'frisbee': 'frisbee',
-        'frisbees': 'frisbee',
-        'ski': 'ski',
-        'skis': 'ski',
-        'snowboard': 'snowboard',
-        'snowboards': 'snowboard',
-        'sports ball': 'sports ball',
-        'sports balls': 'sports ball',
-        'kite': 'kite',
-        'kites': 'kite',
-        'baseball bat': 'baseball bat',
-        'baseball bats': 'baseball bat',
-        'baseball glove': 'baseball glove',
-        'baseball gloves': 'baseball glove',
-        'skateboard': 'skateboard',
-        'skateboards': 'skateboard',
-        'surfboard': 'surfboard',
-        'surfboards': 'surfboard',
-        'tennis racket': 'tennis racket',
-        'tennis rackets': 'tennis racket',
-        'bottle': 'bottle',
-        'bottles': 'bottle',
-        'wine glass': 'wine glass',
-        'wine glasses': 'wine glass',
-        'cup': 'cup',
-        'cups': 'cup',
-        'fork': 'fork',
-        'forks': 'fork',
-        'knife': 'knife',
-        'knives': 'knife',
-        'spoon': 'spoon',
-        'spoons': 'spoon',
-        'bowl': 'bowl',
-        'bowls': 'bowl',
-        'banana': 'banana',
-        'bananas': 'banana',
-        'apple': 'apple',
-        'apples': 'apple',
-        'sandwich': 'sandwich',
-        'sandwiches': 'sandwich',
-        'orange': 'orange',
-        'oranges': 'orange',
-        'broccoli': 'broccoli',
-        'carrots': 'carrot',
-        'hot dog': 'hot dog',
-        'hot dogs': 'hot dog',
-        'pizza': 'pizza',
-        'pizzas': 'pizza',
-        'donut': 'donut',
-        'donuts': 'donut',
-        'cake': 'cake',
-        'cakes': 'cake',
-        'chair': 'chair',
-        'chairs': 'chair',
-        'couch': 'couch',
-        'couches': 'couch',
-        'potted plant': 'potted plant',
-        'potted plants': 'potted plant',
-        'bed': 'bed',
-        'beds': 'bed',
-        'dining table': 'dining table',
-        'dining tables': 'dining table',
-        'toilet': 'toilet',
-        'toilets': 'toilet',
-        'tv': 'tv',
-        'tvs': 'tv',
-        'laptop': 'laptop',
-        'laptops': 'laptop',
-        'mouse': 'mouse',
-        'mice': 'mouse',
-        'remote': 'remote',
-        'remotes': 'remote',
-        'keyboard': 'keyboard',
-        'keyboards': 'keyboard',
-        'cell phone': 'cell phone',
-        'cell phones': 'cell phone',
-        'microwave': 'microwave',
-        'microwaves': 'microwave',
-        'oven': 'oven',
-        'ovens': 'oven',
-        'toaster': 'toaster',
-        'toasters': 'toaster',
-        'sink': 'sink',
-        'sinks': 'sink',
-        'refrigerator': 'refrigerator',
-        'refrigerators': 'refrigerator',
-        'book': 'book',
-        'books': 'book',
-        'clock': 'clock',
-        'clocks': 'clock',
-        'vase': 'vase',
-        'vases': 'vase',
-        'scissors': 'scissors',
-        'teddy bear': 'teddy bear',
-        'teddy bears': 'teddy bear',
-        'hair drier': 'hair drier',
-        'hair driers': 'hair drier',
-        'toothbrush': 'toothbrush',
-        'toothbrushes': 'toothbrush',
-    }
-
-    def __init__(
-        self,
-        config: SolverConfig,
-    ):
-        self.config = config
-        self.device = "cuda" if torch is not None and torch.cuda.is_available() else "cpu"
+    def __init__(self):
         self.model = None
-        self._model_lock = RLock()
-        self._ready = False
-        if ULTRALYTICS_AVAILABLE:
-            self._load_model()
+        self.preprocess = None
+        self.tokenizer = None
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    def _load_model(self) -> None:
-        """Load YOLO model."""
-        try:
-            model_path = ModelDownloader.get_yolo_model_path(self.config.model_dir, self.config.yolo_model_name)
-            if not model_path.exists():
-                model_source = ModelDownloader.MODEL_SOURCES.get(self.config.yolo_model_name)
-                if model_source:
-                    logger.info(f"Downloading {self.config.yolo_model_name} to {model_path}")
-                    if not ModelDownloader.download(model_source, model_path):
-                        logger.warning(f"Failed to download YOLO model {self.config.yolo_model_name}. YOLO detection will be disabled.")
-                        return
-
-            with self._model_lock:
-                if not self._ready:
-                    self.model = YOLO(str(model_path))
-                    self.model.to(self.device)
-                    self._ready = True
-                    logger.info(f"YOLO model loaded: {model_path}")
-        except (ImportError, OSError, RuntimeError) as e:
-            logger.warning(f"YOLO load failed: {e}. YOLO detection will be disabled.")
-            self._ready = False
-
-    def detect(self, image: Any, target_label: str) -> float:
-        """
-        Detect objects in image and return a confidence score for the target_label.
-        Returns 1.0 if target_label is detected with high confidence, 0.0 otherwise.
-        """
-        if not self._ready or self.model is None or image is None:
-            return 0.0
-        
-        # Normalize target_label using aliases for YOLO detection
-        normalized_target_label = self.HCAPTCHA_ALIASES.get(target_label.lower(), target_label.lower())
-
-        results = self.model(image, verbose=False, conf=self.config.yolo_confidence_threshold)
-        
-        for result in results:
-            if result.boxes is None:
-                continue
-            for box in result.boxes:
-                cls_id = int(box.cls[0])
-                label = result.names.get(cls_id, f"class_{cls_id}").lower()
-                # Check if the detected label matches the normalized target label
-                if label == normalized_target_label:
-                    return float(box.conf[0]) # Return YOLO's confidence if detected
-        return 0.0
-
-# =============================================================================
-# SCORER MODULE (CLIP-FIRST ENSEMBLE)
-# =============================================================================
-
-class Scorer:
-    """
-    Ensemble scorer for CAPTCHA tiles, prioritizing CLIP.
-    """
-
-    def __init__(self, config: SolverConfig):
-        self.config = config
-        self.clip_model = EmbeddingModel(config)
-        self.yolo_detector = YOLODetector(config)
-        # Removed _metrics and _vote_history as per design
-
-    def classify_tile(self, image: Any, target_label: str) -> ClassificationResult:
-        """
-        Classify a single tile using CLIP-first ensemble approach.
-        """
-        if image is None:
-            return ClassificationResult(label=target_label, confidence=0.0, confidence_level=ConfidenceLevel.LOW)
-
-        # 1. Multi-crop ensemble for CLIP
-        crops = Preprocessor.create_crops(image)
-        clip_scores = []
-        for crop_name, crop_image in crops.items():
-            score = self.clip_model.semantic_similarity(crop_image, target_label)
-            if score > 0:
-                clip_scores.append(score)
-        
-        avg_clip_score = sum(clip_scores) / len(clip_scores) if clip_scores else 0.0
-
-        # 2. YOLO as secondary confidence booster
-        yolo_score = self.yolo_detector.detect(image, target_label) if self.yolo_detector._ready else 0.0
-
-        # Combine scores (CLIP-first weighting)
-        # Weights: CLIP (primary) ~0.8, YOLO (booster) ~0.2
-        # If YOLO detects the object, it boosts the CLIP score, otherwise it doesn't penalize.
-        final_confidence = avg_clip_score
-        if yolo_score > self.config.yolo_confidence_threshold:
-            # Simple boosting: if YOLO is confident, give a small boost to CLIP score
-            final_confidence = min(1.0, avg_clip_score + (yolo_score * 0.1)) # Boost by up to 10% of YOLO's confidence
-
-        # Determine confidence level (adaptive thresholding will be applied later in solver)
-        confidence_level = ConfidenceLevel.LOW
-        if final_confidence >= self.config.clip_confidence_threshold:
-            confidence_level = ConfidenceLevel.HIGH
-        elif final_confidence >= (self.config.clip_confidence_threshold * 0.6): # A dynamic medium threshold
-            confidence_level = ConfidenceLevel.MEDIUM
-
-        return ClassificationResult(
-            label=target_label,
-            confidence=final_confidence,
-            confidence_level=confidence_level,
-            clip_score=avg_clip_score,
-            yolo_score=yolo_score
+    async def _load_model(self):
+        print(f"Loading CLIP model on device: {self.device}")
+        self.model, _, self.preprocess = open_clip.create_model_and_transforms(
+            "ViT-B-32", pretrained="laion2b_s34b_b79k", device=self.device
         )
+        self.tokenizer = open_clip.get_tokenizer("ViT-B-32")
+        print("CLIP model loaded.")
 
-# =============================================================================
-# CHALLENGE DETECTOR
-# =============================================================================
+    async def get_image_features(self, images: List[Image.Image]):
+        if self.model is None:
+            await self._load_model()
+        image_tensors = [self.preprocess(img).unsqueeze(0) for img in images]
+        image_input = torch.cat(image_tensors).to(self.device)
+        with torch.no_grad():
+            image_features = self.model.encode_image(image_input)
+        return image_features / image_features.norm(dim=-1, keepdim=True)
 
+    async def get_text_features(self, texts: List[str]):
+        if self.model is None:
+            await self._load_model()
+        text_input = self.tokenizer(texts).to(self.device)
+        with torch.no_grad():
+            text_features = self.model.encode_text(text_input)
+        return text_features / text_features.norm(dim=-1, keepdim=True)
+
+# --- Challenge Detection --- #
 class ChallengeDetector:
-    """DOM-based CAPTCHA challenge detection."""
+    def __init__(self, page: Page):
+        self.page = page
 
-    HCAPTCHA_SELECTORS: Final[List[str]] = [
-        'iframe[src*="hcaptcha.com"]',
-        'iframe[src*="captcha.hcaptcha.com"]',
-    ]
+    async def find_hcaptcha_iframe(self) -> Optional[str]:
+        # Check for the hCaptcha iframe by title or src
+        iframe_locator = self.page.frame_locator('iframe[src*="hcaptcha.com/captcha"]').or_(
+            self.page.frame_locator('iframe[title="hCaptcha security check"]')
+        )
+        if await iframe_locator.count() > 0:
+            return await iframe_locator.get_attribute('src')
+        return None
 
-    PROMPT_SELECTORS: Final[List[str]] = [
-        '.prompt-text',
-        '.challenge-title',
-        '.instruction',
-        'h1',
-        'div.challenge-header',
-        'div.challenge-text',
-    ]
+    async def is_captcha_visible(self) -> bool:
+        iframe_src = await self.find_hcaptcha_iframe()
+        if iframe_src:
+            # Check if the challenge itself is visible within the iframe
+            # This might need more robust checks depending on hCaptcha's rendering
+            try:
+                iframe = self.page.frame_locator(f'iframe[src="{iframe_src}"]')
+                # Look for common hCaptcha elements like the challenge image or prompt
+                challenge_visible = await iframe.locator('.challenge-image').is_visible()
+                return challenge_visible
+            except Exception:
+                return False
+        return False
 
-    SUBMIT_SELECTORS: Final[List[str]] = [
-        '.button-submit',
-        '#submit-button',
-        'button[type="submit"]',
-        'div.button-frame > button',
-    ]
+    async def is_solved(self) -> bool:
+        iframe_src = await self.find_hcaptcha_iframe()
+        if iframe_src:
+            iframe = self.page.frame_locator(f'iframe[src="{iframe_src}"]')
+            # Check for the 'solved' checkbox or similar indicator
+            checkbox = iframe.locator('.checkbox').or_(iframe.locator('#checkbox'))
+            if await checkbox.count() > 0:
+                return await checkbox.is_checked()
+        return False
 
+# --- Solver Base Class --- #
+class CaptchaSolver:
     def __init__(self, config: SolverConfig):
         self.config = config
+        self.clip_model = None
+        self.rate_limit_last_action = 0
 
-    async def detect_playwright(self, page: Any) -> Optional[ChallengeState]:
-        """Detect hCaptcha challenge using Playwright."""
-        state = ChallengeState()
+    async def _apply_rate_limit(self):
+        now = time.time()
+        elapsed = now - self.rate_limit_last_action
+        delay = random.uniform(self.config.rate_limit_min_delay, self.config.rate_limit_max_delay)
+        if elapsed < delay:
+            await asyncio.sleep(delay - elapsed)
+        self.rate_limit_last_action = time.time()
 
-        try:
-            for selector in self.HCAPTCHA_SELECTORS:
-                frame = page.locator(selector).first
-                if await frame.count() > 0:
-                    state.challenge_type = ChallengeType.HCAPTCHA_IMAGE_LABEL
-                    content_frame = await frame.content_frame()
-                    if content_frame:
-                        # Wait for prompt to be visible
-                        for prompt_sel in self.PROMPT_SELECTORS:
-                            try:
-                                await content_frame.locator(prompt_sel).wait_for(state='visible', timeout=self.config.challenge_timeout * 1000 / 2)
-                                prompt_element = content_frame.locator(prompt_sel).first
-                                if await prompt_element.count() > 0:
-                                    state.instruction_text = await prompt_element.inner_text()
-                                    state.target_label = self._extract_target(state.instruction_text)
-                                    if state.target_label:
-                                        break # Found prompt, break from prompt selectors loop
-                            except Exception as e:
-                                logger.debug(f"Prompt selector {prompt_sel} failed: {e}")
-                        
-                        # Get grid cells
-                        cells = content_frame.locator('.task-image')
-                        cell_count = await cells.count()
-                        for i in range(cell_count):
-                            cell_locator = cells.nth(i)
-                            box = await cell_locator.bounding_box()
-                            if box:
-                                state.grid_cells.append(BoundingBox(
-                                    x1=box['x'], y1=box['y'], x2=box['x']+box['width'], y2=box['y']+box['height']
-                                ))
+    async def _get_clip_model(self):
+        if self.clip_model is None:
+            self.clip_model = await ClipModel.get_instance()
+        return self.clip_model
 
-                    if state.target_label and state.grid_cells:
-                        return state
-        except Exception as e:
-            logger.debug(f"Detection error: {e}")
+    async def solve(self, page: Page) -> bool:
+        raise NotImplementedError
 
-        return None
+    async def close(self):
+        pass
 
-    def detect_selenium(self, driver: Any) -> Optional[ChallengeState]:
-        """Detect hCaptcha challenge using Selenium."""
-        state = ChallengeState()
+# --- Playwright Solver --- #
+class PlaywrightSolver(CaptchaSolver):
+    def __init__(self, config: SolverConfig):
+        super().__init__(config)
+        self.browser = None
+        self.context: Optional[BrowserContext] = None
 
-        try:
-            for selector in self.HCAPTCHA_SELECTORS:
-                frames = driver.find_elements(_By.CSS_SELECTOR, selector)
-                if frames:
-                    state.challenge_type = ChallengeType.HCAPTCHA_IMAGE_LABEL
-                    driver.switch_to.default_content()
-                    driver.switch_to.frame(frames[0])
-                    try:
-                        for prompt_sel in self.PROMPT_SELECTORS:
-                            try:
-                                prompt = driver.find_element(_By.CSS_SELECTOR, prompt_sel)
-                                state.instruction_text = prompt.text
-                                state.target_label = self._extract_target(state.instruction_text)
-                                if state.target_label:
-                                    break
-                            except Exception:
-                                continue
-                        
-                        # Get grid cells for Selenium
-                        cells = driver.find_elements(_By.CSS_SELECTOR, '.task-image')
-                        for cell in cells:
-                            loc = cell.location
-                            size = cell.size
-                            state.grid_cells.append(BoundingBox(
-                                x1=loc['x'], y1=loc['y'], x2=loc['x']+size['width'], y2=loc['y']+size['height']
-                            ))
+    async def _launch_browser(self):
+        pw = await async_playwright().start()
+        if self.config.browser_type == "chromium":
+            self.browser = await pw.chromium.launch(headless=self.config.headless)
+        elif self.config.browser_type == "firefox":
+            self.browser = await pw.firefox.launch(headless=self.config.headless)
+        elif self.config.browser_type == "webkit":
+            self.browser = await pw.webkit.launch(headless=self.config.headless)
+        else:
+            raise ValueError(f"Unsupported browser type: {self.config.browser_type}")
 
-                    finally:
-                        driver.switch_to.default_content()
-                    
-                    if state.target_label and state.grid_cells:
-                        return state
-        except Exception as e:
-            logger.error(f"Detection error: {e}\n{traceback.format_exc()}")
+        # Better stealth: navigator props, canvas noise, realistic plugins
+        self.context = await self.browser.new_context(
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36",
+            viewport={'width': 1920, 'height': 1080},
+            java_script_enabled=True,
+            accept_downloads=True,
+            bypass_csp=True,
+            extra_http_headers={
+                "Accept-Language": "en-US,en;q=0.9",
+            }
+        )
+        await self.context.add_init_script("""
+            // Stealth: WebGL, Canvas, Plugins, etc.
+            Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+            Object.defineProperty(navigator, 'plugins', { get: () => [
+                { name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer' },
+                { name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbgmofphgfnnbpnkgljmi' },
+                { name: 'Native Client', filename: 'internal-nacl-plugin' },
+                { name: 'Widevine Content Decryption Module', filename: 'widevinecdm' }
+            ]});
+            Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+            Object.defineProperty(navigator, 'mimeTypes', { get: () => [
+                { type: 'application/pdf', suffixes: 'pdf', description: 'Portable Document Format' },
+                { type: 'application/x-google-chrome-pdf', suffixes: 'pdf', description: 'Portable Document Format' }
+            ]});
+            const originalGetParameter = WebGLRenderingContext.prototype.getParameter;
+            WebGLRenderingContext.prototype.getParameter = function(parameter) {
+                if (parameter === 37445) { return 'Intel Open Source Technology Center'; }
+                if (parameter === 37446) { return 'Mesa DRI Intel(R) HD Graphics 630 (Kaby Lake GT2)'; }
+                return originalGetParameter(parameter);
+            };
+            const originalToDataURL = HTMLCanvasElement.prototype.toDataURL;
+            HTMLCanvasElement.prototype.toDataURL = function() {
+                if (this.width === 16 && this.height === 16) {
+                    // Add subtle noise to small canvases often used for fingerprinting
+                    const ctx = this.getContext('2d');
+                    const imageData = ctx.getImageData(0, 0, this.width, this.height);
+                    for (let i = 0; i < imageData.data.length; i += 4) {
+                        imageData.data[i] += Math.floor(Math.random() * 5) - 2; // Red
+                        imageData.data[i + 1] += Math.floor(Math.random() * 5) - 2; // Green
+                        imageData.data[i + 2] += Math.floor(Math.random() * 5) - 2; // Blue
+                    }
+                    ctx.putImageData(imageData, 0, 0);
+                }
+                return originalToDataURL.apply(this, arguments);
+            };
+        """)
 
-        return None
+    async def new_page(self) -> Page:
+        if self.browser is None:
+            await self._launch_browser()
+        return await self.context.new_page()
 
-    def _extract_target(self, prompt: str) -> str:
-        """Extract target object from challenge instruction using robust patterns and aliases."""
-        if not prompt:
-            return ""
+    async def close(self):
+        if self.browser:
+            await self.browser.close()
 
-        prompt_lower = prompt.lower()
-
-        # Comprehensive patterns for various hCaptcha prompt formats
-        patterns = [
-            r'(?:click|select) each image containing (?:a|an)?\s+([\w\s]+?)(?:\s*\.|\s*$)',
-            r'(?:click|select) all images with (?:a|an)?\s+([\w\s]+?)(?:\s*\.|\s*$)',
-            r'(?:click|select) on the image of (?:a|an)?\s+([\w\s]+?)(?:\s*\.|\s*$)',
-            r'(?:click|select) (?:the|each) ([\w\s]+?)(?:\s*\.|\s*$)',
-            r'select all squares with (?:a|an)?\s+([\w\s]+?)(?:\s*\.|\s*$)',
-            r'find all images of (?:a|an)?\s+([\w\s]+?)(?:\s*\.|\s*$)',
-            r'please click each image containing a ([\w\s]+?)(?:\s*\.|\s*$)',
-            r'which images contain a ([\w\s]+?)(?:\s*\.|\s*$)',
+# --- GodSolver (Main Solver Logic) --- #
+class GodSolver(CaptchaSolver):
+    def __init__(self, config: SolverConfig):
+        super().__init__(config)
+        self.playwright_solver = PlaywrightSolver(config)
+        self.alias_mapping = self._load_alias_mapping()
+        self.negative_prompts = [
+            "empty background", "sky", "ground", "wall", "nothing",
+            "a photo of an empty background", "a photo of the sky",
+            "a photo of the ground", "a photo of a wall", "a photo of nothing",
+            "an empty background in this image", "the sky in this image",
+            "the ground in this image", "a wall in this image", "nothing in this image"
         ]
 
-        target = ""
-        for pattern in patterns:
-            match = re.search(pattern, prompt_lower)
-            if match:
-                target = match.group(1).strip().rstrip('.').replace('s$', '') # Remove plural 's'
-                break
-        
-        if not target:
-            # Fallback: check for direct matches from aliases if no pattern matched
-            for alias_key, alias_value in YOLODetector.HCAPTCHA_ALIASES.items():
-                if alias_key in prompt_lower:
-                    target = alias_value
-                    break
-
-        # Apply alias mapping to the extracted target
-        return YOLODetector.HCAPTCHA_ALIASES.get(target, target)
-
-# =============================================================================
-# BROWSER SOLVERS
-# =============================================================================
-
-class PlaywrightSolver:
-    """Playwright-based CAPTCHA solver."""
-
-    def __init__(self, config: SolverConfig):
-        self.config = config
-        self._scorer = Scorer(config)
-        self._detector = ChallengeDetector(config)
-        self._playwright = None
-        self._browser = None
-        self._context = None
-        self._initialized = False
-        self._last_action_time = 0.0
-
-    async def __aenter__(self) -> 'PlaywrightSolver':
-        await self.initialize()
-        return self
-
-    async def __aexit__(self, *args) -> None:
-        await self.close()
-
-    async def initialize(self) -> None:
-        if not PLAYWRIGHT_AVAILABLE:
-            raise BrowserNotAvailableError(
-                "Playwright not installed. Run: pip install playwright && playwright install"
-            )
-
-        if self._initialized:
-            return
-
-        try:
-            self._playwright = await _async_playwright().start()
-            browser_type = getattr(self._playwright, self.config.browser_type)
-            args = StealthPatcher.get_stealth_args(self.config)
-
-            if self.config.user_data_dir:
-                self._context = await browser_type.launch_persistent_context(
-                    user_data_dir=self.config.user_data_dir, **args
-                )
-            else:
-                self._browser = await browser_type.launch(**args)
-                self._context = await self._browser.new_context(
-                    viewport={'width': self.config.viewport_width, 'height': self.config.viewport_height},
-                    user_agent=random.choice(StealthPatcher.USER_AGENTS)
-                )
-
-            await self._context.add_init_script(StealthPatcher.STEALTH_SCRIPT)
-            self._initialized = True
-            logger.info("Playwright initialized.")
-
-        except Exception as e:
-            logger.error(f"Playwright initialization failed: {e}")
-            await self._safe_close()
-            raise
-
-    async def _safe_close(self) -> None:
-        """Safely close all browser resources."""
-        try:
-            if self._context and not getattr(self._context, 'is_closed', lambda: False)():
-                await self._context.close()
-        except Exception:
-            pass
-        try:
-            if self._browser:
-                await self._browser.close()
-        except Exception:
-            pass
-        try:
-            if self._playwright:
-                await self._playwright.stop()
-        except Exception:
-            pass
-
-    async def _apply_rate_limit(self) -> None:
-        """Apply a random delay to simulate human-like interaction."""
-        delay = random.uniform(self.config.rate_limit_min_delay, self.config.rate_limit_max_delay)
-        await asyncio.sleep(delay)
-        self._last_action_time = time.time()
-
-    async def solve(self, url: str) -> bool:
-        """Solve CAPTCHA at given URL, handling multiple challenge rounds."""
-        page = None
-        try:
-            page = await self._context.new_page()
-            await page.goto(url, wait_until='networkidle', timeout=self.config.timeout * 1000)
-            await self._apply_rate_limit()
-
-            # Initial checkbox click
-            if await self._click_checkbox(page):
-                await self._apply_rate_limit()
-
-            for round_num in range(1, self.config.max_challenge_rounds + 1):
-                logger.info(f"Starting hCaptcha challenge round {round_num}/{self.config.max_challenge_rounds}")
-                round_start_time = time.time()
-
-                state = await self._detector.detect_playwright(page)
-                if state is None or not state.target_label or not state.grid_cells:
-                    logger.info(f"No hCaptcha challenge detected or already solved after round {round_num-1}.")
-                    return True # Challenge solved or not present
-                
-                state.challenge_round = round_num
-                logger.info(f"Challenge target for round {round_num}: '{state.target_label}'")
-
-                if not await self._solve_image_challenge(page, state):
-                    logger.warning(f"Failed to solve hCaptcha image challenge in round {round_num}.")
-                    # If a round fails, it might mean the challenge is unsolvable or a new one appeared
-                    # We can retry the detection to see if a new challenge is presented.
-                    continue # Try next round
-                
-                # Ensure minimum solve time per round
-                elapsed_time = time.time() - round_start_time
-                if elapsed_time < self.config.min_solve_time_per_round:
-                    sleep_needed = self.config.min_solve_time_per_round - elapsed_time
-                    logger.info(f"Waiting for {sleep_needed:.2f} seconds to meet minimum solve time for round {round_num}.")
-                    await asyncio.sleep(sleep_needed)
-                
-                await self._apply_rate_limit() # Apply delay after submission
-
-                # After submission, check if challenge is still present
-                # This is the retry logic for multiple rounds
-                re_check_state = await self._detector.detect_playwright(page)
-                if re_check_state is None or not re_check_state.target_label:
-                    logger.info(f"hCaptcha challenge successfully solved after {round_num} rounds.")
-                    return True
-                else:
-                    logger.info(f"hCaptcha challenge still present after round {round_num}. Proceeding to next round.")
-
-            logger.error(f"Failed to solve hCaptcha after {self.config.max_challenge_rounds} rounds.")
-            return False
-
-        except asyncio.TimeoutError:
-            logger.error("Page load or challenge detection timed out.")
-            return False
-        except Exception as e:
-            logger.error(f"Solve error: {e}\n{traceback.format_exc()}")
-            return False
-        finally:
-            if page:
-                try:
-                    await page.close()
-                except Exception:
-                    pass
-
-    async def _click_checkbox(self, page: Any) -> bool:
-        """Click the initial hCaptcha checkbox."""
-        try:
-            frame = None
-            for selector in self._detector.HCAPTCHA_SELECTORS:
-                frame = page.locator(selector).first
-                if await frame.count() > 0:
-                    break
-            if not frame:
-                return False
-
-            content_frame = await frame.content_frame()
-            if not content_frame:
-                return False
-
-            # Wait for the checkbox to be visible and enabled
-            checkbox_locator = content_frame.locator('button, [role="button"]').filter(has_text=re.compile(r'I am human|I am not a robot', re.IGNORECASE)).first
-            if await checkbox_locator.count() > 0:
-                await checkbox_locator.wait_for(state='visible', timeout=self.config.challenge_timeout * 1000 / 2)
-                await self._human_click(content_frame, checkbox_locator)
-                return True
-        except Exception as e:
-            logger.debug(f"Error clicking checkbox: {e}")
-        return False
-
-    async def _solve_image_challenge(self, page: Any, state: ChallengeState) -> bool:
-        """Solve image grid challenge using ensemble intelligence and adaptive thresholding."""
-        try:
-            frame = None
-            for selector in self._detector.HCAPTCHA_SELECTORS:
-                frame = page.locator(selector).first
-                if await frame.count() > 0:
-                    break
-            if not frame:
-                return False
-
-            content_frame = await frame.content_frame()
-            if not content_frame:
-                return False
-
-            cells = content_frame.locator('.task-image')
-            cell_count = await cells.count()
-
-            if cell_count == 0:
-                logger.warning("No image tiles found for the challenge.")
-                return False
-
-            tile_scores: List[Tuple[int, float, Any]] = [] # (index, confidence, locator)
-            for i in range(cell_count):
-                cell = cells.nth(i)
-                box = await cell.bounding_box()
-                if not box:
-                    continue
-
-                screenshot = await content_frame.screenshot(
-                    clip={'x': box['x'], 'y': box['y'],
-                          'width': box['width'], 'height': box['height']}
-                )
-
-                img_array = np.frombuffer(screenshot, np.uint8)
-                image = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
-                if image is None:
-                    logger.warning(f"Could not decode image for tile {i}.")
-                    continue
-
-                result = self._scorer.classify_tile(image, state.target_label)
-                tile_scores.append((i, result.confidence, cell))
-                logger.debug(f"Tile {i} - Target: '{state.target_label}', CLIP Score: {result.clip_score:.2f}, YOLO Score: {result.yolo_score:.2f}, Final Confidence: {result.confidence:.2f}")
-
-            # Adaptive Thresholding
-            confidences = [score for _, score, _ in tile_scores]
-            if not confidences:
-                return False
-
-            threshold = self.config.clip_confidence_threshold # Default to config threshold
-
-            # Check for low score scenario (all scores uniformly low)
-            if max(confidences) < 0.5 and len(confidences) > 1:
-                # Pick top N tiles, e.g., top 30% or at least 1
-                num_to_pick = max(1, math.ceil(len(confidences) * 0.3))
-                sorted_tiles = sorted(tile_scores, key=lambda x: x[1], reverse=True)
-                to_click_tiles = sorted_tiles[:num_to_pick]
-                logger.info(f"Adaptive thresholding: All scores low, picking top {num_to_pick} tiles.")
-            else:
-                # Attempt bimodal thresholding if scores are not uniformly low
-                # Simple bimodal detection: look for a significant gap in sorted scores
-                sorted_confidences = sorted(confidences)
-                gaps = [sorted_confidences[i+1] - sorted_confidences[i] for i in range(len(sorted_confidences)-1)]
-                if gaps:
-                    max_gap = max(gaps)
-                    if max_gap > 0.2: # A significant gap
-                        gap_idx = gaps.index(max_gap)
-                        threshold = (sorted_confidences[gap_idx] + sorted_confidences[gap_idx+1]) / 2
-                        logger.info(f"Adaptive thresholding: Detected bimodal distribution, setting threshold to {threshold:.2f}.")
-                
-                to_click_tiles = [(idx, conf, cell) for idx, conf, cell in tile_scores if conf >= threshold]
-                logger.info(f"Adaptive thresholding: Using threshold {threshold:.2f}, selected {len(to_click_tiles)} tiles.")
-
-            if not to_click_tiles:
-                logger.warning("No tiles selected for clicking based on confidence. Selecting highest scoring tile as fallback.")
-                # Fallback: if no tiles meet the threshold, click the highest scoring one
-                highest_scoring_tile = max(tile_scores, key=lambda x: x[1])
-                to_click_tiles = [highest_scoring_tile]
-
-            for idx, conf, cell_locator in to_click_tiles:
-                await self._human_click(content_frame, cell_locator)
-                await self._apply_rate_limit()
-
-            submit = None
-            for selector in self._detector.SUBMIT_SELECTORS:
-                submit = content_frame.locator(selector).first
-                if await submit.count() > 0:
-                    break
-
-            if submit:
-                await self._human_click(content_frame, submit)
-                await self._apply_rate_limit()
-            else:
-                logger.warning("Submit button not found.")
-                return False
-
-            return True
-
-        except Exception as e:
-            logger.error(f"Image solve error: {e}\n{traceback.format_exc()}")
-            return False
-
-    async def _human_click(self, frame: Any, locator: Any) -> None:
-        """Simulate human-like mouse click."""
-        try:
-            box = await locator.bounding_box()
-            if not box:
-                await locator.click(timeout=5000)
-                return
-
-            x = box['x'] + random.uniform(box['width'] * 0.25, box['width'] * 0.75)
-            y = box['y'] + random.uniform(box['height'] * 0.25, box['height'] * 0.75)
-
-            steps = random.randint(8, 20) if self.config.human_like_mouse else 1
-            await frame.mouse.move(x, y, steps=steps)
-            await asyncio.sleep(random.uniform(0.05, 0.15))
-            await frame.mouse.down()
-            await asyncio.sleep(random.uniform(0.03, 0.1))
-            await frame.mouse.up()
-        except Exception:
-            try:
-                await locator.click(force=True)
-            except Exception:
-                pass
-
-    async def close(self) -> None:
-        await self._safe_close()
-        self._initialized = False
-
-# =============================================================================
-# SELENIUM SOLVER
-# =============================================================================
-
-class SeleniumSolver:
-    """Selenium-based CAPTCHA solver with rate limiting."""
-
-    def __init__(self, config: SolverConfig):
-        self.config = config
-        self._scorer = Scorer(config)
-        self._detector = ChallengeDetector(config)
-        self._driver = None
-        self._last_action_time = 0.0
-
-    def _apply_rate_limit(self) -> None:
-        """Apply a random delay to simulate human-like interaction."""
-        delay = random.uniform(self.config.rate_limit_min_delay, self.config.rate_limit_max_delay)
-        time.sleep(delay)
-        self._last_action_time = time.time()
-
-    def solve(self, url: str) -> bool:
-        """Solve CAPTCHA at given URL, handling multiple challenge rounds."""
-        try:
-            if self._driver is None:
-                self._initialize_driver()
-            
-            self._driver.get(url)
-            self._apply_rate_limit()
-
-            # Initial checkbox click
-            if self._click_checkbox():
-                self._apply_rate_limit()
-
-            for round_num in range(1, self.config.max_challenge_rounds + 1):
-                logger.info(f"Starting hCaptcha challenge round {round_num}/{self.config.max_challenge_rounds}")
-                round_start_time = time.time()
-
-                state = self._detector.detect_selenium(self._driver)
-                if state is None or not state.target_label or not state.grid_cells:
-                    logger.info(f"No hCaptcha challenge detected or already solved after round {round_num-1}.")
-                    return True # Challenge solved or not present
-                
-                state.challenge_round = round_num
-                logger.info(f"Challenge target for round {round_num}: '{state.target_label}'")
-
-                if not self._solve_image_challenge(state):
-                    logger.warning(f"Failed to solve hCaptcha image challenge in round {round_num}.")
-                    continue # Try next round
-                
-                # Ensure minimum solve time per round
-                elapsed_time = time.time() - round_start_time
-                if elapsed_time < self.config.min_solve_time_per_round:
-                    sleep_needed = self.config.min_solve_time_per_round - elapsed_time
-                    logger.info(f"Waiting for {sleep_needed:.2f} seconds to meet minimum solve time for round {round_num}.")
-                    time.sleep(sleep_needed)
-                
-                self._apply_rate_limit() # Apply delay after submission
-
-                # After submission, check if challenge is still present
-                re_check_state = self._detector.detect_selenium(self._driver)
-                if re_check_state is None or not re_check_state.target_label:
-                    logger.info(f"hCaptcha challenge successfully solved after {round_num} rounds.")
-                    return True
-                else:
-                    logger.info(f"hCaptcha challenge still present after round {round_num}. Proceeding to next round.")
-
-            logger.error(f"Failed to solve hCaptcha after {self.config.max_challenge_rounds} rounds.")
-            return False
-
-        except Exception as e:
-            logger.error(f"Selenium solve error: {e}\n{traceback.format_exc()}")
-            return False
-
-    def _initialize_driver(self) -> None:
-        """Initialize Selenium WebDriver."""
-        if not SELENIUM_AVAILABLE:
-            raise BrowserNotAvailableError("Selenium not installed. Run: pip install selenium")
-        
-        options = StealthPatcher.get_selenium_options(self.config)
-        self._driver = webdriver.Chrome(options=options)
-        self._driver.set_page_load_timeout(self.config.timeout)
-
-    def _click_checkbox(self) -> bool:
-        """Click the initial hCaptcha checkbox."""
-        try:
-            for selector in self._detector.HCAPTCHA_SELECTORS:
-                frames = self._driver.find_elements(_By.CSS_SELECTOR, selector)
-                if frames:
-                    self._driver.switch_to.default_content()
-                    self._driver.switch_to.frame(frames[0])
-                    try:
-                        checkbox = self._driver.find_element(_By.CSS_SELECTOR, 'button, [role="button"]')
-                        if checkbox.is_displayed() and checkbox.is_enabled():
-                            self._human_click(checkbox)
-                            return True
-                    except Exception:
-                        pass
-                    finally:
-                        self._driver.switch_to.default_content()
-        except Exception as e:
-            logger.debug(f"Error clicking checkbox (Selenium): {e}")
-        return False
-
-    def _solve_image_challenge(self, state: ChallengeState) -> bool:
-        """Solve image grid challenge using ensemble intelligence and adaptive thresholding (Selenium)."""
-        try:
-            for selector in self._detector.HCAPTCHA_SELECTORS:
-                frames = self._driver.find_elements(_By.CSS_SELECTOR, selector)
-                if frames:
-                    self._driver.switch_to.default_content()
-                    self._driver.switch_to.frame(frames[0])
-                    break
-            else:
-                return False
-
-            try:
-                cells = self._driver.find_elements(_By.CSS_SELECTOR, '.task-image')
-                if not cells:
-                    logger.warning("No image tiles found for the challenge (Selenium).")
-                    return False
-
-                tile_scores: List[Tuple[int, float, Any]] = [] # (index, confidence, element)
-                for i, cell in enumerate(cells):
-                    # Get screenshot of the element
-                    screenshot_b64 = cell.screenshot_as_base64
-                    img_array = np.frombuffer(base64.b64decode(screenshot_b64), np.uint8)
-                    image = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
-                    if image is None:
-                        logger.warning(f"Could not decode image for tile {i} (Selenium).")
-                        continue
-
-                    result = self._scorer.classify_tile(image, state.target_label)
-                    tile_scores.append((i, result.confidence, cell))
-                    logger.debug(f"Tile {i} (Selenium) - Target: '{state.target_label}', CLIP Score: {result.clip_score:.2f}, YOLO Score: {result.yolo_score:.2f}, Final Confidence: {result.confidence:.2f}")
-
-                # Adaptive Thresholding (same logic as PlaywrightSolver)
-                confidences = [score for _, score, _ in tile_scores]
-                if not confidences:
-                    return False
-
-                threshold = self.config.clip_confidence_threshold # Default to config threshold
-
-                if max(confidences) < 0.5 and len(confidences) > 1:
-                    num_to_pick = max(1, math.ceil(len(confidences) * 0.3))
-                    sorted_tiles = sorted(tile_scores, key=lambda x: x[1], reverse=True)
-                    to_click_tiles = sorted_tiles[:num_to_pick]
-                    logger.info(f"Adaptive thresholding (Selenium): All scores low, picking top {num_to_pick} tiles.")
-                else:
-                    sorted_confidences = sorted(confidences)
-                    gaps = [sorted_confidences[i+1] - sorted_confidences[i] for i in range(len(sorted_confidences)-1)]
-                    if gaps:
-                        max_gap = max(gaps)
-                        if max_gap > 0.2:
-                            gap_idx = gaps.index(max_gap)
-                            threshold = (sorted_confidences[gap_idx] + sorted_confidences[gap_idx+1]) / 2
-                            logger.info(f"Adaptive thresholding (Selenium): Detected bimodal distribution, setting threshold to {threshold:.2f}.")
-                    
-                    to_click_tiles = [(idx, conf, cell) for idx, conf, cell in tile_scores if conf >= threshold]
-                    logger.info(f"Adaptive thresholding (Selenium): Using threshold {threshold:.2f}, selected {len(to_click_tiles)} tiles.")
-
-                if not to_click_tiles:
-                    logger.warning("No tiles selected for clicking based on confidence (Selenium). Selecting highest scoring tile as fallback.")
-                    highest_scoring_tile = max(tile_scores, key=lambda x: x[1])
-                    to_click_tiles = [highest_scoring_tile]
-
-                for idx, conf, cell_element in to_click_tiles:
-                    self._human_click(cell_element)
-                    self._apply_rate_limit()
-
-                submit = None
-                for selector in self._detector.SUBMIT_SELECTORS:
-                    try:
-                        submit = self._driver.find_element(_By.CSS_SELECTOR, selector)
-                        if submit.is_displayed() and submit.is_enabled():
-                            break
-                    except Exception:
-                        continue
-
-                if submit:
-                    self._human_click(submit)
-                    self._apply_rate_limit()
-                else:
-                    logger.warning("Submit button not found (Selenium).")
-                    return False
-
-                return True
-            finally:
-                self._driver.switch_to.default_content()
-
-        except Exception as e:
-            logger.error(f"Image solve error (Selenium): {e}\n{traceback.format_exc()}")
-            return False
-
-    def _human_click(self, element: Any) -> None:
-        """Simulate human-like mouse click for Selenium."""
-        try:
-            if self.config.human_like_mouse and _ActionChains is not None:
-                action = _ActionChains(self._driver)
-                # Move to element center first
-                action.move_to_element(element).perform()
-                # Random offset within element
-                size = element.size
-                x_offset = random.uniform(size['width'] * 0.25, size['width'] * 0.75) - size['width'] / 2
-                y_offset = random.uniform(size['height'] * 0.25, size['height'] * 0.75) - size['height'] / 2
-                action.move_by_offset(x_offset, y_offset).click().perform()
-            else:
-                element.click()
-        except Exception:
-            element.click() # Fallback to direct click
-
-    def close(self) -> None:
-        """Clean up Selenium driver."""
-        if self._driver:
-            try:
-                self._driver.quit()
-            except Exception as e:
-                logger.warning(f"Error closing Selenium driver: {e}")
-            self._driver = None
-
-# =============================================================================
-# STEALTH PATCHER
-# =============================================================================
-
-class StealthPatcher:
-    """Provides browser stealth scripts and arguments."""
-
-    STEALTH_SCRIPT: Final[str] = """
-    (() => {
-        // Override webdriver property
-        Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-        
-        // Override plugins array
-        Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
-        
-        // Override languages
-        Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
-        
-        // Mock Chrome properties
-        window.chrome = { runtime: {}, autocomplete: {} };
-        
-        // Override WebGL vendor/renderer
-        const getParameter = WebGLRenderingContext.prototype.getParameter;
-        WebGLRenderingContext.prototype.getParameter = function(parameter) {
-            const vendorMap = {
-                37445: 'Intel Inc.',
-                37446: 'Intel Iris OpenGL Engine',
-            };
-            return vendorMap[parameter] || getParameter.call(this, parameter);
-        };
-        
-        // Override canvas fingerprint
-        const toDataURL = HTMLCanvasElement.prototype.toDataURL;
-        HTMLCanvasElement.prototype.toDataURL = function() {
-            return 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQ42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
-        };
-        
-        // Override WebGL debug renderer info
-        const getExtension = WebGLRenderingContext.prototype.getExtension;
-        WebGLRenderingContext.prototype.getExtension = function(name) {
-            if (name === 'WEBGL_debug_renderer_info') {
-                return {
-                    UNMASKED_VENDOR_WEBGL: 37445,
-                    UNMASKED_RENDERER_WEBGL: 37446,
-                };
+    def _load_alias_mapping(self) -> Dict[str, List[str]]:
+        # Expanded alias mapping for common hCaptcha targets
+        return defaultdict(list, {
+            "car": ["automobile", "vehicle", "sedan", "coupe", "truck", "van", "bus", "jeep", "pickup"],
+            "bus": ["coach", "public transport", "school bus"],
+            "truck": ["lorry", "articulated lorry", "pickup truck", "delivery truck"],
+            "bicycle": ["bike", "mountain bike", "road bike", "tricycle"],
+            "motorcycle": ["motorbike", "scooter", "moped"],
+            "traffic light": ["traffic signal", "stop light"],
+            "fire hydrant": ["hydrant"],
+            "crosswalk": ["zebra crossing", "pedestrian crossing"],
+            "bridge": ["overpass", "viaduct"],
+            "boat": ["ship", "yacht", "ferry", "vessel"],
+            "airplane": ["plane", "aircraft", "jet"],
+            "train": ["locomotive", "railway car"],
+            "parking meter": ["meter"],
+            "chimney": ["smokestack"],
+            "palm tree": ["date palm", "coconut tree"],
+            "mountain": ["hill", "peak", "summit"],
+            "river": ["stream", "creek"],
+            "road": ["street", "highway", "avenue"],
+            "building": ["house", "apartment", "skyscraper", "structure"],
+            "tree": ["plant", "foliage", "bush"],
+            "dog": ["puppy", "canine"],
+            "cat": ["kitten", "feline"],
+            "bird": ["fowl", "avian"],
+            "person": ["human", "pedestrian", "figure"],
+            "robot": ["android", "bot"],
+            "animal": ["creature", "beast"],
+            "flower": ["blossom", "bloom"],
+            "cloud": ["sky", "cumulus", "stratus"],
+            "water": ["ocean", "lake", "sea", "pond"],
+            "snow": ["ice", "sleet"],
+            "rain": ["drizzle", "shower"],
+            "sun": ["sunlight", "star"],
+            "moon": ["crescent", "lunar"],
+            "star": ["celestial body", "twinkle"],
+            "pizza": ["pie", "slice"],
+            "sandwich": ["sub", "hoagie"],
+            "burger": ["hamburger", "cheeseburger"],
+            "hot dog": ["frankfurter", "wiener"],
+            "donut": ["doughnut"],
+            "coffee": ["espresso", "latte", "cappuccino"],
+            "tea": ["green tea", "black tea"],
+            "sushi": ["nigiri", "sashimi"],
+            "taco": ["burrito", "quesadilla"],
+            "book": ["novel", "textbook", "magazine"],
+            "computer": ["laptop", "desktop", "pc"],
+            "phone": ["smartphone", "mobile phone"],
+            "watch": ["wristwatch", "clock"],
+            "camera": ["photographic device"],
+            "television": ["tv", "monitor"],
+            "chair": ["seat", "stool"],
+            "table": ["desk", "counter"],
+            "lamp": ["light", "lantern"],
+            "door": ["entrance", "gate"],
+            "window": ["pane", "opening"],
+            "cup": ["mug", "glass"],
+            "bottle": ["flask", "container"],
+            "shoe": ["sneaker", "boot"],
+            "hat": ["cap", "beanie"],
+            "glove": ["mitten"],
+            "sock": ["stocking"],
+            "shirt": ["t-shirt", "blouse"],
+            "pants": ["trousers", "jeans"],
+            "dress": ["gown", "frock"],
+            "skirt": ["kilt"],
+            "jacket": ["coat", "blazer"],
+            "bag": ["purse", "backpack", "handbag"],
+            "wallet": ["billfold"],
+            "key": ["opener"],
+            "coin": ["currency", "token"],
+            "gem": ["jewel", "crystal"],
+            "ring": ["band", "circlet"],
+            "necklace": ["chain", "pendant"],
+            "earring": ["stud", "hoop"],
+            "bracelet": ["bangle", "cuff"],
+            "crown": ["tiara", "diadem"],
+            "sword": ["blade", "saber"],
+            "shield": ["buckler", "aegis"],
+            "bow": ["archery bow"],
+            "arrow": ["shaft", "dart"],
+            "axe": ["hatchet", "tomahawk"],
+            "hammer": ["mallet", "gavel"],
+            "wrench": ["spanner"],
+            "screwdriver": ["driver"],
+            "saw": ["hacksaw", "handsaw"],
+            "knife": ["dagger", "cutter"],
+            "fork": ["tine"],
+            "spoon": ["scoop"],
+            "plate": ["dish", "platter"],
+            "bowl": ["basin", "tureen"],
+            "cup": ["mug", "goblet"],
+            "bottle": ["flask", "carafe"],
+            "can": ["tin", "container"],
+            "box": ["crate", "carton"],
+            "basket": ["hamper", "creel"],
+            "bag": ["sack", "pouch"],
+            "umbrella": ["parasol", "gamp"],
+            "guitar": ["acoustic guitar", "electric guitar"],
+            "piano": ["keyboard", "grand piano"],
+            "violin": ["fiddle"],
+            "drum": ["percussion", "snare drum"],
+            "trumpet": ["cornet", "bugle"],
+            "flute": ["fife", "piccolo"],
+            "saxophone": ["sax"],
+            "microphone": ["mic", "mike"],
+            "speaker": ["loudspeaker", "monitor"],
+            "headphone": ["earphone", "headset"],
+            "camera": ["camcorder", "webcam"],
+            "television": ["display", "screen"],
+            "remote control": ["remote", "clicker"],
+            "battery": ["cell", "power pack"],
+            "charger": ["adapter", "power supply"],
+            "plug": ["socket", "connector"],
+            "wire": ["cable", "cord"],
+            "light bulb": ["bulb", "lamp"],
+            "fan": ["ventilator", "blower"],
+            "heater": ["radiator", "furnace"],
+            "air conditioner": ["ac", "cooler"],
+            "refrigerator": ["fridge", "icebox"],
+            "microwave": ["micro"],
+            "oven": ["stove", "range"],
+            "dishwasher": ["dish washer"],
+            "washing machine": ["washer", "laundry machine"],
+            "dryer": ["tumble dryer"],
+            "vacuum cleaner": ["hoover", "vacuum"],
+            "broom": ["brush", "sweeper"],
+            "mop": ["swab"],
+            "bucket": ["pail", "can"],
+            "sponge": ["loofah", "scourer"],
+            "soap": ["detergent", "cleanser"],
+            "shampoo": ["conditioner"],
+            "toothbrush": ["tooth brush"],
+            "toothpaste": ["tooth paste"],
+            "towel": ["cloth", "napkin"],
+            "mirror": ["looking glass", "reflector"],
+            "comb": ["brush"],
+            "hair dryer": ["blow dryer"],
+            "razor": ["shaver"],
+            "scissors": ["shears"],
+            "needle": ["pin", "stylus"],
+            "thread": ["yarn", "filament"],
+            "button": ["fastener", "switch"],
+            "zipper": ["slide fastener"],
+            "key": ["fob", "opener"],
+            "lock": ["fastening", "clasp"],
+            "chain": ["link", "shackle"],
+            "rope": ["cord", "cable"],
+            "ladder": ["steps", "stairway"],
+            "tool box": ["toolbox"],
+            "hammer": ["mallet", "gavel"],
+            "saw": ["hacksaw", "handsaw"],
+            "drill": ["borer", "press"],
+            "tape measure": ["measuring tape"],
+            "ruler": ["straightedge"],
+            "pencil": ["graphite pencil"],
+            "pen": ["ballpoint pen", "fountain pen"],
+            "paper": ["sheet", "document"],
+            "book": ["volume", "tome"],
+            "newspaper": ["paper", "journal"],
+            "magazine": ["periodical", "glossy"],
+            "envelope": ["mailer", "wrapper"],
+            "stamp": ["postage stamp"],
+            "card": ["greeting card", "playing card"],
+            "gift": ["present", "offering"],
+            "balloon": ["air balloon", "blimp"],
+            "candle": ["taper", "wick"],
+            "cake": ["pastry", "gateau"],
+            "cookie": ["biscuit", "cracker"],
+            "candy": ["sweet", "confectionery"],
+            "chocolate": ["cocoa", "bonbon"],
+            "ice cream": ["gelato", "sorbet"],
+            "juice": ["nectar", "drink"],
+            "soda": ["pop", "fizzy drink"],
+            "beer": ["ale", "lager"],
+            "wine": ["vino", "grape wine"],
+            "cocktail": ["mixed drink", "aperitif"],
+            "pizza": ["pie", "slice"],
+            "burger": ["hamburger", "cheeseburger"],
+            "fries": ["chips", "french fries"],
+            "salad": ["greens", "coleslaw"],
+            "soup": ["broth", "stew"],
+            "bread": ["loaf", "bun"],
+            "cheese": ["dairy", "curd"],
+            "egg": ["ovum", "roe"],
+            "milk": ["dairy milk", "lactose"],
+            "yogurt": ["yoghurt", "cultured milk"],
+            "butter": ["margarine", "spread"],
+            "jam": ["jelly", "preserve"],
+            "honey": ["nectar", "syrup"],
+            "sugar": ["sweetener", "sucrose"],
+            "salt": ["sodium chloride", "seasoning"],
+            "pepper": ["spice", "peppercorn"],
+            "mustard": ["condiment", "sauce"],
+            "ketchup": ["catsup", "tomato sauce"],
+            "mayonnaise": ["mayo", "aioli"],
+            "oil": ["cooking oil", "lubricant"],
+            "vinegar": ["acetic acid", "sour wine"],
+            "flour": ["meal", "powder"],
+            "rice": ["grain", "paddy"],
+            "pasta": ["noodle", "macaroni"],
+            "meat": ["flesh", "protein"],
+            "chicken": ["poultry", "hen"],
+            "beef": ["steak", "veal"],
+            "pork": ["ham", "bacon"],
+            "fish": ["seafood", "finfish"],
+            "shrimp": ["prawn", "crustacean"],
+            "crab": ["crustacean", "shellfish"],
+            "lobster": ["crayfish", "crustacean"],
+            "oyster": ["clam", "mussel"],
+            "apple": ["fruit", "gala apple"],
+            "banana": ["fruit", "plantain"],
+            "orange": ["citrus", "fruit"],
+            "lemon": ["citrus", "lime"],
+            "grape": ["berry", "vine fruit"],
+            "strawberry": ["berry", "garden strawberry"],
+            "blueberry": ["berry", "huckleberry"],
+            "raspberry": ["berry", "cane fruit"],
+            "pineapple": ["ananas", "tropical fruit"],
+            "mango": ["tropical fruit"],
+            "avocado": ["alligator pear"],
+            "tomato": ["fruit", "vegetable"],
+            "potato": ["spud", "tuber"],
+            "onion": ["bulb", "allium"],
+            "garlic": ["clove", "allium"],
+            "carrot": ["root vegetable"],
+            "broccoli": ["calabrese", "green vegetable"],
+            "cabbage": ["colewort", "brassica"],
+            "lettuce": ["salad greens", "romaine"],
+            "spinach": ["leafy green"],
+            "cucumber": ["gourd", "vegetable"],
+            "bell pepper": ["capsicum", "sweet pepper"],
+            "chili pepper": ["chilli", "hot pepper"],
+            "mushroom": ["fungus", "toadstool"],
+            "corn": ["maize", "sweet corn"],
+            "bean": ["legume", "pod"],
+            "pea": ["legume", "pod"],
+            "nut": ["seed", "kernel"],
+            "peanut": ["groundnut", "goober"],
+            "almond": ["nut", "drupe"],
+            "walnut": ["nut", "juglans"],
+            "pecan": ["nut", "hickory"],
+            "cashew": ["nut", "anacardium"],
+            "pistachio": ["nut", "green almond"],
+            "sunflower seed": ["seed", "achenes"],
+            "pumpkin seed": ["pepita", "seed"],
+            "sesame seed": ["seed", "benne seed"],
+            "flower": ["blossom", "bloom"],
+            "rose": ["flower", "rosa"],
+            "tulip": ["flower", "tulipa"],
+            "daisy": ["flower", "bellis"],
+            "lily": ["flower", "lilium"],
+            "sunflower": ["flower", "helianthus"],
+            "tree": ["plant", "foliage"],
+            "bush": ["shrub", "thicket"],
+            "grass": ["lawn", "turf"],
+            "leaf": ["foliage", "blade"],
+            "rock": ["stone", "boulder"],
+            "mountain": ["hill", "peak"],
+            "river": ["stream", "creek"],
+            "lake": ["pond", "loch"],
+            "ocean": ["sea", "deep"],
+            "beach": ["shore", "coast"],
+            "desert": ["wasteland", "arid land"],
+            "forest": ["woods", "jungle"],
+            "garden": ["park", "yard"],
+            "farm": ["ranch", "plantation"],
+            "city": ["town", "metropolis"],
+            "village": ["hamlet", "settlement"],
+            "road": ["street", "avenue"],
+            "bridge": ["overpass", "viaduct"],
+            "tunnel": ["underpass", "subway"],
+            "building": ["structure", "edifice"],
+            "house": ["home", "dwelling"],
+            "apartment": ["flat", "condo"],
+            "skyscraper": ["tower", "high-rise"],
+            "church": ["cathedral", "chapel"],
+            "mosque": ["masjid", "place of worship"],
+            "temple": ["shrine", "pagoda"],
+            "castle": ["fortress", "palace"],
+            "tower": ["spire", "minaret"],
+            "monument": ["memorial", "statue"],
+            "fountain": ["water feature", "jet"],
+            "statue": ["sculpture", "figure"],
+            "bench": ["seat", "pew"],
+            "table": ["desk", "counter"],
+            "chair": ["seat", "stool"],
+            "bed": ["cot", "bunk"],
+            "sofa": ["couch", "settee"],
+            "cabinet": ["cupboard", "locker"],
+            "shelf": ["rack", "ledge"],
+            "drawer": ["compartment", "pull-out"],
+            "mirror": ["looking glass", "reflector"],
+            "clock": ["timepiece", "watch"],
+            "painting": ["artwork", "picture"],
+            "photo": ["picture", "snapshot"],
+            "television": ["tv", "monitor"],
+            "computer": ["laptop", "desktop"],
+            "phone": ["smartphone", "mobile"],
+            "keyboard": ["keypad", "piano"],
+            "mouse": ["computer mouse", "rodent"],
+            "speaker": ["loudspeaker", "monitor"],
+            "headphone": ["earphone", "headset"],
+            "microphone": ["mic", "mike"],
+            "camera": ["camcorder", "webcam"],
+            "printer": ["scanner", "copier"],
+            "router": ["modem", "gateway"],
+            "fan": ["ventilator", "blower"],
+            "heater": ["radiator", "furnace"],
+            "air conditioner": ["ac", "cooler"],
+            "refrigerator": ["fridge", "icebox"],
+            "microwave": ["micro"],
+            "oven": ["stove", "range"],
+            "dishwasher": ["dish washer"],
+            "washing machine": ["washer", "laundry machine"],
+            "dryer": ["tumble dryer"],
+            "vacuum cleaner": ["hoover", "vacuum"],
+            "broom": ["brush", "sweeper"],
+            "mop": ["swab"],
+            "bucket": ["pail", "can"],
+            "sponge": ["loofah", "scourer"],
+            "soap": ["detergent", "cleanser"],
+            "shampoo": ["conditioner"],
+            "toothbrush": ["tooth brush"],
+            "toothpaste": ["tooth paste"],
+            "towel": ["cloth", "napkin"],
+            "mirror": ["looking glass", "reflector"],
+            "comb": ["brush"],
+            "hair dryer": ["blow dryer"],
+            "razor": ["shaver"],
+            "scissors": ["shears"],
+            "needle": ["pin", "stylus"],
+            "thread": ["yarn", "filament"],
+            "button": ["fastener", "switch"],
+            "zipper": ["slide fastener"],
+            "key": ["fob", "opener"],
+            "lock": ["fastening", "clasp"],
+            "chain": ["link", "shackle"],
+            "rope": ["cord", "cable"],
+            "ladder": ["steps", "stairway"],
+            "tool box": ["toolbox"],
+            "hammer": ["mallet", "gavel"],
+            "saw": ["hacksaw", "handsaw"],
+            "drill": ["borer", "press"],
+            "tape measure": ["measuring tape"],
+            "ruler": ["straightedge"],
+            "pencil": ["graphite pencil"],
+            "pen": ["ballpoint pen", "fountain pen"],
+            "paper": ["sheet", "document"],
+            "book": ["volume", "tome"],
+            "newspaper": ["paper", "journal"],
+            "magazine": ["periodical", "glossy"],
+            "envelope": ["mailer", "wrapper"],
+            "stamp": ["postage stamp"],
+            "card": ["greeting card", "playing card"],
+            "gift": ["present", "offering"],
+            "balloon": ["air balloon", "blimp"],
+            "candle": ["taper", "wick"],
+            "cake": ["pastry", "gateau"],
+            "cookie": ["biscuit", "cracker"],
+            "candy": ["sweet", "confectionery"],
+            "chocolate": ["cocoa", "bonbon"],
+            "ice cream": ["gelato", "sorbet"],
+            "juice": ["nectar", "drink"],
+            "soda": ["pop", "fizzy drink"],
+            "beer": ["ale", "lager"],
+            "wine": ["vino", "grape wine"],
+            "cocktail": ["mixed drink", "aperitif"],
+            "pizza": ["pie", "slice"],
+            "burger": ["hamburger", "cheeseburger"],
+            "fries": ["chips", "french fries"],
+            "salad": ["greens", "coleslaw"],
+            "soup": ["broth", "stew"],
+            "bread": ["loaf", "bun"],
+            "cheese": ["dairy", "curd"],
+            "egg": ["ovum", "roe"],
+            "milk": ["dairy milk", "lactose"],
+            "yogurt": ["yoghurt", "cultured milk"],
+            "butter": ["margarine", "spread"],
+            "jam": ["jelly", "preserve"],
+            "honey": ["nectar", "syrup"],
+            "sugar": ["sweetener", "sucrose"],
+            "salt": ["sodium chloride", "seasoning"],
+            "pepper": ["spice", "peppercorn"],
+            "mustard": ["condiment", "sauce"],
+            "ketchup": ["catsup", "tomato sauce"],
+            "mayonnaise": ["mayo", "aioli"],
+            "oil": ["cooking oil", "lubricant"],
+            "vinegar": ["acetic acid", "sour wine"],
+            "flour": ["meal", "powder"],
+            "rice": ["grain", "paddy"],
+            "pasta": ["noodle", "macaroni"],
+            "meat": ["flesh", "protein"],
+            "chicken": ["poultry", "hen"],
+            "beef": ["steak", "veal"],
+            "pork": ["ham", "bacon"],
+            "fish": ["seafood", "finfish"],
+            "shrimp": ["prawn", "crustacean"],
+            "crab": ["crustacean", "shellfish"],
+            "lobster": ["crayfish", "crustacean"],
+            "oyster": ["clam", "mussel"],
+            "apple": ["fruit", "gala apple"],
+            "banana": ["fruit", "plantain"],
+            "orange": ["citrus", "fruit"],
+            "lemon": ["citrus", "lime"],
+            "grape": ["berry", "vine fruit"],
+            "strawberry": ["berry", "garden strawberry"],
+            "blueberry": ["berry", "huckleberry"],
+            "raspberry": ["berry", "cane fruit"],
+            "pineapple": ["ananas", "tropical fruit"],
+            "mango": ["tropical fruit"],
+            "avocado": ["alligator pear"],
+            "tomato": ["fruit", "vegetable"],
+            "potato": ["spud", "tuber"],
+            "onion": ["bulb", "allium"],
+            "garlic": ["clove", "allium"],
+            "carrot": ["root vegetable"],
+            "broccoli": ["calabrese", "green vegetable"],
+            "cabbage": ["colewort", "brassica"],
+            "lettuce": ["salad greens", "romaine"],
+            "spinach": ["leafy green"],
+            "cucumber": ["gourd", "vegetable"],
+            "bell pepper": ["capsicum", "sweet pepper"],
+            "chili pepper": ["chilli", "hot pepper"],
+            "mushroom": ["fungus", "toadstool"],
+            "corn": ["maize", "sweet corn"],
+            "bean": ["legume", "pod"],
+            "pea": ["legume", "pod"],
+            "nut": ["seed", "kernel"],
+            "peanut": ["groundnut", "goober"],
+            "almond": ["nut", "drupe"],
+            "walnut": ["nut", "juglans"],
+            "pecan": ["nut", "hickory"],
+            "cashew": ["nut", "anacardium"],
+            "pistachio": ["nut", "green almond"],
+            "sunflower seed": ["seed", "achenes"],
+            "pumpkin seed": ["pepita", "seed"],
+            "sesame seed": ["seed", "benne seed"],
+        })
+
+    def _normalize_target(self, target: str) -> str:
+        target = target.lower().strip()
+        # Fix plural stripping: use re.sub(r's$', '', target)
+        target = re.sub(r's$', '', target)
+        return target
+
+    def _get_prompts(self, target: str) -> List[str]:
+        normalized_target = self._normalize_target(target)
+        prompts = [
+            f"a photo of a {normalized_target}",
+            f"a {normalized_target} in this image",
+        ]
+        # Add aliases
+        for alias in self.alias_mapping.get(normalized_target, []):
+            prompts.append(f"a photo of a {alias}")
+            prompts.append(f"a {alias} in this image")
+        return prompts
+
+    async def _get_tile_images(self, iframe: Page) -> List[Image.Image]:
+        # This assumes the tiles are presented as background images or <img> tags
+        # You might need to adjust selectors based on actual hCaptcha implementation
+        tiles_data = await iframe.evaluate("""
+            () => {
+                const tiles = Array.from(document.querySelectorAll('.challenge-image .image-wrapper .image'));
+                return tiles.map(tile => {
+                    const style = window.getComputedStyle(tile);
+                    const bgImage = style.backgroundImage;
+                    if (bgImage && bgImage !== 'none') {
+                        const urlMatch = bgImage.match(/url\(\"(.*?)\"\)/);
+                        if (urlMatch && urlMatch[1]) {
+                            return urlMatch[1];
+                        }
+                    }
+                    // Fallback for <img> tags or other structures
+                    const img = tile.querySelector('img');
+                    if (img && img.src) {
+                        return img.src;
+                    }
+                    return null;
+                }).filter(Boolean);
             }
-            return getExtension.call(this, name);
-        };
-        
-        // Spoof touch capabilities
-        window.navigator.__defineGetter__('maxTouchPoints', () => 5);
-        
-        // Override audio context fingerprint
-        const originalDecode = AudioContext.prototype.decodeAudioData;
-        AudioContext.prototype.decodeAudioData = function() {
-            return Promise.resolve();
-        };
-        
-        // Spoof media devices
-        navigator.mediaDevices = {
-            enumerateDevices: () => Promise.resolve([]),
-            getDisplayMedia: () => Promise.reject(new Error('Not allowed')),
-            getUserMedia: () => Promise.reject(new Error('Not allowed')),
-        };
-    })()
-    """
+        """)
 
-    USER_AGENTS: Final[List[str]] = [
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    ]
+        images = []
+        for data_url in tiles_data:
+            if data_url.startswith('data:image/'):
+                header, encoded = data_url.split(',', 1)
+                img_bytes = base64.b64decode(encoded)
+                images.append(Image.open(io.BytesIO(img_bytes)).convert("RGB"))
+            elif data_url.startswith('http'):
+                # For simplicity, we'll assume direct image URLs are rare or handled by Playwright's context
+                # In a real scenario, you'd fetch these URLs asynchronously
+                print(f"Warning: Direct image URL found, fetching might be slow or blocked: {data_url}")
+                # For now, we'll skip direct URLs or assume they are not the primary source
+                pass
+        return images
 
-    @staticmethod
-    def get_stealth_args(config: SolverConfig) -> Dict[str, Any]:
-        """Generate stealth launch arguments for Playwright."""
-        viewport = [config.viewport_width, config.viewport_height]
-        if config.viewport_jitter:
-            viewport[0] += random.randint(-30, 30)
-            viewport[1] += random.randint(-20, 20)
-
-        return {
-            'headless': config.headless,
-            'args': [
-                '--disable-blink-features=AutomationControlled',
-                '--no-sandbox',
-                '--disable-setuid-sandbox',
-                f'--window-size={viewport[0]},{viewport[1]}',
-                '--disable-webgl',
-                '--disable-features=IsolateOrigins,site-per-process',
-            ],
-            'ignore_default_args': ['--enable-automation'],
-        }
-
-    @staticmethod
-    def get_selenium_options(config: SolverConfig) -> Any:
-        """Generate stealth Chrome options for Selenium."""
-        if not SELENIUM_AVAILABLE:
-            raise BrowserNotAvailableError("Selenium not installed. Run: pip install selenium")
-        if _Options is None:
-            raise BrowserNotAvailableError("Selenium Chrome options not available")
-        
-        options = _Options()
-        options.add_argument('--disable-blink-features=AutomationControlled')
-        options.add_argument('--no-sandbox')
-        options.add_argument('--disable-setuid-sandbox')
-        options.add_argument(f'--window-size={config.viewport_width},{config.viewport_height}')
-        options.add_argument(f'--user-agent={random.choice(StealthPatcher.USER_AGENTS)}')
-        options.add_argument('--disable-webgl')
-        options.add_argument('--disable-features=IsolateOrigins,site-per-process')
-        options.add_experimental_option('excludeSwitches', ['enable-automation'])
-        options.add_experimental_option('useAutomationExtension', False)
-        return options
-
-# =============================================================================
-# GOD SOLVER (PUBLIC API)
-# =============================================================================
-
-class GodSolver:
-    """
-    Unified CAPTCHA solver interface.
-    """
-
-    def __init__(self, config: Optional[SolverConfig] = None):
-        self.config = config if config else SolverConfig()
-        self._playwright_solver: Optional[PlaywrightSolver] = None
-        self._selenium_solver: Optional[SeleniumSolver] = None
-
-    async def solve(self, url: str, backend: BackendType = BackendType.AUTO) -> bool:
-        """Solve CAPTCHA at the given URL using the specified backend."""
-        if backend == BackendType.AUTO:
-            if PLAYWRIGHT_AVAILABLE:
-                backend = BackendType.PLAYWRIGHT
-            elif SELENIUM_AVAILABLE:
-                backend = BackendType.SELENIUM
+    async def _get_challenge_info(self, iframe: Page) -> Tuple[str, List[Image.Image]]:
+        # Get the target text (e.g., 
+        # Get the target text (e.g., "Please select all images containing a bus")
+        # This selector might need adjustment based on hCaptcha's actual DOM structure
+        try:
+            challenge_text = await iframe.locator(".challenge-header .text").text_content()
+            if not challenge_text:
+                challenge_text = await iframe.locator(".challenge-header").text_content()
+            
+            # Extract the target word from the challenge text
+            match = re.search(r'select all images with a\s([a-zA-Z0-9\s]+)', challenge_text, re.IGNORECASE)
+            if not match:
+                match = re.search(r'select all images of\s([a-zA-Z0-9\s]+)', challenge_text, re.IGNORECASE)
+            if not match:
+                match = re.search(r'click all images containing a\s([a-zA-Z0-9\s]+)', challenge_text, re.IGNORECASE)
+            if not match:
+                match = re.search(r'click all images of\s([a-zA-Z0-9\s]+)', challenge_text, re.IGNORECASE)
+            
+            if match:
+                target = match.group(1).strip()
+                print(f"Detected hCaptcha target: {target}")
             else:
-                raise BrowserNotAvailableError("No browser automation backend available. Install Playwright or Selenium.")
+                print(f"Could not extract target from challenge text: {challenge_text}")
+                target = ""
+        except Exception as e:
+            print(f"Error getting challenge text: {e}")
+            target = ""
 
-        if backend == BackendType.PLAYWRIGHT:
-            if not self._playwright_solver:
-                self._playwright_solver = PlaywrightSolver(self.config)
-                await self._playwright_solver.initialize()
-            return await self._playwright_solver.solve(url)
-        elif backend == BackendType.SELENIUM:
-            if not self._selenium_solver:
-                self._selenium_solver = SeleniumSolver(self.config)
-            return self._selenium_solver.solve(url)
-        else:
-            raise ValueError(f"Unsupported backend type: {backend}")
+        # Get tile images
+        tiles = await iframe.locator(".challenge-image .image-wrapper .image").all()
+        images = []
+        for tile in tiles:
+            # Attempt to get background image first
+            bg_image_url = await tile.evaluate("element => window.getComputedStyle(element).backgroundImage")
+            if bg_image_url and bg_image_url != 'none':
+                match = re.search(r'url\(\"(.*?)\"\)', bg_image_url)
+                if match:
+                    image_url = match.group(1)
+                    if image_url.startswith("data:image/"):
+                        header, encoded = image_url.split(",", 1)
+                        img_bytes = base64.b64decode(encoded)
+                        images.append(Image.open(io.BytesIO(img_bytes)).convert("RGB"))
+                    else:
+                        # For external URLs, we'd need to fetch them. For now, we'll skip or use a placeholder.
+                        # In a real scenario, you'd use Playwright to fetch the image or handle it differently.
+                        print(f"Warning: External image URL found, skipping for now: {image_url}")
+                        images.append(Image.new("RGB", (100, 100), color = 'red')) # Placeholder
+            else:
+                # Fallback for <img> tags inside the tile div
+                img_element = tile.locator("img")
+                if await img_element.count() > 0:
+                    img_src = await img_element.get_attribute("src")
+                    if img_src and img_src.startswith("data:image/"):
+                        header, encoded = img_src.split(",", 1)
+                        img_bytes = base64.b64decode(encoded)
+                        images.append(Image.open(io.BytesIO(img_bytes)).convert("RGB"))
+                    else:
+                        print(f"Warning: img tag with external src or no src found, skipping for now: {img_src}")
+                        images.append(Image.new("RGB", (100, 100), color = 'blue')) # Placeholder
+                else:
+                    print("Warning: No image found for tile, using placeholder.")
+                    images.append(Image.new("RGB", (100, 100), color = 'green')) # Placeholder
 
-    async def close(self) -> None:
-        """Close all active solver sessions."""
-        if self._playwright_solver:
-            await self._playwright_solver.close()
-        if self._selenium_solver:
-            self._selenium_solver.close()
+        return target, images
 
-# Removed SliderSolver, ShapeMatcher, ObjectAlignmentSolver, Trainer as per design
+    async def _solve_challenge(self, iframe: Page, target: str, images: List[Image.Image]) -> List[int]:
+        clip_model = await self._get_clip_model()
 
-# =============================================================================
-# CLI ENTRY POINT
-# =============================================================================
+        # Prepare prompts
+        positive_prompts = self._get_prompts(target)
+        all_prompts = positive_prompts + self.negative_prompts
 
+        # Encode text features
+        text_features = await clip_model.get_text_features(all_prompts)
+        positive_text_features = text_features[:len(positive_prompts)]
+        negative_text_features = text_features[len(positive_prompts):]
+
+        # Encode image features (batch inference)
+        image_features = await clip_model.get_image_features(images)
+
+        # Compute similarity scores
+        positive_similarities = (image_features @ positive_text_features.T).mean(dim=1)
+        negative_similarities = (image_features @ negative_text_features.T).max(dim=1).values
+
+        # Contrast scoring
+        scores = positive_similarities - negative_similarities
+
+        # Adaptive thresholding
+        selected_tiles = []
+        if len(scores) == 0:
+            return []
+
+        max_score = scores.max().item()
+        min_score = scores.min().item()
+        score_range = max_score - min_score
+
+        if score_range > 0.15: # Bimodal gap
+            # Use midpoint between highest negative and lowest positive as threshold
+            # This is a simplification, a true bimodal distribution would need more analysis
+            # For now, we'll use the config threshold if a clear gap isn't obvious from min/max
+            threshold = self.config.clip_confidence_threshold
+            if max_score > self.config.clip_confidence_threshold and min_score < self.config.clip_confidence_threshold:
+                # If scores span the threshold, try to find a natural separation
+                # This is a heuristic, can be improved with clustering or more sophisticated analysis
+                pass # Stick to default threshold for now
+            selected_tiles = [i for i, score in enumerate(scores) if score > threshold]
+        elif max_score < 0.4: # All low scores
+            # Pick top 3 highest scores
+            top_3_indices = torch.topk(scores, min(3, len(scores))).indices.tolist()
+            selected_tiles = top_3_indices
+        elif min_score > 0.5: # All high scores
+            # Pick above median
+            median_score = torch.median(scores).item()
+            selected_tiles = [i for i, score in enumerate(scores) if score > median_score]
+        else: # Default to confidence threshold
+            selected_tiles = [i for i, score in enumerate(scores) if score > self.config.clip_confidence_threshold]
+
+        # Ensure 1-6 tiles are selected
+        if not (1 <= len(selected_tiles) <= 6):
+            # Fallback: if too many or too few, pick top N based on score magnitude
+            # This is a simple heuristic, could be improved.
+            sorted_indices = torch.argsort(scores, descending=True).tolist()
+            selected_tiles = sorted_indices[:min(6, max(1, len(sorted_indices)))]
+
+        return selected_tiles
+
+    async def _click_tiles(self, iframe: Page, tile_indices: List[int]):
+        tiles = await iframe.locator(".challenge-image .image-wrapper .image").all()
+        for i in tile_indices:
+            if i < len(tiles):
+                tile = tiles[i]
+                box = await tile.bounding_box()
+                if box:
+                    x = box["x"] + box["width"] / 2
+                    y = box["y"] + box["height"] / 2
+
+                    # Bezier curve mouse movements
+                    start_x, start_y = await self.playwright_solver.context.pages[0].mouse.position()
+                    if start_x is None or start_y is None:
+                        start_x, start_y = x, y # Fallback if mouse position not available
+
+                    control_x = random.uniform(min(start_x, x), max(start_x, x))
+                    control_y = random.uniform(min(start_y, y), max(start_y, y))
+
+                    points = [
+                        (start_x, start_y),
+                        (control_x, control_y),
+                        (x, y)
+                    ]
+                    
+                    num_steps = random.randint(10, 20)
+                    for i in range(num_steps):
+                        t = i / (num_steps - 1)
+                        # Quadratic Bezier curve calculation
+                        bx = (1-t)**2 * points[0][0] + 2*(1-t)*t * points[1][0] + t**2 * points[2][0]
+                        by = (1-t)**2 * points[0][1] + 2*(1-t)*t * points[1][1] + t**2 * points[2][1]
+                        await self.playwright_solver.context.pages[0].mouse.move(bx, by, steps=1)
+                        await asyncio.sleep(random.uniform(0.01, 0.05))
+
+                    await self.playwright_solver.context.pages[0].mouse.click(x, y)
+                    await self._apply_rate_limit()
+
+    async def solve(self, page: Page) -> bool:
+        start_time = time.time()
+        detector = ChallengeDetector(page)
+
+        # Ensure browser is launched and page is ready
+        if self.playwright_solver.browser is None:
+            await self.playwright_solver._launch_browser()
+        
+        # Navigate to the page if not already there (assuming page is already passed in)
+        # await page.goto(url) # This might not be needed if the page is already at the challenge
+
+        for round_num in range(self.config.max_challenge_rounds):
+            print(f"Attempting hCaptcha solve round {round_num + 1}/{self.config.max_challenge_rounds}")
+            round_start_time = time.time()
+
+            # Wait for hCaptcha iframe to appear and be ready
+            try:
+                await page.wait_for_selector('iframe[src*="hcaptcha.com/captcha"]', timeout=self.config.timeout * 1000)
+                iframe_locator = page.frame_locator('iframe[src*="hcaptcha.com/captcha"]')
+                iframe = await iframe_locator.frame()
+                if not iframe:
+                    print("hCaptcha iframe not found or not loaded.")
+                    continue
+                
+                # Wait for challenge elements inside the iframe
+                await iframe.wait_for_selector(".challenge-image", timeout=self.config.timeout * 1000)
+                await iframe.wait_for_selector(".challenge-header", timeout=self.config.timeout * 1000)
+
+            except Exception as e:
+                print(f"hCaptcha challenge elements not found within timeout: {e}")
+                if await detector.is_solved():
+                    print("Captcha already solved, exiting.")
+                    return True
+                return False # Cannot proceed without challenge elements
+
+            target, images = await self._get_challenge_info(iframe)
+            if not target or not images:
+                print("Failed to get challenge info (target or images). Retrying round.")
+                continue
+
+            selected_tiles = await self._solve_challenge(iframe, target, images)
+            print(f"Selected tiles: {selected_tiles}")
+
+            if selected_tiles:
+                await self._click_tiles(iframe, selected_tiles)
+                # Click the verify button
+                try:
+                    verify_button = iframe.locator(".verify-button")
+                    if await verify_button.is_visible():
+                        await verify_button.click()
+                        await self._apply_rate_limit()
+                        print("Clicked verify button.")
+                except Exception as e:
+                    print(f"Error clicking verify button: {e}")
+
+            # Wait for min_solve_time_per_round before checking if solved
+            time_elapsed_this_round = time.time() - round_start_time
+            if time_elapsed_this_round < self.config.min_solve_time_per_round:
+                await asyncio.sleep(self.config.min_solve_time_per_round - time_elapsed_this_round)
+
+            # Check if solved
+            if await detector.is_solved():
+                print("hCaptcha solved successfully!")
+                return True
+            else:
+                print("hCaptcha not yet solved, attempting next round if available.")
+                # If not solved, hCaptcha usually reloads with new images. No explicit refresh needed.
+
+        print("Failed to solve hCaptcha after maximum rounds.")
+        return False
+
+    async def close(self):
+        await self.playwright_solver.close()
+
+# --- Selenium Solver (Placeholder for future expansion) --- #
+class SeleniumSolver(CaptchaSolver):
+    async def solve(self, page) -> bool:
+        print("SeleniumSolver not implemented.")
+        return False
+
+# --- CLI Entry Point (Example Usage) --- #
 async def main():
-    import argparse
-
-    parser = argparse.ArgumentParser(description="hCaptcha Solver CLI")
-    parser.add_argument("--url", type=str, required=True, help="URL to solve hCaptcha on")
-    parser.add_argument("--headless", action="store_true", help="Run browser in headless mode")
-    parser.add_argument("--browser", type=str, default="chromium", choices=["chromium", "firefox", "webkit"], help="Browser type")
-    parser.add_argument("--backend", type=str, default="auto", choices=["auto", "playwright", "selenium"], help="Automation backend")
-    parser.add_argument("--max-rounds", type=int, default=4, help="Maximum challenge rounds to attempt")
-    parser.add_argument("--min-solve-time", type=float, default=8.0, help="Minimum solve time per round in seconds")
-    parser.add_argument("--clip-threshold", type=float, default=0.75, help="CLIP confidence threshold")
-    parser.add_argument("--yolo-threshold", type=float, default=0.25, help="YOLO confidence threshold (if YOLO is enabled)")
-    parser.add_argument("--model-dir", type=str, help="Directory to store models")
-
-    args = parser.parse_args()
-
     config = SolverConfig(
-        headless=args.headless,
-        browser_type=args.browser,
-        max_challenge_rounds=args.max_rounds,
-        min_solve_time_per_round=args.min_solve_time,
-        clip_confidence_threshold=args.clip_threshold,
-        yolo_confidence_threshold=args.yolo_threshold,
-        model_dir=Path(args.model_dir) if args.model_dir else None
+        headless=False,
+        clip_confidence_threshold=0.55,
+        max_challenge_rounds=3,
+        timeout=30,
+        min_solve_time_per_round=2.5,
+        rate_limit_min_delay=0.1,
+        rate_limit_max_delay=0.35
     )
-
     solver = GodSolver(config)
     try:
-        logger.info(f"Attempting to solve hCaptcha on {args.url} using {args.backend} backend...")
-        success = await solver.solve(args.url, BackendType[args.backend.upper()])
-        if success:
-            logger.info("hCaptcha solved successfully!")
-        else:
-            logger.error("Failed to solve hCaptcha.")
-        return 0 if success else 1
-    except CaptchaHubError as e:
-        logger.critical(f"Solver error: {e}")
-        return 1
-    except Exception as e:
-        logger.critical(f"An unexpected error occurred: {e}\n{traceback.format_exc()}")
-        return 1
+        # Example usage: navigate to a page with hCaptcha
+        # For a real test, you'd need a URL that reliably presents an hCaptcha
+        # For now, this is just a placeholder to show how to use it.
+        # page = await solver.playwright_solver.new_page()
+        # await page.goto("https://www.hcaptcha.com/" ) # Example, might not trigger challenge
+        # await solver.solve(page)
+        print("GodSolver initialized. To use, pass a Playwright page object to solver.solve(page).")
     finally:
         await solver.close()
 
 if __name__ == "__main__":
-    sys.exit(asyncio.run(main()))
+    import io
+    asyncio.run(main())
+

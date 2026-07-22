@@ -1,392 +1,186 @@
+
 import asyncio
-import base64
 import json
-import os
 import random
 import time
-from pathlib import Path
+from datetime import datetime
 from typing import Optional
 
-from playwright.async_api import async_playwright, Page, BrowserContext
+from playwright.async_api import Page, expect
 
-import captcha_solver
-
+from captcha_solver import GodSolver, SolverConfig
 
 class DiscordAutomation:
-    def __init__(self, headless: bool = False):
-        self.headless = headless
-        self._playwright = None
-        self._browser = None
-        self._context = None
-        self._page = None
-        self._screenshots: list = []
-        self._email = ""
-        self._username = ""
-        self._password = ""
+    def __init__(self, page: Page):
+        self.page = page
+        self.base_url = "https://discord.com/register"
+        self.captcha_solver: Optional[GodSolver] = None
 
-    async def initialize(self) -> None:
-        self._playwright = await async_playwright().start()
-        
-        args = [
-            '--disable-blink-features=AutomationDetected',
-            '--no-sandbox',
-            '--disable-setuid-sandbox',
-            '--disable-webgl',
-            '--disable-features=IsolateOrigins,site-per-process',
-        ]
-        
-        self._browser = await self._playwright.chromium.launch(
-            headless=self.headless,
-            args=args
+    async def navigate_to_register(self):
+        await self.page.goto(self.base_url)
+        await expect(self.page).to_have_url(self.base_url)
+
+    async def _solve_hcaptcha_if_present(self):
+        # Check for hCaptcha iframe
+        hcaptcha_iframe_locator = self.page.frame_locator('iframe[src*="hcaptcha.com/captcha"]').or_(
+            self.page.frame_locator('iframe[title="hCaptcha security check"]')
         )
-        
-        self._context = await self._browser.new_context(
-            viewport={'width': 1920, 'height': 1080},
-            user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-        )
-        
-        await self._context.add_init_script("""
-            Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-            Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
-            Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
-        """)
-        
-        self._page = await self._context.new_page()
 
-    def load_config(self, config_path: str = "config.json") -> None:
-        with open(config_path, 'r') as f:
-            config = json.load(f)
-        
-        self._email = config.get('email', '') or ''
-        self._username = config.get('username', '') or self._generate_username()
-        self._password = config.get('password', '') or self._generate_password()
-        print(f"[Config] Email: {self._email}, Username: {self._username}, Password set: {bool(self._password)}")
-    
-    def _generate_username(self) -> str:
-        chars = 'abcdefghijklmnopqrstuvwxyz'
-        return ''.join(random.choice(chars) for _ in range(8))
-
-    def _generate_password(self) -> str:
-        chars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%^&*'
-        return ''.join(random.choice(chars) for _ in range(16))
-
-    async def read_email_from_file(self, file_path: str) -> str:
-        with open(file_path, 'r') as f:
-            content = f.read()
-        
-        import re
-        match = re.search(r'[\w\.-]+@[\w\.-]+\.\w+', content)
-        if match:
-            return match.group(0)
-        return "test@example.com"
-
-    async def capture_screenshot(self) -> str:
-        if not self._page:
-            return ""
-        
-        screenshot = await self._page.screenshot(full_page=True)
-        b64 = base64.b64encode(screenshot).decode('utf-8')
-        self._screenshots.append(b64)
-        
-        if len(self._screenshots) > 100:
-            self._screenshots = self._screenshots[-50:]
-        
-        return b64
-
-    async def start_discord_signup(self) -> bool:
-        if not self._page:
-            await self.initialize()
-        
-        try:
-            success = await asyncio.wait_for(self._fill_registration_form(), timeout=60)
-        except asyncio.TimeoutError:
-            print("[Activity] Form filling timed out after 60 seconds")
-            success = False
-        
-        await self.capture_screenshot()
-        
-        return success
-
-    async def _solve_hcaptcha_if_present(self) -> bool:
-        try:
-            hcaptcha_iframe = await self._page.query_selector('iframe[src*="hcaptcha.com"], iframe[src*="captcha.hcaptcha.com"]')
-            if not hcaptcha_iframe:
+        if await hcaptcha_iframe_locator.count() > 0:
+            print("hCaptcha detected, attempting to solve...")
+            if not self.captcha_solver:
+                config = SolverConfig(
+                    headless=False,
+                    clip_confidence_threshold=0.55,
+                    max_challenge_rounds=3,
+                    timeout=30
+                )
+                self.captcha_solver = GodSolver(config)
+            
+            # Pass the current page to the solver
+            solved = await self.captcha_solver.solve(self.page)
+            if solved:
+                print("hCaptcha solved successfully.")
+                # Wait for the iframe to potentially disappear or for the page to react
+                await self.page.wait_for_timeout(2000) # Small delay
                 return True
-            
-            config = captcha_solver.SolverConfig(
-                headless=False,
-                confidence_threshold=0.65,
-                max_retries=3,
-                timeout=30
-            )
-            
-            solver = captcha_solver.GodSolver(config)
-            success = await solver.solve(self._page.url)
-            await solver.close()
-            
-            return success
-        except Exception as e:
-            print(f"hCaptcha solve error: {e}")
-            return True
-
-    async def _select_dob(self, label: str, option_text: str) -> bool:
-        """Select DOB by clicking combobox, waiting for listbox, clicking option."""
-        try:
-            print(f"[Activity] Selecting {label}: {option_text}")
-            
-            # Click the combobox to open the dropdown
-            combobox = self._page.get_by_role("combobox", {"name": label})
-            if await combobox.count() == 0:
-                # Fallback to CSS selector
-                combobox = self._page.locator(f'[role="combobox"][aria-label="{label}"]')
-            if await combobox.count() == 0:
-                # Try matching by placeholder text or nearby label
-                combobox = self._page.locator(f'select:near(:text("{label}"))')
-            if await combobox.count() == 0:
-                # Try generic select elements in order (Month=0, Day=1, Year=2)
-                selects = self._page.locator('select')
-                select_count = await selects.count()
-                if select_count > 0:
-                    idx = {"Month": 0, "Day": 1, "Year": 2}.get(label, -1)
-                    if idx >= 0 and idx < select_count:
-                        # Use native select
-                        await selects.nth(idx).select_option(label=option_text)
-                        await asyncio.sleep(0.3)
-                        print(f"[Activity] Selected {label}: {option_text} via native select")
-                        return True
-                print(f"[Activity] Combobox {label} not found")
-                return False
-            
-            # Check if it's a native <select> element
-            tag = await combobox.first.evaluate("el => el.tagName.toLowerCase()")
-            if tag == 'select':
-                await combobox.first.select_option(label=option_text)
-                await asyncio.sleep(0.3)
-                print(f"[Activity] Selected {label}: {option_text} via native select")
-                return True
-            
-            # Custom dropdown - click to open
-            await combobox.first.click()
-            await asyncio.sleep(0.8)
-            
-            # Wait for listbox (dropdown) to appear
-            try:
-                listbox = self._page.get_by_role("listbox")
-                await listbox.wait_for(state="visible", timeout=5000)
-            except:
-                print(f"[Activity] Listbox not found for {label}, trying options directly")
-            
-            # Try exact match with role=option
-            option = self._page.get_by_role("option", {"name": option_text, "exact": True})
-            if await option.count() > 0:
-                await option.first.scroll_into_view_if_needed()
-                await asyncio.sleep(0.2)
-                await option.first.click()
-                await asyncio.sleep(0.3)
-                return True
-            
-            # Try non-exact role match
-            option = self._page.get_by_role("option", {"name": option_text})
-            if await option.count() > 0:
-                await option.first.scroll_into_view_if_needed()
-                await asyncio.sleep(0.2)
-                await option.first.click()
-                await asyncio.sleep(0.3)
-                return True
-            
-            # Try partial match with role=option
-            option = self._page.locator(f'[role="option"]:has-text("{option_text}")')
-            if await option.count() > 0:
-                await option.first.scroll_into_view_if_needed()
-                await asyncio.sleep(0.2)
-                await option.first.click()
-                await asyncio.sleep(0.3)
-                return True
-            
-            # Try li elements inside the dropdown
-            option = self._page.locator(f'li:has-text("{option_text}")')
-            if await option.count() > 0:
-                await option.first.scroll_into_view_if_needed()
-                await asyncio.sleep(0.2)
-                await option.first.click()
-                await asyncio.sleep(0.3)
-                return True
-            
-            # Try any visible element with exact text
-            option = self._page.locator(f'[role="listbox"] >> text="{option_text}"')
-            if await option.count() > 0:
-                await option.first.scroll_into_view_if_needed()
-                await asyncio.sleep(0.2)
-                await option.first.click()
-                await asyncio.sleep(0.3)
-                return True
-            
-            # Last resort: scroll through listbox to find the option
-            listbox = self._page.locator('[role="listbox"]')
-            if await listbox.count() > 0:
-                # Scroll down in the listbox to find the year/option
-                for scroll_attempt in range(10):
-                    option = self._page.locator(f'[role="option"]:has-text("{option_text}")')
-                    if await option.count() > 0:
-                        await option.first.scroll_into_view_if_needed()
-                        await asyncio.sleep(0.2)
-                        await option.first.click()
-                        await asyncio.sleep(0.3)
-                        return True
-                    # Scroll down inside the listbox
-                    await listbox.first.evaluate("el => el.scrollTop += 200")
-                    await asyncio.sleep(0.3)
-            
-            print(f"[Activity] Option '{option_text}' not found for {label}")
-            # Debug: list available options
-            all_opts = self._page.locator('[role="option"]')
-            count = await all_opts.count()
-            if count > 0:
-                for i in range(min(count, 10)):
-                    text = await all_opts.nth(i).inner_text()
-                    print(f"[Activity]   Available: {text[:50]}")
-            return False
-            
-        except Exception as e:
-            print(f"[Activity] Failed to select {label} '{option_text}': {e}")
-            import traceback
-            traceback.print_exc()
-            return False
-
-    async def _fill_registration_form(self) -> bool:
-        try:
-            print("[Activity] Navigating to Discord registration page...")
-            await self._page.goto('https://discord.com/register', wait_until='networkidle')
-            await asyncio.sleep(3)
-            
-            print(f"[Activity] Filling email: {self._email}")
-            await self._page.wait_for_selector('input[name="email"]', timeout=15000)
-            await self._page.locator('input[name="email"]').fill(self._email)
-            await self._human_pause()
-            
-            display_name = self._username[:15] if len(self._username) > 15 else self._username
-            print(f"[Activity] Filling display name: {display_name}")
-            await self._page.wait_for_selector('input[name="global_name"]', timeout=10000)
-            await self._page.locator('input[name="global_name"]').fill(display_name)
-            await self._human_pause()
-            
-            print(f"[Activity] Filling username: {self._username}")
-            await self._page.locator('input[name="username"]').fill(self._username)
-            await self._human_pause()
-            
-            print("[Activity] Filling password")
-            await self._page.locator('input[name="password"]').fill(self._password)
-            await self._human_pause()
-            
-            month_val = random.randint(1, 12)
-            day_val = str(random.randint(1, 28))
-            year_val = str(random.randint(1990, 1999))
-            months = ['January', 'February', 'March', 'April', 'May', 'June',
-                     'July', 'August', 'September', 'October', 'November', 'December']
-            month_name = months[month_val - 1]
-            print(f"[Activity] Selecting DOB: {month_name} {day_val}, {year_val}")
-            
-            await self._select_dob("Month", month_name)
-            await self._human_pause()
-            
-            await self._select_dob("Day", day_val)
-            await self._human_pause()
-            
-            await self._select_dob("Year", year_val)
-            await self._human_pause()
-            
-            print("[Activity] Clicking Create Account button")
-            await self._page.get_by_role("button", {"name": "Create Account"}).click()
-            await asyncio.sleep(5)
-            
-            if await self._solve_hcaptcha_if_present():
-                print("[Activity] Registration completed")
-                return True
-            print("[Activity] Registration failed - hCaptcha error")
-            return False
-            
-        except Exception as e:
-            print(f"[Activity] Form filling error: {e}")
-            import traceback
-            traceback.print_exc()
-            return False
-
-    async def _human_click(self, element) -> None:
-        try:
-            box = await element.bounding_box()
-            if box:
-                x = box['x'] + random.uniform(box['width'] * 0.3, box['width'] * 0.7)
-                y = box['y'] + random.uniform(box['height'] * 0.3, box['height'] * 0.7)
-                
-                steps = random.randint(8, 20)
-                await self._page.mouse.move(x, y, steps=steps)
-                await asyncio.sleep(random.uniform(0.05, 0.15))
-                await self._page.mouse.down()
-                await asyncio.sleep(random.uniform(0.03, 0.1))
-                await self._page.mouse.up()
             else:
-                await element.click()
+                print("Failed to solve hCaptcha.")
+                return False
+        return True # No hCaptcha present
+
+    async def _select_dob(self, month: str, day: str, year: str):
+        print(f"Attempting to select DOB: {month}/{day}/{year}")
+
+        # 1. Try native <select> elements first
+        try:
+            await self.page.locator('select[aria-label="Month"]').select_option(month)
+            await self.page.locator('select[aria-label="Day"]').select_option(day)
+            await self.page.locator('select[aria-label="Year"]').select_option(year)
+            print("Successfully set DOB using native select elements.")
+            return
         except Exception as e:
-            print(f"Click error: {e}")
-            try:
-                await element.click()
-            except:
-                pass
+            print(f"Native select failed: {e}. Trying custom dropdowns.")
 
-    async def _human_pause(self) -> None:
-        await asyncio.sleep(random.uniform(0.1, 0.5))
-
-    async def live_camera_loop(self, interval: int = 3) -> None:
-        while True:
-            await self.capture_screenshot()
-            await asyncio.sleep(interval)
-
-    async def close(self) -> None:
-        if self._page:
-            await self._page.close()
-        if self._context:
-            await self._context.close()
-        if self._browser:
-            await self._browser.close()
-        if self._playwright:
-            await self._playwright.stop()
-
-    def get_screenshots(self) -> list:
-        return self._screenshots
-
-    def get_latest_screenshot(self) -> str:
-        if self._screenshots:
-            return self._screenshots[-1]
-        return ""
-
-
-async def run_discord_automation(config_path: str = "config.json"):
-    config = {}
-    try:
-        with open(config_path, 'r') as f:
-            config = json.load(f)
-    except:
-        pass
-    
-    headless = config.get('headless', True)
-    bot = DiscordAutomation(headless=headless)
-    
-    try:
-        await bot.initialize()
-        bot.load_config(config_path)
-        
-        success = await bot.start_discord_signup()
-        
-        if success:
-            print("Registration form filled successfully")
+        # 2. Try clicking custom dropdown divs
+        # Month
+        month_div_locator = self.page.locator('div[id^="react-select-"][id$="-placeholder"]:has-text("Month")')
+        if await month_div_locator.count() > 0:
+            await month_div_locator.click()
+            await self.page.locator(f'[id^="react-select-"][id$="-option-"]:has-text("{month}")').click()
+            print(f"Selected month: {month}")
         else:
-            print("Registration form filling failed")
-        
-        await asyncio.sleep(5)
-        
-    finally:
-        await bot.close()
+            print("Could not find custom month dropdown.")
 
+        # Day
+        day_div_locator = self.page.locator('div[id^="react-select-"][id$="-placeholder"]:has-text("Day")')
+        if await day_div_locator.count() > 0:
+            await day_div_locator.click()
+            await self.page.locator(f'[id^="react-select-"][id$="-option-"]:has-text("{day}")').click()
+            print(f"Selected day: {day}")
+        else:
+            print("Could not find custom day dropdown.")
+
+        # Year (needs scrolling)
+        year_div_locator = self.page.locator('div[id^="react-select-"][id$="-placeholder"]:has-text("Year")')
+        if await year_div_locator.count() > 0:
+            await year_div_locator.click()
+            # Discord's year dropdown is a virtualized list, need to scroll
+            year_option_locator = self.page.locator(f'[id^="react-select-"][id$="-option-"]:has-text("{year}")]')
+            listbox_locator = self.page.locator('[id^="react-select-"][role="listbox"]').or_(self.page.locator('[class*="menu"]'))
+
+            if await listbox_locator.count() > 0:
+                listbox = listbox_locator.first
+                max_scrolls = 50 # Prevent infinite loop
+                for _ in range(max_scrolls):
+                    if await year_option_locator.is_visible():
+                        await year_option_locator.click()
+                        print(f"Selected year: {year}")
+                        break
+                    await listbox.evaluate("node => node.scrollTop += 200") # Scroll down
+                    await asyncio.sleep(0.1) # Small delay for rendering
+                else:
+                    print(f"Could not find year {year} after scrolling.")
+            else:
+                print("Could not find year listbox.")
+        else:
+            print("Could not find custom year dropdown.")
+
+        # 3. JavaScript fallback (if all else fails)
+        try:
+            await self.page.evaluate("""
+                (month, day, year) => {
+                    const monthSelect = document.querySelector('select[aria-label="Month"]');
+                    const daySelect = document.querySelector('select[aria-label="Day"]');
+                    const yearSelect = document.querySelector('select[aria-label="Year"]');
+
+                    if (monthSelect) { monthSelect.value = month; monthSelect.dispatchEvent(new Event('change')); }
+                    if (daySelect) { daySelect.value = day; daySelect.dispatchEvent(new Event('change')); }
+                    if (yearSelect) { yearSelect.value = year; yearSelect.dispatchEvent(new Event('change')); }
+                }
+            """, month, day, year)
+            print("Successfully set DOB using JavaScript fallback.")
+        except Exception as e:
+            print(f"JavaScript fallback for DOB failed: {e}")
+
+    async def fill_registration_form(self, email, username, password):
+        print("Filling registration form...")
+        await self.page.locator('input[name="email"]').fill(email)
+        await self.page.locator('input[name="username"]').fill(username)
+        await self.page.locator('input[name="password"]').fill(password)
+
+        # Date of Birth
+        # Year is always 1990-1999
+        year = str(random.randint(1990, 1999))
+        # Month uses number string ("1"-"12") for value-based select, and full name for text-based click
+        month_num = str(random.randint(1, 12))
+        month_name = datetime.strptime(month_num, "%m").strftime("%B")
+        # Day uses number string ("1"-"28")
+        day = str(random.randint(1, 28))
+
+        await self._select_dob(month_name, day, year) # Pass month_name for custom dropdowns, day and year as numbers
+
+        await self.page.locator('input[type="checkbox"]').check()
+        await self.page.wait_for_timeout(1000) # Small delay
+
+        # Attempt to solve hCaptcha before clicking continue
+        if not await self._solve_hcaptcha_if_present():
+            print("Failed to solve hCaptcha during registration form fill. Aborting.")
+            return False
+
+        await self.page.locator('button[type="submit"]').click()
+        print("Clicked continue button.")
+        return True
+
+    async def close(self):
+        if self.captcha_solver:
+            await self.captcha_solver.close()
+
+async def main():
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=False) # For testing, set headless=False
+        page = await browser.new_page()
+        discord_automation = DiscordAutomation(page)
+        try:
+            await discord_automation.navigate_to_register()
+            # Replace with actual data for testing
+            email = f"test_{int(time.time())}@example.com"
+            username = f"testuser_{int(time.time())}"
+            password = "TestPassword123!"
+            
+            success = await discord_automation.fill_registration_form(email, username, password)
+            if success:
+                print("Registration form filled, awaiting next steps (e.g., email verification).")
+                # You would add logic here to handle email verification, etc.
+                await page.wait_for_timeout(10000) # Keep page open for a bit to observe
+            else:
+                print("Registration failed.")
+
+        except Exception as e:
+            print(f"An error occurred: {e}")
+        finally:
+            await discord_automation.close()
+            await browser.close()
 
 if __name__ == "__main__":
-    asyncio.run(run_discord_automation())
+    asyncio.run(main())
