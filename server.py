@@ -20,9 +20,29 @@ class DiscordAutomation:
         self._context = None
         self._page = None
         self._screenshots: list = []
+        self._activity_log: list = []  # Real activity log - never lies, never fakes
         self._email = ""
         self._username = ""
         self._password = ""
+
+    def _log(self, message: str, level: str = "info") -> None:
+        """Add a truthful entry to the activity log. Never fake, never lie."""
+        import time as _time
+        entry = {
+            "time": _time.strftime("%H:%M:%S"),
+            "timestamp": _time.time(),
+            "level": level,
+            "message": message
+        }
+        self._activity_log.append(entry)
+        # Keep last 200 entries
+        if len(self._activity_log) > 200:
+            self._activity_log = self._activity_log[-200:]
+        print(f"[{entry['time']}] [{level.upper()}] {message}", flush=True)
+
+    def get_activity_log(self) -> list:
+        """Return the real activity log."""
+        return self._activity_log
 
     async def initialize(self) -> None:
         self._playwright = await async_playwright().start()
@@ -74,7 +94,7 @@ class DiscordAutomation:
         self._email = config.get('email', '') or ''
         self._username = self._generate_username()  # Always generate fresh random username
         self._password = config.get('password', '') or self._generate_password()
-        print(f"[Config] Email: {self._email}, Username: {self._username}, Password set: {bool(self._password)}")
+        self._log(f"Config: Email: {self._email}, Username: {self._username}, Password set: {bool(self._password)}")
     
     def _generate_username(self) -> str:
         """Generate a natural-looking username like real Discord users.
@@ -127,7 +147,7 @@ class DiscordAutomation:
         try:
             success = await asyncio.wait_for(self._fill_registration_form(), timeout=60)
         except asyncio.TimeoutError:
-            print("[Activity] Form filling timed out after 60 seconds")
+            self._log("Form filling timed out after 60 seconds")
             success = False
         
         await self.capture_screenshot()
@@ -137,7 +157,7 @@ class DiscordAutomation:
     async def _solve_hcaptcha_if_present(self) -> bool:
         """Detect and solve hCaptcha with robust multi-method detection."""
         try:
-            print("[Activity] Checking for hCaptcha...")
+            self._log("Checking for hCaptcha...")
             
             # Wait up to 10 seconds for captcha to appear (it can take a moment)
             captcha_found = False
@@ -151,7 +171,7 @@ class DiscordAutomation:
                 )
                 if hcaptcha_iframe:
                     captcha_found = True
-                    print(f"[Activity] hCaptcha iframe detected (attempt {attempt+1})")
+                    self._log(f"hCaptcha iframe detected (attempt {attempt+1})")
                     break
                 
                 # Method 2: Check for hcaptcha div container
@@ -163,7 +183,7 @@ class DiscordAutomation:
                 )
                 if hcaptcha_div:
                     captcha_found = True
-                    print(f"[Activity] hCaptcha div detected (attempt {attempt+1})")
+                    self._log(f"hCaptcha div detected (attempt {attempt+1})")
                     break
                 
                 # Method 3: Check for hcaptcha response textarea (means it loaded)
@@ -173,7 +193,7 @@ class DiscordAutomation:
                 )
                 if textarea:
                     captcha_found = True
-                    print(f"[Activity] hCaptcha textarea detected (attempt {attempt+1})")
+                    self._log(f"hCaptcha textarea detected (attempt {attempt+1})")
                     break
                 
                 # Method 4: Check via JavaScript for any hcaptcha-related elements
@@ -196,17 +216,17 @@ class DiscordAutomation:
                 """)
                 if js_detected:
                     captcha_found = True
-                    print(f"[Activity] hCaptcha detected via JS ({js_detected}, attempt {attempt+1})")
+                    self._log(f"hCaptcha detected via JS ({js_detected}, attempt {attempt+1})")
                     break
                 
                 await asyncio.sleep(0.5)
             
             if not captcha_found:
-                print("[Activity] No hCaptcha detected after 10s - might have passed without captcha")
+                self._log("No hCaptcha detected after 10s - might have passed without captcha")
                 # Check if we're on a success page or error page
                 current_url = self._page.url
                 if 'channels' in current_url or 'app' in current_url:
-                    print("[Activity] Redirected to app - registration succeeded without captcha!")
+                    self._log("Redirected to app - registration succeeded without captcha!")
                     return True
                 return True  # No captcha = success
             
@@ -218,7 +238,7 @@ class DiscordAutomation:
                 checkbox_frame = self._page.frame_locator('iframe[src*="hcaptcha.com/hcaptcha"], iframe[title*="Widget containing checkbox"]')
                 checkbox = checkbox_frame.locator('#checkbox, [role="checkbox"]')
                 if await checkbox.count() > 0:
-                    print("[Activity] Clicking hCaptcha checkbox...")
+                    self._log("Clicking hCaptcha checkbox...")
                     await checkbox.first.click()
                     await asyncio.sleep(3)
                     
@@ -230,10 +250,10 @@ class DiscordAutomation:
                         }
                     """)
                     if checked:
-                        print("[Activity] hCaptcha passed with just checkbox click!")
+                        self._log("hCaptcha passed with just checkbox click!")
                         return True
             except Exception as e:
-                print(f"[Activity] Checkbox click attempt: {e}")
+                self._log(f"Checkbox click attempt: {e}")
             
             # Now solve the full challenge
             config = captcha_solver.SolverConfig(
@@ -248,116 +268,199 @@ class DiscordAutomation:
             await solver.close()
             
             if success:
-                print("[Activity] hCaptcha SOLVED!")
+                self._log("hCaptcha SOLVED!")
                 # Wait for form submission to complete after captcha
                 await asyncio.sleep(3)
             else:
-                print("[Activity] hCaptcha solve FAILED")
+                self._log("hCaptcha solve FAILED")
             
             return success
         except Exception as e:
-            print(f"hCaptcha solve error: {e}")
+            self._log(f"hCaptcha solve error: {e}")
             import traceback
             traceback.print_exc()
             return False
 
     async def _select_dob(self, label: str, option_text: str) -> bool:
-        """Select DOB using multiple strategies: click+type+Enter, keyboard nav, JS with scroll."""
+        """Select DOB dropdown. Discord uses custom React-Select components.
+        The dropdowns show placeholder text 'Month', 'Day', 'Year' and have NO
+        role=combobox or aria-label. We find them by their visible text."""
         try:
-            combobox = self._page.locator(f'[role="combobox"][aria-label="{label}"]')
-            if await combobox.count() == 0:
-                print(f"[Activity] Combobox {label} not found")
-                return False
-            print(f"[Activity] Selecting {label}: {option_text}")
-            # Strategy 1: Click combobox, find input, type, press Enter
-            await combobox.first.click()
-            await asyncio.sleep(0.5)
-            # Find input inside combobox
-            input_loc = self._page.locator(f'[role="combobox"][aria-label="{label}"] input')
-            if await input_loc.count() == 0:
-                input_loc = self._page.locator(f'[id^="react-select-"][id$="-input"]')
-            if await input_loc.count() == 0:
-                input_loc = combobox.first
-            await input_loc.first.fill(option_text)
-            await asyncio.sleep(0.3)
-            await input_loc.first.press("Enter")
-            await asyncio.sleep(0.5)
-            return True
-        except Exception as e:
-            print(f"[Activity] Strategy 1 failed for {label}: {e}")
-            # Strategy 2: Keyboard navigation - click, ArrowDown, Enter
-            try:
-                combobox = self._page.locator(f'[role="combobox"][aria-label="{label}"]')
-                await combobox.first.click()
-                await asyncio.sleep(0.5)
-                await self._page.keyboard.press("ArrowDown")
-                await asyncio.sleep(0.2)
-                await self._page.keyboard.press("Enter")
-                await asyncio.sleep(0.5)
+            self._log(f"Selecting {label}: {option_text}")
+            
+            # Strategy 1: Find the placeholder/value text and click its parent container
+            # Discord's React-Select renders: container > control > valueContainer > placeholder
+            # The placeholder div contains exactly "Month", "Day", or "Year"
+            success = await self._page.evaluate(f"""
+                async () => {{
+                    // Find the element showing the placeholder text
+                    const walker = document.createTreeWalker(
+                        document.body, NodeFilter.SHOW_TEXT, null
+                    );
+                    let node;
+                    let targetEl = null;
+                    while (node = walker.nextNode()) {{
+                        if (node.textContent.trim() === '{label}') {{
+                            // Make sure it's a leaf text node in the DOB area
+                            const parent = node.parentElement;
+                            if (parent && parent.offsetParent !== null && 
+                                !parent.querySelector('input[name="email"]')) {{
+                                targetEl = parent;
+                                break;
+                            }}
+                        }}
+                    }}
+                    
+                    if (!targetEl) return 'no_element';
+                    
+                    // Walk up to find the clickable control container
+                    // React-Select structure: wrapper > control (clickable) > valueContainer > placeholder
+                    let clickTarget = targetEl;
+                    for (let i = 0; i < 5; i++) {{
+                        clickTarget = clickTarget.parentElement;
+                        if (!clickTarget) break;
+                        // The control div usually has a min-height and cursor:pointer
+                        const style = window.getComputedStyle(clickTarget);
+                        if (style.cursor === 'pointer' || 
+                            clickTarget.getAttribute('tabindex') !== null ||
+                            clickTarget.className.includes('control') ||
+                            clickTarget.className.includes('css-')) {{
+                            break;
+                        }}
+                    }}
+                    
+                    if (!clickTarget) clickTarget = targetEl;
+                    
+                    // Click to open the dropdown
+                    clickTarget.dispatchEvent(new MouseEvent('mousedown', {{bubbles: true, cancelable: true}}));
+                    clickTarget.dispatchEvent(new MouseEvent('mouseup', {{bubbles: true, cancelable: true}}));
+                    clickTarget.dispatchEvent(new MouseEvent('click', {{bubbles: true, cancelable: true}}));
+                    
+                    // Wait for dropdown menu to appear
+                    await new Promise(r => setTimeout(r, 600));
+                    
+                    // Look for the option in the dropdown menu
+                    // React-Select renders options with id containing 'option'
+                    const allOptions = document.querySelectorAll(
+                        '[id*="option"], [role="option"], [class*="option"]'
+                    );
+                    
+                    for (const opt of allOptions) {{
+                        const text = opt.textContent.trim();
+                        if (text === '{option_text}') {{
+                            opt.scrollIntoView({{block: 'nearest'}});
+                            opt.dispatchEvent(new MouseEvent('mousedown', {{bubbles: true}}));
+                            opt.dispatchEvent(new MouseEvent('mouseup', {{bubbles: true}}));
+                            opt.dispatchEvent(new MouseEvent('click', {{bubbles: true}}));
+                            return 'selected';
+                        }}
+                    }}
+                    
+                    // If not found, try scrolling the menu list
+                    const menuList = document.querySelector(
+                        '[class*="MenuList"], [class*="menuList"], [id*="listbox"], [role="listbox"]'
+                    );
+                    if (menuList) {{
+                        for (let scroll = 0; scroll < 30; scroll++) {{
+                            menuList.scrollTop += 200;
+                            await new Promise(r => setTimeout(r, 100));
+                            const opts = document.querySelectorAll(
+                                '[id*="option"], [role="option"], [class*="option"]'
+                            );
+                            for (const opt of opts) {{
+                                if (opt.textContent.trim() === '{option_text}') {{
+                                    opt.scrollIntoView({{block: 'nearest'}});
+                                    opt.dispatchEvent(new MouseEvent('mousedown', {{bubbles: true}}));
+                                    opt.dispatchEvent(new MouseEvent('mouseup', {{bubbles: true}}));
+                                    opt.dispatchEvent(new MouseEvent('click', {{bubbles: true}}));
+                                    return 'selected_after_scroll';
+                                }}
+                            }}
+                        }}
+                    }}
+                    
+                    return 'option_not_found';
+                }}
+            """)
+            
+            if success and 'selected' in str(success):
+                self._log(f"Selected {label}: {option_text} via JS ({success})")
+                await asyncio.sleep(0.4)
                 return True
+            
+            self._log(f"JS method result for {label}: {success}")
+            
+            # Strategy 2: Use Playwright's text locator to click, then type to filter
+            try:
+                # Click on the placeholder text directly
+                placeholder = self._page.get_by_text(label, exact=True)
+                if await placeholder.count() > 0:
+                    await placeholder.first.click()
+                    await asyncio.sleep(0.5)
+                    # Type to filter the dropdown
+                    await self._page.keyboard.type(option_text, delay=30)
+                    await asyncio.sleep(0.4)
+                    await self._page.keyboard.press('Enter')
+                    await asyncio.sleep(0.4)
+                    self._log(f"Selected {label}: {option_text} via text click+type")
+                    return True
             except Exception as e2:
-                print(f"[Activity] Strategy 2 failed for {label}: {e2}")
-                # Strategy 3: JavaScript with scroll to find option
-                try:
-                    await self._page.evaluate(f"""
-                        () => {{
-                            const cb = document.querySelector('[role="combobox"][aria-label="{label}"]');
-                            if (!cb) return false;
-                            cb.click();
-                        }}
-                    """)
+                self._log(f"Strategy 2 failed for {label}: {e2}")
+            
+            # Strategy 3: Tab from password field to reach DOB dropdowns
+            try:
+                idx = {"Month": 0, "Day": 1, "Year": 2}.get(label, 0)
+                password_field = self._page.locator('input[name="password"]')
+                if await password_field.count() > 0:
+                    await password_field.click()
+                    await asyncio.sleep(0.2)
+                    # Tab to the correct dropdown
+                    for _ in range(idx + 1):
+                        await self._page.keyboard.press('Tab')
+                        await asyncio.sleep(0.15)
+                    # Open with space/enter and type
+                    await self._page.keyboard.press('Space')
                     await asyncio.sleep(0.5)
-                    result = await self._page.evaluate(f"""
-                        () => {{
-                            const options = document.querySelectorAll('[role="option"]');
-                            for (const opt of options) {{
-                                if (opt.textContent && opt.textContent.trim() === "{option_text}") {{
-                                    opt.scrollIntoView({{block: "center", inline: "center"}});
-                                    opt.click();
-                                    return true;
-                                }}
-                            }}
-                            for (const opt of options) {{
-                                if (opt.textContent && opt.textContent.includes("{option_text}")) {{
-                                    opt.scrollIntoView({{block: "center", inline: "center"}});
-                                    opt.click();
-                                    return true;
-                                }}
-                            }}
-                            return false;
-                        }}
-                    """)
-                    await asyncio.sleep(0.5)
-                    if result:
-                        return True
-                    print(f"[Activity] JS strategy did not find option {option_text} for {label}")
-                    return False
-                except Exception as e3:
-                    print(f"[Activity] All strategies failed for {label}: {e3}")
-                    return False
+                    await self._page.keyboard.type(option_text, delay=30)
+                    await asyncio.sleep(0.3)
+                    await self._page.keyboard.press('Enter')
+                    await asyncio.sleep(0.4)
+                    self._log(f"Selected {label}: {option_text} via tab navigation")
+                    return True
+            except Exception as e3:
+                self._log(f"Strategy 3 failed for {label}: {e3}")
+            
+            self._log(f"All DOB strategies failed for {label}: {option_text}")
+            return False
+            
+        except Exception as e:
+            self._log(f"DOB selection error for {label}: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
 
     async def _fill_registration_form(self) -> bool:
         try:
-            print("[Activity] Navigating to Discord registration page...")
+            self._log("Navigating to Discord registration page...")
             await self._page.goto('https://discord.com/register', wait_until='networkidle')
             await asyncio.sleep(3)
             
-            print(f"[Activity] Filling email: {self._email}")
+            self._log(f"Filling email: {self._email}")
             await self._page.wait_for_selector('input[name="email"]', timeout=15000)
             await self._page.locator('input[name="email"]').fill(self._email)
             await self._human_pause()
             
             display_name = self._username[:15] if len(self._username) > 15 else self._username
-            print(f"[Activity] Filling display name: {display_name}")
+            self._log(f"Filling display name: {display_name}")
             await self._page.wait_for_selector('input[name="global_name"]', timeout=10000)
             await self._page.locator('input[name="global_name"]').fill(display_name)
             await self._human_pause()
             
-            print(f"[Activity] Filling username: {self._username}")
+            self._log(f"Filling username: {self._username}")
             await self._page.locator('input[name="username"]').fill(self._username)
             await self._human_pause()
             
-            print("[Activity] Filling password")
+            self._log("Filling password")
             await self._page.locator('input[name="password"]').fill(self._password)
             await self._human_pause()
             
@@ -368,7 +471,7 @@ class DiscordAutomation:
             months = ['January', 'February', 'March', 'April', 'May', 'June',
                      'July', 'August', 'September', 'October', 'November', 'December']
             month_name = months[month_val - 1]
-            print(f"[Activity] Selecting DOB: {month_name} {day_val}, {year_val}")
+            self._log(f"Selecting DOB: {month_name} {day_val}, {year_val}")
             
             await self._select_dob("Month", month_name)
             await self._human_pause()
@@ -380,7 +483,7 @@ class DiscordAutomation:
             await self._human_pause()
             
             # Click Create Account with multiple fallback methods
-            print("[Activity] Clicking Create Account button")
+            self._log("Clicking Create Account button")
             create_clicked = False
             
             # Method 1: button with exact text
@@ -435,10 +538,10 @@ class DiscordAutomation:
                     pass
             
             if not create_clicked:
-                print("[Activity] ERROR: Could not click Create Account button!")
+                self._log("ERROR: Could not click Create Account button!")
                 return False
             
-            print("[Activity] Create Account clicked, waiting for captcha...")
+            self._log("Create Account clicked, waiting for captcha...")
             await asyncio.sleep(3)
             
             # Take screenshot to see what happened
@@ -446,13 +549,13 @@ class DiscordAutomation:
             
             # Wait for and solve hCaptcha (it always appears after Create Account)
             if await self._solve_hcaptcha_if_present():
-                print("[Activity] Registration completed")
+                self._log("Registration completed")
                 return True
-            print("[Activity] Registration failed - hCaptcha error")
+            self._log("Registration failed - hCaptcha error")
             return False
             
         except Exception as e:
-            print(f"[Activity] Form filling error: {e}")
+            self._log(f"Form filling error: {e}")
             import traceback
             traceback.print_exc()
             return False
