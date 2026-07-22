@@ -1374,139 +1374,561 @@ class GodSolver(CaptchaSolver):
 
 
 # =============================================================================
-# SELENIUM SOLVER (Placeholder)
+# HCAPTCHA DRAG SOLVER
 # =============================================================================
 
 class DragSolver(CaptchaSolver):
     """
-    Advanced Drag-based CAPTCHA solver.
-    Uses computer vision to detect source and target, and human-like drag trajectories.
+    Solves hCaptcha's 'image_drag_drop' / 'drag the icon to the place where it fits'
+    challenges using CLIP vision + OpenCV analysis.
+    
+    Strategy:
+    1. Find the hCaptcha challenge iframe
+    2. Extract the prompt text, background image, and draggable element
+    3. Use CLIP to analyze where the draggable icon belongs on the background
+    4. Use OpenCV edge/contour analysis as a secondary method
+    5. Perform a human-like drag from source to target coordinates
     """
 
     def __init__(self, config: SolverConfig):
         super().__init__(config)
-        self.slider_solver = SliderSolver()
 
-    async def solve(self, page: Page) -> bool:
-        """
-        Main solve loop for drag-based captchas.
-        """
-        print("Starting DragSolver...")
-        
-        for round_num in range(self.config.max_challenge_rounds):
-            print(f"Drag solve attempt {round_num + 1}/{self.config.max_challenge_rounds}")
+    async def _find_challenge_frame(self, page: Page):
+        """Find the hCaptcha challenge iframe (not the checkbox one)."""
+        try:
+            await page.wait_for_selector(
+                'iframe[src*="hcaptcha.com/captcha"], iframe[src*="newassets.hcaptcha.com"], iframe[title*="hCaptcha challenge"]',
+                timeout=self.config.timeout * 1000
+            )
+        except Exception:
+            pass
+
+        for f in page.frames:
+            url = f.url or ''
+            if 'hcaptcha.com' in url and ('captcha' in url or 'challenge' in url):
+                if '/hcaptcha?' in url and 'captcha' not in url:
+                    continue
+                return f
+        return None
+
+    async def _detect_drag_challenge(self, frame) -> bool:
+        """Check if this is a drag-type challenge (not grid)."""
+        try:
+            prompt_text = await frame.evaluate("""
+                () => {
+                    const header = document.querySelector('.challenge-header .text, .challenge-header, .prompt-text, [class*="prompt"]');
+                    return header ? header.textContent : '';
+                }
+            """)
+            if prompt_text:
+                drag_keywords = ['drag', 'place', 'move', 'drop', 'fit', 'position']
+                if any(kw in prompt_text.lower() for kw in drag_keywords):
+                    return True
             
-            # 1. Detect the drag captcha elements
-            # Common selectors for drag captchas (GeeTest, Arkose, etc.)
-            selectors = [
-                '.geetest_slider_button', 
-                '.arkose_drag_handle', 
-                '[class*="slider-button"]', 
-                '[id*="slider"]',
-                '.ctp-checkbox-label' # Some custom ones
+            # Check for draggable elements in DOM
+            has_draggable = await frame.evaluate("""
+                () => {
+                    const draggable = document.querySelector(
+                        '[draggable="true"], .drag-icon, .draggable, ' +
+                        '.challenge-image [style*="cursor: grab"], ' +
+                        '.challenge-image [style*="cursor: move"], ' +
+                        '.task-image.draggable, .drag-element, ' +
+                        '[class*="drag"], [class*="movable"]'
+                    );
+                    return !!draggable;
+                }
+            """)
+            return has_draggable
+        except Exception:
+            return False
+
+    async def _get_challenge_screenshot(self, frame, page: Page) -> Optional[bytes]:
+        """Get a screenshot of the challenge area."""
+        try:
+            challenge_el = frame.locator('.challenge-container, .challenge-view, .task-grid, .challenge-image, .display-language')
+            if await challenge_el.count() > 0:
+                return await challenge_el.first.screenshot()
+            
+            iframe_el = page.locator('iframe[src*="hcaptcha.com/captcha"], iframe[src*="newassets.hcaptcha.com"]')
+            if await iframe_el.count() > 0:
+                return await iframe_el.first.screenshot()
+        except Exception as e:
+            print(f"Challenge screenshot error: {e}")
+        return None
+
+    async def _get_drag_element_info(self, frame) -> Optional[dict]:
+        """Get info about the draggable element: position, size."""
+        try:
+            info = await frame.evaluate("""
+                () => {
+                    const selectors = [
+                        '.drag-icon', '.draggable', '[draggable="true"]',
+                        '.challenge-image .icon', '.task-image',
+                        '[class*="drag"]', '[class*="movable"]',
+                        '.challenge-container img[style*="position: absolute"]',
+                        '.challenge-container [style*="cursor"]'
+                    ];
+                    
+                    for (const sel of selectors) {
+                        const el = document.querySelector(sel);
+                        if (el) {
+                            const rect = el.getBoundingClientRect();
+                            if (rect.width > 10 && rect.height > 10 && rect.width < 200) {
+                                return {
+                                    x: rect.x,
+                                    y: rect.y,
+                                    width: rect.width,
+                                    height: rect.height,
+                                    centerX: rect.x + rect.width / 2,
+                                    centerY: rect.y + rect.height / 2,
+                                    selector: sel
+                                };
+                            }
+                        }
+                    }
+                    
+                    // Fallback: look for small positioned images
+                    const imgs = document.querySelectorAll('.challenge-container img, .challenge-view img');
+                    for (const img of imgs) {
+                        const rect = img.getBoundingClientRect();
+                        const style = window.getComputedStyle(img);
+                        if (rect.width > 20 && rect.width < 150 && 
+                            (style.position === 'absolute' || style.cursor === 'grab' || style.cursor === 'move')) {
+                            return {
+                                x: rect.x,
+                                y: rect.y,
+                                width: rect.width,
+                                height: rect.height,
+                                centerX: rect.x + rect.width / 2,
+                                centerY: rect.y + rect.height / 2,
+                                selector: 'img'
+                            };
+                        }
+                    }
+                    
+                    return null;
+                }
+            """)
+            return info
+        except Exception as e:
+            print(f"Drag element detection error: {e}")
+            return None
+
+    async def _get_target_position_clip(self, frame, page: Page) -> Optional[Tuple[float, float]]:
+        """
+        Use CLIP to analyze the challenge and determine where the icon should go.
+        Takes a screenshot, divides it into a grid, and scores each region.
+        """
+        try:
+            clip_model = await self._get_clip_model()
+            
+            screenshot_bytes = await self._get_challenge_screenshot(frame, page)
+            if not screenshot_bytes:
+                return None
+            
+            challenge_img = Image.open(io.BytesIO(screenshot_bytes)).convert("RGB")
+            w, h = challenge_img.size
+            
+            prompt_text = await frame.evaluate("""
+                () => {
+                    const header = document.querySelector('.challenge-header .text, .challenge-header, .prompt-text, [class*="prompt"]');
+                    return header ? header.textContent.trim() : 'drag the icon to where it fits';
+                }
+            """) or "drag the icon to where it fits"
+            
+            print(f"Drag challenge prompt: '{prompt_text}'")
+            
+            # Divide the background into a grid and find the target region
+            grid_cols = 6
+            grid_rows = 6
+            cell_w = w / grid_cols
+            cell_h = h / grid_rows
+            
+            cells = []
+            for row in range(grid_rows):
+                for col in range(grid_cols):
+                    x1 = int(col * cell_w)
+                    y1 = int(row * cell_h)
+                    x2 = int((col + 1) * cell_w)
+                    y2 = int((row + 1) * cell_h)
+                    cell = challenge_img.crop((x1, y1, x2, y2))
+                    cells.append(cell)
+            
+            # Score each cell using CLIP
+            target_prompts = [
+                "an empty outlined area waiting for an icon to be placed",
+                "a dashed outline or placeholder where something should be dropped",
+                "a target area or drop zone for an icon",
+                "an empty slot or gap in a pattern",
+                "a highlighted or marked position for placement",
+                "an incomplete shape missing a piece",
+            ]
+            non_target_prompts = [
+                "a filled icon or complete shape",
+                "background texture or pattern",
+                "text or labels",
+                "a solid colored area with no outline",
+                "a complete connected pattern",
             ]
             
-            handle = None
-            for sel in selectors:
-                try:
-                    handle = page.locator(sel)
-                    if await handle.count() > 0:
-                        print(f"Found drag handle via: {sel}")
-                        break
-                except:
-                    continue
+            all_prompts = target_prompts + non_target_prompts
+            text_features = await clip_model.get_text_features(all_prompts)
+            pos_features = text_features[:len(target_prompts)]
+            neg_features = text_features[len(target_prompts):]
             
-            if not handle or await handle.count() == 0:
-                # Try to find via images if selectors fail
-                print("No explicit drag handle found via selectors, checking for images...")
-                # This would involve more complex CV logic
-                await asyncio.sleep(2)
-                continue
-
-            # 2. Get the bounding box of the handle
-            box = await handle.bounding_box()
-            if not box:
-                print("Could not get bounding box for drag handle.")
-                continue
-
-            # 3. Detect the target location
-            # For a generic drag solver, we might need to take a screenshot and analyze it
-            # Let's try to use the existing SliderSolver if images are available
-            puzzle_el = page.locator('.geetest_canvas_slice, .puzzle-piece, [class*="slice"]')
-            bg_el = page.locator('.geetest_canvas_bg, .captcha-bg, [class*="bg"]')
+            image_features = await clip_model.get_image_features(cells)
             
-            offset = 0
-            if await puzzle_el.count() > 0 and await bg_el.count() > 0:
-                print("Puzzle and background images detected, calculating offset...")
-                puzzle_bytes = await puzzle_el.screenshot()
-                bg_bytes = await bg_el.screenshot()
-                offset = self.slider_solver.solve(puzzle_bytes, bg_bytes)
-            else:
-                # Fallback: look for a gap in the track or a specific target element
-                print("Images not found, attempting fallback target detection...")
-                # For now, let's assume a default or randomized offset for testing
-                # In a real "OP" solver, we'd do edge detection on the whole page screenshot
-                offset = random.randint(100, 200) 
-
-            if offset <= 0:
-                print("Failed to calculate a valid offset.")
-                offset = random.randint(150, 250) # Last resort guess
-
-            # 4. Perform human-like drag
-            print(f"Performing human-like drag with offset: {offset}")
+            pos_sim = (image_features @ pos_features.T).mean(dim=1)
+            neg_sim = (image_features @ neg_features.T).max(dim=1).values
+            scores = pos_sim - neg_sim
             
-            start_x = box['x'] + box['width'] / 2
-            start_y = box['y'] + box['height'] / 2
-            end_x = start_x + offset
-            end_y = start_y + random.uniform(-5, 5) # Slight vertical variance
+            best_idx = torch.argmax(scores).item()
+            best_row = best_idx // grid_cols
+            best_col = best_idx % grid_cols
+            
+            target_x = (best_col + 0.5) * cell_w
+            target_y = (best_row + 0.5) * cell_h
+            
+            print(f"CLIP target position: ({target_x:.0f}, {target_y:.0f}) [cell {best_row},{best_col}] score={scores[best_idx]:.3f}")
+            
+            return (target_x, target_y)
+        except Exception as e:
+            print(f"CLIP target detection error: {e}")
+            return None
 
-            await page.mouse.move(start_x, start_y)
+    async def _get_target_position_cv(self, frame, page: Page) -> Optional[Tuple[float, float]]:
+        """
+        Use OpenCV to find the target position by detecting:
+        - Dashed outlines / empty regions
+        - Contours that match a "slot" shape
+        - Areas with distinct edge patterns indicating a target
+        """
+        try:
+            screenshot_bytes = await self._get_challenge_screenshot(frame, page)
+            if not screenshot_bytes:
+                return None
+            
+            img = cv2.imdecode(np.frombuffer(screenshot_bytes, np.uint8), cv2.IMREAD_COLOR)
+            if img is None:
+                return None
+            
+            h, w = img.shape[:2]
+            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            
+            # Find dashed/dotted outlines (common for drop targets)
+            edges = cv2.Canny(gray, 50, 150)
+            kernel = np.ones((5, 5), np.uint8)
+            dilated = cv2.dilate(edges, kernel, iterations=2)
+            
+            contours, _ = cv2.findContours(dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            
+            # Look for rectangular contours that could be drop targets
+            target_candidates = []
+            min_area = (w * h) * 0.005
+            max_area = (w * h) * 0.15
+            
+            for contour in contours:
+                area = cv2.contourArea(contour)
+                if min_area < area < max_area:
+                    x, y, cw, ch = cv2.boundingRect(contour)
+                    aspect = cw / max(ch, 1)
+                    if 0.4 < aspect < 2.5:
+                        roi = gray[y:y+ch, x:x+cw]
+                        variance = np.var(roi)
+                        target_candidates.append({
+                            'x': x + cw / 2,
+                            'y': y + ch / 2,
+                            'area': area,
+                            'variance': variance,
+                            'aspect': aspect
+                        })
+            
+            if target_candidates:
+                target_candidates.sort(key=lambda c: c['area'] / max(c['variance'], 1), reverse=True)
+                best = target_candidates[0]
+                print(f"CV target position: ({best['x']:.0f}, {best['y']:.0f}) variance={best['variance']:.1f}")
+                return (best['x'], best['y'])
+            
+            # Fallback: grid-based edge analysis
+            grid_size = 5
+            cell_w_cv = w / grid_size
+            cell_h_cv = h / grid_size
+            best_score = -1
+            best_pos = None
+            
+            for row in range(grid_size):
+                for col in range(grid_size):
+                    x1 = int(col * cell_w_cv)
+                    y1 = int(row * cell_h_cv)
+                    x2 = int((col + 1) * cell_w_cv)
+                    y2 = int((row + 1) * cell_h_cv)
+                    
+                    cell_edges = edges[y1:y2, x1:x2]
+                    border_mask = np.zeros_like(cell_edges)
+                    bw = max(3, int(cell_w_cv * 0.2))
+                    bh = max(3, int(cell_h_cv * 0.2))
+                    border_mask[:bh, :] = 1
+                    border_mask[-bh:, :] = 1
+                    border_mask[:, :bw] = 1
+                    border_mask[:, -bw:] = 1
+                    
+                    border_density = np.sum(cell_edges * border_mask) / max(np.sum(border_mask), 1)
+                    center_mask = 1 - border_mask
+                    center_density = np.sum(cell_edges * center_mask) / max(np.sum(center_mask), 1)
+                    
+                    score = border_density - center_density * 0.5
+                    if score > best_score:
+                        best_score = score
+                        best_pos = ((col + 0.5) * cell_w_cv, (row + 0.5) * cell_h_cv)
+            
+            if best_pos:
+                print(f"CV grid target: ({best_pos[0]:.0f}, {best_pos[1]:.0f}) score={best_score:.1f}")
+                return best_pos
+                
+        except Exception as e:
+            print(f"CV target detection error: {e}")
+        return None
+
+    async def _perform_drag(self, page: Page, source_x: float, source_y: float, 
+                           target_x: float, target_y: float, iframe_box: dict) -> bool:
+        """
+        Perform a human-like drag from source to target.
+        Coordinates are relative to the iframe; iframe_box provides page offset.
+        """
+        try:
+            # Convert frame-relative coordinates to page coordinates
+            page_source_x = iframe_box['x'] + source_x
+            page_source_y = iframe_box['y'] + source_y
+            page_target_x = iframe_box['x'] + target_x
+            page_target_y = iframe_box['y'] + target_y
+            
+            print(f"Drag: ({page_source_x:.0f},{page_source_y:.0f}) -> ({page_target_x:.0f},{page_target_y:.0f})")
+            
+            # 1. Move to source
+            await page.mouse.move(page_source_x + random.uniform(-3, 3), 
+                                  page_source_y + random.uniform(-3, 3))
             await asyncio.sleep(random.uniform(0.2, 0.5))
+            
+            # 2. Press down
             await page.mouse.down()
-            await asyncio.sleep(random.uniform(0.1, 0.2))
-
-            # Generate a non-linear path with jitter and overshoot
-            steps = random.randint(30, 60)
-            overshoot = random.uniform(5, 15)
+            await asyncio.sleep(random.uniform(0.1, 0.25))
+            
+            # 3. Drag with human-like trajectory
+            distance = math.sqrt((page_target_x - page_source_x)**2 + (page_target_y - page_source_y)**2)
+            steps = max(20, min(60, int(distance / 4)))
+            
+            overshoot_x = random.uniform(-8, 8)
+            overshoot_y = random.uniform(-8, 8)
             
             for i in range(steps):
-                progress = i / steps
-                # Bezier-like curve for X
-                if progress < 0.8:
-                    curr_x = start_x + (offset + overshoot) * (1 - (1 - progress)**2)
-                else:
-                    # Correction phase
-                    correction_prog = (progress - 0.8) / 0.2
-                    curr_x = start_x + offset + overshoot * (1 - correction_prog)
+                progress = i / (steps - 1)
+                # Minimum-jerk trajectory
+                t = 10 * progress**3 - 15 * progress**4 + 6 * progress**5
                 
-                # Add some Y jitter
-                curr_y = start_y + math.sin(progress * math.pi) * 2 + random.uniform(-1, 1)
+                if progress < 0.85:
+                    curr_x = page_source_x + (page_target_x + overshoot_x - page_source_x) * t
+                    curr_y = page_source_y + (page_target_y + overshoot_y - page_source_y) * t
+                else:
+                    correction = (progress - 0.85) / 0.15
+                    base_x = page_source_x + (page_target_x + overshoot_x - page_source_x) * t
+                    base_y = page_source_y + (page_target_y + overshoot_y - page_source_y) * t
+                    curr_x = base_x - overshoot_x * correction
+                    curr_y = base_y - overshoot_y * correction
+                
+                # Micro-tremor
+                tremor = max(0, 1.5 * (1 - progress))
+                curr_x += random.gauss(0, tremor)
+                curr_y += random.gauss(0, tremor)
                 
                 await page.mouse.move(curr_x, curr_y)
                 
-                # Variable speed: slow-fast-slow
-                delay = 0.01 + 0.02 * (1 - math.sin(progress * math.pi))
+                speed_factor = math.sin(progress * math.pi)
+                delay = random.uniform(0.005, 0.015) / max(speed_factor, 0.3)
                 await asyncio.sleep(delay)
-
-            # Final hold and release
-            await asyncio.sleep(random.uniform(0.2, 0.4))
-            await page.mouse.up()
             
-            # 5. Verify success
-            await asyncio.sleep(2)
-            # Check if the handle is gone or if a success message appears
-            if await handle.count() == 0:
-                print("Drag handle disappeared, assuming success!")
+            # 4. Final position
+            await page.mouse.move(page_target_x + random.uniform(-2, 2),
+                                  page_target_y + random.uniform(-2, 2))
+            await asyncio.sleep(random.uniform(0.05, 0.15))
+            
+            # 5. Release
+            await page.mouse.up()
+            await asyncio.sleep(random.uniform(0.3, 0.8))
+            
+            return True
+        except Exception as e:
+            print(f"Drag execution error: {e}")
+            return False
+
+    async def _check_solved(self, page: Page) -> bool:
+        """Check if the captcha was solved after a drag attempt."""
+        try:
+            response = await page.evaluate("""
+                () => {
+                    const textarea = document.querySelector('textarea[name="h-captcha-response"]');
+                    return textarea && textarea.value && textarea.value.length > 0;
+                }
+            """)
+            if response:
                 return True
             
-            success_indicators = ['.geetest_success', '.arkose_success', ':has-text("Success")', ':has-text("Verified")']
-            for ind in success_indicators:
-                if await page.locator(ind).count() > 0:
-                    print(f"Success indicator found: {ind}")
+            # Check if challenge iframe disappeared or shows success
+            challenge_frames = [f for f in page.frames if 'hcaptcha.com' in (f.url or '') and 'captcha' in (f.url or '')]
+            if not challenge_frames:
+                return True
+            
+            for f in challenge_frames:
+                try:
+                    success = await f.evaluate("""
+                        () => {
+                            const el = document.querySelector('.success-text, [class*="success"], .challenge-complete');
+                            return !!el;
+                        }
+                    """)
+                    if success:
+                        return True
+                except:
+                    pass
+            
+            # Check checkbox state
+            try:
+                checkbox_frame = page.frame_locator('iframe[src*="hcaptcha"]')
+                checked = await checkbox_frame.locator('[aria-checked="true"]').count()
+                if checked > 0:
                     return True
-
-        print("DragSolver failed after multiple attempts.")
+            except:
+                pass
+                
+        except Exception:
+            pass
         return False
+
+    async def solve(self, page: Page) -> bool:
+        """Main solve loop for hCaptcha drag challenges."""
+        print("Starting HCaptchaDragSolver...")
+        
+        for round_num in range(self.config.max_challenge_rounds):
+            print(f"Drag solve attempt {round_num + 1}/{self.config.max_challenge_rounds}")
+            round_start = time.time()
+            
+            # Check if already solved
+            if await self._check_solved(page):
+                print("Already solved!")
+                return True
+            
+            # Find the challenge frame
+            frame = await self._find_challenge_frame(page)
+            if not frame:
+                print("Could not find hCaptcha challenge frame")
+                await asyncio.sleep(2)
+                continue
+            
+            # Verify this is a drag challenge
+            is_drag = await self._detect_drag_challenge(frame)
+            if not is_drag:
+                print("Not a drag challenge (might be grid) - DragSolver not applicable")
+                return False  # Let GodSolver handle it
+            
+            print("Drag challenge confirmed!")
+            await asyncio.sleep(1)  # Let it fully render
+            
+            # Get iframe bounding box for coordinate conversion
+            iframe_el = page.locator('iframe[src*="hcaptcha.com/captcha"], iframe[src*="newassets.hcaptcha.com"]')
+            iframe_box = None
+            if await iframe_el.count() > 0:
+                iframes = await iframe_el.all()
+                for iframe_candidate in iframes:
+                    box = await iframe_candidate.bounding_box()
+                    if box and box['width'] > 200 and box['height'] > 200:
+                        iframe_box = box
+                        break
+            
+            if not iframe_box:
+                # Try broader selector
+                all_iframes = await page.locator('iframe[src*="hcaptcha"]').all()
+                for iframe_candidate in all_iframes:
+                    box = await iframe_candidate.bounding_box()
+                    if box and box['width'] > 200 and box['height'] > 200:
+                        iframe_box = box
+                        break
+            
+            if not iframe_box:
+                print("Could not get iframe bounding box")
+                await asyncio.sleep(2)
+                continue
+            
+            # Get draggable element info
+            drag_info = await self._get_drag_element_info(frame)
+            
+            if drag_info:
+                source_x = drag_info['centerX']
+                source_y = drag_info['centerY']
+                print(f"Draggable element found at ({source_x:.0f}, {source_y:.0f}), size: {drag_info['width']:.0f}x{drag_info['height']:.0f}")
+            else:
+                # Fallback: estimate from screenshot
+                print("Could not detect draggable element via DOM, using estimate...")
+                screenshot_bytes = await self._get_challenge_screenshot(frame, page)
+                if screenshot_bytes:
+                    img = cv2.imdecode(np.frombuffer(screenshot_bytes, np.uint8), cv2.IMREAD_COLOR)
+                    ih, iw = img.shape[:2]
+                    source_x = iw * 0.5
+                    source_y = ih * 0.7
+                else:
+                    source_x = iframe_box['width'] * 0.5
+                    source_y = iframe_box['height'] * 0.7
+                print(f"Using estimated source: ({source_x:.0f}, {source_y:.0f})")
+            
+            # Determine target position using multiple methods
+            target_pos = None
+            
+            clip_target = await self._get_target_position_clip(frame, page)
+            cv_target = await self._get_target_position_cv(frame, page)
+            
+            # Combine results
+            if clip_target and cv_target:
+                dist = math.sqrt((clip_target[0] - cv_target[0])**2 + (clip_target[1] - cv_target[1])**2)
+                if dist < 100:
+                    target_pos = ((clip_target[0] + cv_target[0]) / 2, 
+                                  (clip_target[1] + cv_target[1]) / 2)
+                    print(f"Methods agree (dist={dist:.0f}px), using average")
+                else:
+                    target_pos = clip_target
+                    print(f"Methods disagree (dist={dist:.0f}px), using CLIP")
+            elif clip_target:
+                target_pos = clip_target
+            elif cv_target:
+                target_pos = cv_target
+            
+            if not target_pos:
+                print("Could not determine target, using center estimate")
+                target_pos = (iframe_box['width'] * 0.5, iframe_box['height'] * 0.4)
+            
+            # Perform the drag
+            success = await self._perform_drag(page, source_x, source_y, 
+                                              target_pos[0], target_pos[1], iframe_box)
+            
+            if not success:
+                print("Drag execution failed")
+                await asyncio.sleep(1)
+                continue
+            
+            # Wait and check result
+            await asyncio.sleep(2)
+            
+            if await self._check_solved(page):
+                print("hCaptcha drag challenge SOLVED!")
+                return True
+            
+            # Enforce minimum solve time
+            elapsed = time.time() - round_start
+            if elapsed < self.config.min_solve_time_per_round:
+                await asyncio.sleep(self.config.min_solve_time_per_round - elapsed)
+            
+            print(f"Attempt {round_num + 1} failed, retrying...")
+        
+        print("HCaptchaDragSolver failed after max attempts.")
+        return False
+
 
 class SeleniumSolver(CaptchaSolver):
     async def solve(self, page) -> bool:

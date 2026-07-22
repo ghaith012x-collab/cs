@@ -264,7 +264,7 @@ class DiscordAutomation:
             
             # First, check if there's a checkbox to click before the challenge appears
             try:
-                checkbox_frame = self._page.frame_locator('iframe[src*="hcaptcha"], iframe[title*="Widget containing checkbox"], iframe[title*="hCaptcha"]')}]))ोबर
+                checkbox_frame = self._page.frame_locator('iframe[src*="hcaptcha"], iframe[title*="Widget containing checkbox"], iframe[title*="hCaptcha"]')
                 checkbox = checkbox_frame.locator('#checkbox, [role="checkbox"]')
                 if await checkbox.count() > 0:
                     self._log("Clicking hCaptcha checkbox...")
@@ -288,22 +288,32 @@ class DiscordAutomation:
             config = captcha_solver.SolverConfig(
                 headless=False,
                 clip_confidence_threshold=0.50,
-                max_challenge_rounds=5,  # More attempts
+                max_challenge_rounds=5,
                 timeout=45
             )
             
-            # Use GodSolver directly (handles hCaptcha grid challenges)
-            self._log("Attempting GodSolver for hCaptcha...")
+            # Try DragSolver first (handles hCaptcha drag-to-fit challenges)
+            self._log("Attempting DragSolver...")
+            drag_solver = captcha_solver.DragSolver(config)
+            success = await drag_solver.solve(self._page)
+            
+            if success:
+                self._log("hCaptcha SOLVED via DragSolver!")
+                await asyncio.sleep(3)
+                return True
+            
+            # DragSolver returned False - either failed or it's not a drag challenge
+            # Fall back to GodSolver for grid challenges
+            self._log("DragSolver failed or not applicable, falling back to GodSolver...")
             god_solver = captcha_solver.GodSolver(config)
             success = await god_solver.solve(self._page)
             await god_solver.close()
             
             if success:
-                self._log("hCaptcha SOLVED!")
-                # Wait for form submission to complete after captcha
+                self._log("hCaptcha SOLVED via GodSolver!")
                 await asyncio.sleep(3)
             else:
-                self._log("hCaptcha solve FAILED")
+                self._log("hCaptcha solve FAILED (both solvers)")
             
             return success
         except Exception as e:
