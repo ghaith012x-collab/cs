@@ -1041,6 +1041,11 @@ class GodSolver(CaptchaSolver):
             "dog": ["canine", "hound", "puppy"],
             "cat": ["feline", "kitten"],
             "bird": ["avian", "fowl"],
+            "metal": ["metallic", "steel", "iron", "aluminum"],
+            "wooden": ["wood", "timber", "lumber"],
+            "glass": ["transparent", "crystal", "glassy"],
+            "plastic": ["synthetic", "polymer"],
+            "stone": ["rock", "granite", "marble"],
         })
 
     def _normalize_target(self, target: str) -> str:
@@ -1054,20 +1059,55 @@ class GodSolver(CaptchaSolver):
             target = target[:-1]  # 'cars' -> 'car', but not 'bus', 'grass'
         return target
 
+    def _is_property_target(self, target: str) -> bool:
+        """Check if the target describes a property/material rather than an object."""
+        property_keywords = [
+            'metal', 'wooden', 'plastic', 'glass', 'stone', 'concrete',
+            'rubber', 'fabric', 'leather', 'ceramic', 'paper', 'cardboard',
+            'shiny', 'rusty', 'transparent', 'opaque', 'round', 'square',
+            'red', 'blue', 'green', 'yellow', 'orange', 'purple', 'pink',
+            'white', 'black', 'brown', 'gray', 'grey', 'golden', 'silver',
+            'natural', 'artificial', 'organic', 'synthetic', 'edible',
+            'alive', 'living', 'dead', 'dry', 'wet', 'hot', 'cold',
+            'soft', 'hard', 'smooth', 'rough', 'flat', 'curved',
+            'electric', 'electronic', 'mechanical', 'digital', 'analog',
+            'indoor', 'outdoor', 'urban', 'rural',
+        ]
+        target_lower = target.lower()
+        return any(kw in target_lower for kw in property_keywords)
+
     def _get_prompts(self, target: str) -> List[str]:
         normalized = self._normalize_target(target)
-        # Multiple prompt templates improve CLIP's zero-shot accuracy significantly
-        prompts = [
-            f"a photo of a {normalized}",
-            f"a {normalized} in this image",
-            f"a clear photo of a {normalized}",
-            f"an image containing a {normalized}",
-            f"a {normalized}",
-        ]
+        
+        # Check if this is a property/material target vs an object target
+        if self._is_property_target(normalized):
+            # Property-based prompts work better with different templates
+            prompts = [
+                f"an object that is {normalized}",
+                f"something that is primarily {normalized}",
+                f"an item made of {normalized}",
+                f"a {normalized} object",
+                f"a {normalized} item in this image",
+                f"this is {normalized}",
+            ]
+        else:
+            # Standard object-based prompts
+            prompts = [
+                f"a photo of a {normalized}",
+                f"a {normalized} in this image",
+                f"a clear photo of a {normalized}",
+                f"an image containing a {normalized}",
+                f"a {normalized}",
+            ]
+        
         # Add aliases (each with 2 templates to keep batch reasonable)
         for alias in self.alias_mapping.get(normalized, [])[:3]:  # Max 3 aliases
-            prompts.append(f"a photo of a {alias}")
-            prompts.append(f"a {alias} in this image")
+            if self._is_property_target(alias):
+                prompts.append(f"something that is {alias}")
+                prompts.append(f"a {alias} object")
+            else:
+                prompts.append(f"a photo of a {alias}")
+                prompts.append(f"a {alias} in this image")
         return prompts
 
     async def _get_challenge_info(self, iframe) -> Tuple[str, List[Image.Image]]:
@@ -1083,6 +1123,8 @@ class GodSolver(CaptchaSolver):
                 r'(?:select|click|choose) all (?:images|squares|tiles) (?:with|containing|of|that contain) (?:a |an )?(.+?)(?:\.|$)',
                 r'(?:select|click) (?:the |all )?(?:images|squares) (?:of |with )?(?:a |an )?(.+?)(?:\.|$)',
                 r'Please click each image containing (?:a |an )?(.+?)(?:\.|$)',
+                r'[Ss]elect (?:all )?items? that (?:are|is|look|appear) (?:primarily |mostly |mainly )?(.+?)(?:\.|$)',
+                r'[Ss]elect (?:all )?(?:items?|images?|objects?) (?:that are |which are )?(?:made of |primarily )?(.+?)(?:\.|$)',
             ]
             for pattern in patterns:
                 match = re.search(pattern, challenge_text, re.IGNORECASE)
@@ -1092,7 +1134,7 @@ class GodSolver(CaptchaSolver):
 
             if not target and challenge_text:
                 # Last resort: take everything after common prefixes
-                cleaned = re.sub(r'^(please )?(select|click|choose) (all )?(images?|squares?|tiles?) (with|containing|of|that contain) (a |an )?', '', challenge_text, flags=re.IGNORECASE)
+                cleaned = re.sub(r'^(please )?(select|click|choose) (all )?(images?|squares?|tiles?|items?) ?(that are |that |with|containing|of|that contain|which are )?(primarily |mostly |mainly )?(a |an )?', '', challenge_text, flags=re.IGNORECASE)
                 target = cleaned.strip().rstrip('.')
 
             print(f"hCaptcha target: '{target}' (from: '{challenge_text}')")
@@ -1398,7 +1440,7 @@ class DragSolver(CaptchaSolver):
         try:
             await page.wait_for_selector(
                 'iframe[src*="hcaptcha.com/captcha"], iframe[src*="newassets.hcaptcha.com"], iframe[title*="hCaptcha challenge"]',
-                timeout=self.config.timeout * 1000
+                timeout=5000  # Only wait 5s - if iframe isn't here by now, bail fast
             )
         except Exception:
             pass
