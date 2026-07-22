@@ -1556,86 +1556,79 @@ class DragSolver(CaptchaSolver):
             print(f"Drag element detection error: {e}")
             return None
 
-    async def _get_target_position_clip(self, frame, page: Page) -> Optional[Tuple[float, float]]:
+    async def _get_target_position_sift(self, frame, page: Page) -> Optional[Tuple[float, float]]:
         """
-        Use CLIP to analyze the challenge and determine where the icon should go.
-        Takes a screenshot, divides it into a grid, and scores each region.
+        Use SIFT feature matching to find where the draggable icon belongs.
+        Much faster than CLIP on CPU - uses the existing ObjectAlignmentSolver.
         """
         try:
-            clip_model = await self._get_clip_model()
+            print("DragSolver: Using SIFT to find target position...")
             
+            # Get the challenge screenshot (background)
             screenshot_bytes = await self._get_challenge_screenshot(frame, page)
             if not screenshot_bytes:
+                print("DragSolver: Could not get challenge screenshot")
                 return None
             
-            challenge_img = Image.open(io.BytesIO(screenshot_bytes)).convert("RGB")
-            w, h = challenge_img.size
+            bg_img = cv2.imdecode(np.frombuffer(screenshot_bytes, np.uint8), cv2.IMREAD_COLOR)
+            if bg_img is None:
+                return None
             
-            prompt_text = await frame.evaluate("""
-                () => {
-                    const header = document.querySelector('.challenge-header .text, .challenge-header, .prompt-text, [class*="prompt"]');
-                    return header ? header.textContent.trim() : 'drag the icon to where it fits';
-                }
-            """) or "drag the icon to where it fits"
+            h, w = bg_img.shape[:2]
+            print(f"DragSolver: Challenge image size: {w}x{h}")
             
-            print(f"Drag challenge prompt: '{prompt_text}'")
+            # Try to get the draggable icon image separately
+            drag_icon_bytes = None
+            try:
+                drag_el = frame.locator('.drag-icon, .draggable, [draggable="true"], [class*="drag"]')
+                if await drag_el.count() > 0:
+                    drag_icon_bytes = await drag_el.first.screenshot()
+                    print("DragSolver: Got draggable icon screenshot")
+            except Exception:
+                pass
             
-            # Divide the background into a grid and find the target region
-            grid_cols = 6
-            grid_rows = 6
-            cell_w = w / grid_cols
-            cell_h = h / grid_rows
+            if drag_icon_bytes:
+                obj_img = cv2.imdecode(np.frombuffer(drag_icon_bytes, np.uint8), cv2.IMREAD_COLOR)
+                if obj_img is not None:
+                    # Use SIFT alignment to find where icon belongs
+                    alignment_solver = ObjectAlignmentSolver()
+                    target_x, target_y = alignment_solver.find_alignment(obj_img, bg_img)
+                    if target_x != 0 or target_y != 0:
+                        print(f"DragSolver SIFT target: ({target_x}, {target_y})")
+                        return (float(target_x), float(target_y))
+                    print("DragSolver: SIFT alignment returned (0,0), trying template matching...")
+                    
+                    # Fallback: template matching
+                    obj_gray = cv2.cvtColor(obj_img, cv2.COLOR_BGR2GRAY)
+                    bg_gray = cv2.cvtColor(bg_img, cv2.COLOR_BGR2GRAY)
+                    
+                    # Try multiple scales of the icon
+                    best_val = -1
+                    best_loc = None
+                    for scale in [0.5, 0.7, 0.85, 1.0, 1.2]:
+                        scaled_w = int(obj_gray.shape[1] * scale)
+                        scaled_h = int(obj_gray.shape[0] * scale)
+                        if scaled_w < 10 or scaled_h < 10:
+                            continue
+                        if scaled_w >= bg_gray.shape[1] or scaled_h >= bg_gray.shape[0]:
+                            continue
+                        scaled_obj = cv2.resize(obj_gray, (scaled_w, scaled_h))
+                        result = cv2.matchTemplate(bg_gray, scaled_obj, cv2.TM_CCOEFF_NORMED)
+                        _, max_val, _, max_loc = cv2.minMaxLoc(result)
+                        if max_val > best_val:
+                            best_val = max_val
+                            best_loc = (max_loc[0] + scaled_w // 2, max_loc[1] + scaled_h // 2)
+                    
+                    if best_loc and best_val > 0.3:
+                        print(f"DragSolver template match: ({best_loc[0]}, {best_loc[1]}) confidence={best_val:.3f}")
+                        return (float(best_loc[0]), float(best_loc[1]))
+                    print(f"DragSolver: Template match too low: {best_val:.3f}")
             
-            cells = []
-            for row in range(grid_rows):
-                for col in range(grid_cols):
-                    x1 = int(col * cell_w)
-                    y1 = int(row * cell_h)
-                    x2 = int((col + 1) * cell_w)
-                    y2 = int((row + 1) * cell_h)
-                    cell = challenge_img.crop((x1, y1, x2, y2))
-                    cells.append(cell)
-            
-            # Score each cell using CLIP
-            target_prompts = [
-                "an empty outlined area waiting for an icon to be placed",
-                "a dashed outline or placeholder where something should be dropped",
-                "a target area or drop zone for an icon",
-                "an empty slot or gap in a pattern",
-                "a highlighted or marked position for placement",
-                "an incomplete shape missing a piece",
-            ]
-            non_target_prompts = [
-                "a filled icon or complete shape",
-                "background texture or pattern",
-                "text or labels",
-                "a solid colored area with no outline",
-                "a complete connected pattern",
-            ]
-            
-            all_prompts = target_prompts + non_target_prompts
-            text_features = await clip_model.get_text_features(all_prompts)
-            pos_features = text_features[:len(target_prompts)]
-            neg_features = text_features[len(target_prompts):]
-            
-            image_features = await clip_model.get_image_features(cells)
-            
-            pos_sim = (image_features @ pos_features.T).mean(dim=1)
-            neg_sim = (image_features @ neg_features.T).max(dim=1).values
-            scores = pos_sim - neg_sim
-            
-            best_idx = torch.argmax(scores).item()
-            best_row = best_idx // grid_cols
-            best_col = best_idx % grid_cols
-            
-            target_x = (best_col + 0.5) * cell_w
-            target_y = (best_row + 0.5) * cell_h
-            
-            print(f"CLIP target position: ({target_x:.0f}, {target_y:.0f}) [cell {best_row},{best_col}] score={scores[best_idx]:.3f}")
-            
-            return (target_x, target_y)
+            # If we couldn't get the icon or SIFT failed, use contour-based detection
+            print("DragSolver: Falling back to contour analysis...")
+            return None
         except Exception as e:
-            print(f"CLIP target detection error: {e}")
+            print(f"DragSolver SIFT error: {e}")
             return None
 
     async def _get_target_position_cv(self, frame, page: Page) -> Optional[Tuple[float, float]]:
@@ -1920,29 +1913,30 @@ class DragSolver(CaptchaSolver):
                     source_y = iframe_box['height'] * 0.7
                 print(f"Using estimated source: ({source_x:.0f}, {source_y:.0f})")
             
-            # Determine target position using multiple methods
+            # Determine target position - use fast methods (SIFT/CV), no CLIP
             target_pos = None
             
-            clip_target = await self._get_target_position_clip(frame, page)
+            print("DragSolver: Finding target position...")
+            sift_target = await self._get_target_position_sift(frame, page)
             cv_target = await self._get_target_position_cv(frame, page)
             
-            # Combine results
-            if clip_target and cv_target:
-                dist = math.sqrt((clip_target[0] - cv_target[0])**2 + (clip_target[1] - cv_target[1])**2)
-                if dist < 100:
-                    target_pos = ((clip_target[0] + cv_target[0]) / 2, 
-                                  (clip_target[1] + cv_target[1]) / 2)
-                    print(f"Methods agree (dist={dist:.0f}px), using average")
+            # Combine results - prefer SIFT (more accurate for icon placement)
+            if sift_target and cv_target:
+                dist = math.sqrt((sift_target[0] - cv_target[0])**2 + (sift_target[1] - cv_target[1])**2)
+                if dist < 80:
+                    target_pos = ((sift_target[0] + cv_target[0]) / 2, 
+                                  (sift_target[1] + cv_target[1]) / 2)
+                    print(f"SIFT+CV agree (dist={dist:.0f}px), using average")
                 else:
-                    target_pos = clip_target
-                    print(f"Methods disagree (dist={dist:.0f}px), using CLIP")
-            elif clip_target:
-                target_pos = clip_target
+                    target_pos = sift_target
+                    print(f"SIFT+CV disagree (dist={dist:.0f}px), using SIFT")
+            elif sift_target:
+                target_pos = sift_target
             elif cv_target:
                 target_pos = cv_target
             
             if not target_pos:
-                print("Could not determine target, using center estimate")
+                print("DragSolver: Could not determine target, using center estimate")
                 target_pos = (iframe_box['width'] * 0.5, iframe_box['height'] * 0.4)
             
             # Perform the drag
