@@ -10,6 +10,7 @@ from typing import Optional
 from playwright.async_api import async_playwright, Page, BrowserContext
 
 import captcha_solver
+import turnstile_solver
 
 
 class DiscordAutomation:
@@ -163,7 +164,15 @@ class DiscordAutomation:
             await self.initialize()
         
         try:
-            success = await asyncio.wait_for(self._fill_registration_form(), timeout=60)
+            form_filled_successfully = await asyncio.wait_for(self._fill_registration_form(), timeout=60)
+            if form_filled_successfully:
+                self._log("Registration form filled, checking for captcha...")
+                success = await self._solve_hcaptcha_if_present()
+                if not success:
+                    self._log("Captcha solving failed.", level="error")
+            else:
+                self._log("Registration form filling failed.", level="error")
+                success = False
         except asyncio.TimeoutError:
             self._log("Form filling timed out after 60 seconds")
             success = False
@@ -175,7 +184,22 @@ class DiscordAutomation:
     async def _solve_hcaptcha_if_present(self) -> bool:
         """Detect and solve hCaptcha with robust multi-method detection."""
         try:
-            self._log("Checking for hCaptcha...")
+            self._log("Checking for Captcha...")
+            
+            # Check for Cloudflare Turnstile first
+            turnstile_iframe = await self._page.query_selector('iframe[src*="challenges.cloudflare.com"]')
+            if turnstile_iframe:
+                self._log("Cloudflare Turnstile detected.")
+                turnstile_solver_instance = turnstile_solver.TurnstileSolver()
+                turnstile_solved = await turnstile_solver_instance.solve(self._page)
+                if turnstile_solved:
+                    self._log("Cloudflare Turnstile solved, proceeding.")
+                    return True
+                else:
+                    self._log("Cloudflare Turnstile failed to solve.")
+                    return False
+            
+            self._log("Cloudflare Turnstile not detected, checking for hCaptcha...")
             
             # Wait up to 10 seconds for captcha to appear (it can take a moment)
             captcha_found = False
