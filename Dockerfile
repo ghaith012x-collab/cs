@@ -30,19 +30,19 @@ RUN pip install --no-cache-dir \
     opencv-python-headless==4.9.0.80 \
     numpy==1.26.4 \
     aiofiles==23.1.0 \
-    aiohttp==3.9.1 && \
+    aiohttp==3.9.1 \
+    transformers==4.37.0 \
+    Pillow==10.2.0 && \
     pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu torch==2.1.0
 
 RUN python -m playwright install chromium
 
 COPY app.py server.py captcha_solver.py requirements.txt ./
 COPY test/ ./test/
-
 RUN chmod +r ./test/site.html
 
 EXPOSE 8080
 ENV PYTHONUNBUFFERED=1
 ENV PORT=8080
 
-# Headless Playwright does not need xvfb; start the web process directly.
 CMD ["python", "-u", "app.py"]
