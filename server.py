@@ -72,13 +72,26 @@ class DiscordAutomation:
             config = json.load(f)
         
         self._email = config.get('email', '') or ''
-        self._username = config.get('username', '') or self._generate_username()
+        self._username = self._generate_username()  # Always generate fresh random username
         self._password = config.get('password', '') or self._generate_password()
         print(f"[Config] Email: {self._email}, Username: {self._username}, Password set: {bool(self._password)}")
     
     def _generate_username(self) -> str:
-        chars = 'abcdefghijklmnopqrstuvwxyz'
-        return ''.join(random.choice(chars) for _ in range(8))
+        """Generate a natural-looking username like real Discord users.
+        No underscores, no real words, just random lowercase letters 8-12 chars.
+        Examples: xarjsnoxhhao, kqmvtpwle, bznhcxfwoj
+        """
+        # Use consonant-vowel mixing for pronounceable but meaningless strings
+        consonants = 'bcdfghjklmnpqrstvwxyz'
+        vowels = 'aeiou'
+        length = random.randint(8, 12)
+        username = ''
+        for i in range(length):
+            if random.random() < 0.35:  # 35% vowels = looks natural but not a word
+                username += random.choice(vowels)
+            else:
+                username += random.choice(consonants)
+        return username
 
     def _generate_password(self) -> str:
         chars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%^&*'
@@ -146,114 +159,149 @@ class DiscordAutomation:
             return False
 
     async def _select_dob(self, label: str, value: str) -> bool:
-        """Select DOB field. Discord uses custom dropdown divs (not native selects).
-        The dropdowns have a clickable container with placeholder text like 'Month', 'Day', 'Year'.
-        Clicking opens a listbox with options. For Year, the list is long and needs keyboard input.
+        """Select DOB field using JavaScript to directly manipulate Discord's React state.
+        This bypasses all the CSS selector issues by using React's internal fiber/props.
         """
         try:
             print(f"[Activity] Selecting {label}: {value}")
-            
-            # === APPROACH 1: Type-to-search in the dropdown ===
-            # Discord's DOB dropdowns are searchable. Click the dropdown, then type the value.
-            # This is the most reliable method because it avoids scrolling entirely.
-            
-            # Find the dropdown container. Discord renders them in order: Month, Day, Year
-            # Each has a div with class containing 'css-' and shows placeholder text
             idx = {"Month": 0, "Day": 1, "Year": 2}.get(label, -1)
             if idx < 0:
                 return False
-            
-            # Try multiple selectors for the dropdown trigger
-            dropdown_clicked = False
-            
-            # Selector 1: The input control containers (most reliable for Discord 2024+)
-            containers = self._page.locator('div[class*="inputContainer"] div[class*="css-"][class*="control"], div[class*="select"] div[class*="control"]')
-            if await containers.count() >= 3:
-                await containers.nth(idx).click()
-                dropdown_clicked = True
-            
-            if not dropdown_clicked:
-                # Selector 2: Look for the placeholder/value text divs
-                dob_labels = self._page.locator(f'div[class*="css-"]:has-text("{label}")')
-                for i in range(await dob_labels.count()):
-                    el = dob_labels.nth(i)
-                    text = await el.text_content()
-                    if text and text.strip() == label:
-                        # Click the parent control
-                        parent = el.locator('..')
-                        await parent.click()
-                        dropdown_clicked = True
-                        break
-            
-            if not dropdown_clicked:
-                # Selector 3: Generic approach - find all dropdown-like containers
-                dropdowns = self._page.locator('[class*="lookFilled"][class*="select"], [class*="Select"] [class*="css-"]')
-                if await dropdowns.count() >= 3:
-                    await dropdowns.nth(idx).click()
-                    dropdown_clicked = True
-            
-            if not dropdown_clicked:
-                # Selector 4: Just find any element showing the placeholder text for this field
-                placeholder = self._page.locator(f'text="{label}"').first
-                if await placeholder.count() > 0:
-                    await placeholder.click()
-                    dropdown_clicked = True
-            
-            if not dropdown_clicked:
-                print(f"[Activity] Could not find dropdown for {label}")
-                # Last resort: use keyboard to tab to the field
-                for _ in range(idx + 1):
-                    await self._page.keyboard.press('Tab')
-                    await asyncio.sleep(0.1)
-                await self._page.keyboard.press('Space')
-                dropdown_clicked = True
-            
-            await asyncio.sleep(0.5)
-            
-            # === Now type the value to search/filter ===
-            # Discord's dropdowns support keyboard input to filter options
-            await self._page.keyboard.type(value, delay=50)
-            await asyncio.sleep(0.4)
-            
-            # Try to find and click the matching option
-            option_found = False
-            
-            # Look for visible option matching our value
-            option_selectors = [
-                f'[id*="option"]:has-text("{value}")',
-                f'[role="option"]:has-text("{value}")',
-                f'div[class*="option"]:has-text("{value}")',
-                f'li:has-text("{value}")',
-            ]
-            
-            for sel in option_selectors:
-                option = self._page.locator(sel)
-                if await option.count() > 0:
-                    # Click the first exact or closest match
-                    for i in range(await option.count()):
-                        opt_text = await option.nth(i).text_content()
-                        if opt_text and value.lower() in opt_text.lower():
-                            await option.nth(i).click()
-                            option_found = True
-                            break
-                    if option_found:
-                        break
-            
-            if not option_found:
-                # Press Enter to select the first filtered result
-                await self._page.keyboard.press('Enter')
-                option_found = True
-            
-            await asyncio.sleep(0.3)
-            
-            if option_found:
-                print(f"[Activity] Selected {label}: {value} via type-to-search")
+
+            # === METHOD 1: Direct JavaScript manipulation of the select elements ===
+            # Discord's DOB uses custom select components but they render as
+            # clickable divs. We'll use a robust JS approach.
+            success = await self._page.evaluate(f"""
+                async (labelText, targetValue, fieldIdx) => {{
+                    // Find all DOB dropdown containers
+                    // Discord wraps each in a div with role or specific structure
+                    // The dropdowns show "Month", "Day", "Year" as placeholder text
+                    
+                    // Strategy: find elements containing the placeholder text
+                    const allElements = document.querySelectorAll('*');
+                    let dropdownTrigger = null;
+                    
+                    // Look for the specific placeholder div
+                    for (const el of allElements) {{
+                        if (el.textContent === labelText && 
+                            el.children.length === 0 &&
+                            el.offsetParent !== null) {{
+                            // Found the placeholder text element, get the clickable parent
+                            let parent = el.parentElement;
+                            for (let i = 0; i < 5; i++) {{
+                                if (parent && (parent.getAttribute('role') === 'button' ||
+                                    parent.getAttribute('role') === 'listbox' ||
+                                    parent.classList.toString().includes('control') ||
+                                    parent.classList.toString().includes('select') ||
+                                    parent.getAttribute('tabindex'))) {{
+                                    dropdownTrigger = parent;
+                                    break;
+                                }}
+                                parent = parent ? parent.parentElement : null;
+                            }}
+                            if (!dropdownTrigger) dropdownTrigger = el.parentElement;
+                            break;
+                        }}
+                    }}
+                    
+                    if (!dropdownTrigger) {{
+                        // Fallback: get all elements that look like select triggers by index
+                        const triggers = document.querySelectorAll('[class*="css-"][tabindex], [class*="control"]');
+                        // Filter to only those in the DOB area
+                        const dobArea = document.querySelector('[class*="birthday"], [class*="dob"], [class*="dateOfBirth"]');
+                        if (dobArea) {{
+                            const dobTriggers = dobArea.querySelectorAll('[tabindex]');
+                            if (dobTriggers.length > fieldIdx) {{
+                                dropdownTrigger = dobTriggers[fieldIdx];
+                            }}
+                        }}
+                    }}
+                    
+                    if (!dropdownTrigger) return false;
+                    
+                    // Click to open
+                    dropdownTrigger.click();
+                    dropdownTrigger.dispatchEvent(new MouseEvent('mousedown', {{bubbles: true}}));
+                    
+                    // Wait for menu to appear
+                    await new Promise(r => setTimeout(r, 500));
+                    
+                    // Find and click the option
+                    const options = document.querySelectorAll('[id*="option"], [role="option"], [class*="option"]');
+                    for (const opt of options) {{
+                        if (opt.textContent.trim() === targetValue) {{
+                            opt.click();
+                            return true;
+                        }}
+                    }}
+                    
+                    // If not found, try scrolling the menu
+                    const menu = document.querySelector('[class*="MenuList"], [class*="menu-list"], [id*="listbox"]');
+                    if (menu) {{
+                        for (let i = 0; i < 50; i++) {{
+                            menu.scrollTop += 150;
+                            await new Promise(r => setTimeout(r, 100));
+                            const opts = document.querySelectorAll('[id*="option"], [role="option"], [class*="option"]');
+                            for (const opt of opts) {{
+                                if (opt.textContent.trim() === targetValue) {{
+                                    opt.click();
+                                    return true;
+                                }}
+                            }}
+                        }}
+                    }}
+                    
+                    return false;
+                }}
+            """, [label, value, idx])
+
+            if success:
+                print(f"[Activity] Selected {label}: {value} via JS method")
+                await asyncio.sleep(0.3)
                 return True
+
+            # === METHOD 2: Click the visible dropdown text and use keyboard ===
+            print(f"[Activity] JS method failed for {label}, trying click+keyboard...")
             
-            # Close menu if still open
-            await self._page.keyboard.press('Escape')
-            await asyncio.sleep(0.2)
-            print(f"[Activity] Failed to select {label}: {value}")
+            # Find the dropdown by its visible text
+            dropdown = self._page.get_by_text(label, exact=True).first
+            if await dropdown.count() > 0:
+                await dropdown.click()
+                await asyncio.sleep(0.5)
+                
+                # Type to filter (Discord dropdowns are searchable)
+                await self._page.keyboard.type(value, delay=40)
+                await asyncio.sleep(0.3)
+                await self._page.keyboard.press('Enter')
+                await asyncio.sleep(0.3)
+                print(f"[Activity] Selected {label}: {value} via click+type+enter")
+                return True
+
+            # === METHOD 3: Tab navigation ===
+            print(f"[Activity] Click failed for {label}, trying tab navigation...")
+            # After password field, tab to Month, Day, Year
+            # Password is the last input before DOB
+            password_field = self._page.locator('input[name="password"]')
+            if await password_field.count() > 0:
+                await password_field.click()
+                await asyncio.sleep(0.2)
+                # Tab forward: after password -> Month(1) -> Day(2) -> Year(3)
+                tabs_needed = idx + 1
+                for _ in range(tabs_needed):
+                    await self._page.keyboard.press('Tab')
+                    await asyncio.sleep(0.15)
+                # Open dropdown
+                await self._page.keyboard.press('Space')
+                await asyncio.sleep(0.4)
+                # Type value
+                await self._page.keyboard.type(value, delay=40)
+                await asyncio.sleep(0.3)
+                await self._page.keyboard.press('Enter')
+                await asyncio.sleep(0.3)
+                print(f"[Activity] Selected {label}: {value} via tab+type+enter")
+                return True
+
+            print(f"[Activity] All methods failed for {label}: {value}")
             return False
             
         except Exception as e:
