@@ -17,6 +17,17 @@ class AppHost:
         self._config_path = "config.json"
         self._web_server = None
         self._web_port = 8080
+        self._activity_log: list = []
+    
+    def log_activity(self, message: str) -> None:
+        """Add an activity log entry."""
+        import datetime
+        timestamp = datetime.datetime.now().strftime("%H:%M:%S")
+        entry = f"[{timestamp}] {message}"
+        self._activity_log.append(entry)
+        if len(self._activity_log) > 100:
+            self._activity_log = self._activity_log[-50:]
+        print(entry, flush=True)
 
     def load_config(self, path: str = "config.json") -> dict:
         default_config = {
