@@ -187,9 +187,10 @@ class AppHost:
                     "running": self._running,
                     "screenshots": len(self._automation.get_screenshots()),
                     "email": self._automation._email if self._automation else "",
-                    "username": self._automation._username if self._automation else ""
+                    "username": self._automation._username if self._automation else "",
+                    "activity_log": self._automation.get_activity_log() if self._automation else []
                 })
-            return web.json_response({"running": False, "screenshots": 0})
+            return web.json_response({"running": False, "screenshots": 0, "activity_log": []})
 
         async def handle_screenshot(request):
             if self._automation:
@@ -209,7 +210,96 @@ class AppHost:
             return web.Response(status=404)
         
         async def handle_root(request):
-            return web.Response(text="""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>Discord Automation</title><style>body{font-family:system-ui;background:#111827;color:#f9fafb;max-width:760px;margin:0 auto;padding:28px}input,button{font-size:16px;padding:12px;border-radius:8px;border:0;margin:5px 0}input{width:calc(100% - 24px)}button{cursor:pointer;background:#5865f2;color:white;margin-right:8px}.stop{background:#ef4444}#status{margin:18px 0;color:#a7f3d0}img{width:100%;min-height:180px;object-fit:contain;background:#000;border-radius:10px}small{color:#9ca3af}</style></head><body><h1>Discord Automation</h1><p><small>Railway live dashboard</small></p><label>Email</label><input id="email" type="email" placeholder="your email"><div><button onclick="start()">Start</button><button class="stop" onclick="stop()">Stop</button></div><div id="status">Checking status…</div><img id="shot" alt="Live view will appear here"><script>async function api(path,opts){return fetch(path,opts)}async function start(){let email=document.getElementById('email').value;let r=await api('/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email})});document.getElementById('status').textContent=await r.text()}async function stop(){let r=await api('/stop',{method:'POST'});document.getElementById('status').textContent=await r.text()}async function refresh(){try{let r=await api('/status');let x=await r.json();document.getElementById('status').textContent=x.running?(x.screenshots?'Running · '+x.screenshots+' screenshot(s)':'Running · waiting for first screenshot'):'Stopped';if(x.screenshots)document.getElementById('shot').src='/latest?'+Date.now()}catch(e){document.getElementById('status').textContent='Unable to reach service'}}setInterval(refresh,3000);refresh()</script></body></html>""", content_type='text/html')
+            html = '''<!doctype html>
+<html>
+<head>
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>Discord Automation</title>
+    <style>
+        body{font-family:system-ui;background:#111827;color:#f9fafb;max-width:760px;margin:0 auto;padding:28px}
+        input,button{font-size:16px;padding:12px;border-radius:8px;border:0;margin:5px 0}
+        input{width:calc(100% - 24px)}
+        button{cursor:pointer;background:#5865f2;color:white;margin-right:8px}
+        .stop{background:#ef4444}
+        #status{margin:18px 0;color:#a7f3d0}
+        img{width:100%;min-height:180px;object-fit:contain;background:#000;border-radius:10px}
+        small{color:#9ca3af}
+        #activity-log{background:#1f2937;border-radius:8px;padding:16px;margin-top:20px}
+        #activity-log h3{margin:0 0 12px 0;color:#e5e7eb;font-size:16px}
+        .log-entry{font-family:monospace;font-size:13px;padding:6px 0;border-bottom:1px solid:#374151}
+        .log-entry:last-child{border-bottom:none}
+        .log-time{color:#6b7280}
+        .log-message{color:#f9fafb}
+    </style>
+</head>
+<body>
+    <h1>Discord Automation</h1>
+    <p><small>Railway live dashboard</small></p>
+    <label>Email</label>
+    <input id="email" type="email" placeholder="your email">
+    <div>
+        <button onclick="start()">Start</button>
+        <button class="stop" onclick="stop()">Stop</button>
+    </div>
+    <div id="status">Checking status…</div>
+    <img id="shot" alt="Live view will appear here">
+    
+    <div id="activity-log">
+        <h3>Activity Log</h3>
+        <div id="log-entries"></div>
+    </div>
+    
+    <script>
+        async function api(path,opts){return fetch(path,opts)}
+        
+        async function start(){
+            let email=document.getElementById('email').value;
+            let r=await api('/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email})});
+            document.getElementById('status').textContent=await r.text()
+        }
+        
+        async function stop(){
+            let r=await api('/stop',{method:'POST'});
+            document.getElementById('status').textContent=await r.text()
+        }
+        
+        function renderLog(entries){
+            let container=document.getElementById('log-entries');
+            if(!entries || entries.length===0){
+                container.innerHTML='<div class="log-entry"><span class="log-message">No activity yet</span></div>';
+                return;
+            }
+            container.innerHTML=entries.map(e=>{
+                let match=e.match(/^\\[(\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2})\\] (.+)$/);
+                if(match){
+                    return '<div class="log-entry"><span class="log-time">['+match[1]+']</span> <span class="log-message">'+escapeHtml(match[2])+'</span></div>';
+                }
+                return '<div class="log-entry"><span class="log-message">'+escapeHtml(e)+'</span></div>';
+            }).join('');
+        }
+        
+        function escapeHtml(text){
+            return text.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+        }
+        
+        async function refresh(){
+            try{
+                let r=await api('/status');
+                let x=await r.json();
+                document.getElementById('status').textContent=x.running?(x.screenshots?'Running · '+x.screenshots+' screenshot(s)':'Running · waiting for first screenshot'):'Stopped';
+                if(x.screenshots)document.getElementById('shot').src='/latest?'+Date.now()
+                renderLog(x.activity_log);
+            }catch(e){
+                document.getElementById('status').textContent='Unable to reach service'
+            }
+        }
+        
+        setInterval(refresh,3000);
+        refresh()
+    </script>
+</body>
+</html>'''
+            return web.Response(text=html, content_type='text/html')
 
         async def handle_start(request):
             if self._running:

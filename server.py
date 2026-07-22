@@ -20,9 +20,16 @@ class DiscordAutomation:
         self._context = None
         self._page = None
         self._screenshots: list = []
+        self._activity_log: list = []
         self._email = ""
         self._username = ""
         self._password = ""
+
+    def _log_activity(self, message: str) -> None:
+        timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+        entry = f"[{timestamp}] {message}"
+        self._activity_log.append(entry)
+        print(f"[Activity] {message}")
 
     async def initialize(self) -> None:
         self._playwright = await async_playwright().start()
@@ -100,7 +107,7 @@ class DiscordAutomation:
         try:
             success = await asyncio.wait_for(self._fill_registration_form(), timeout=60)
         except asyncio.TimeoutError:
-            print("[Activity] Form filling timed out after 60 seconds")
+            self._log_activity("Form filling timed out after 60 seconds")
             success = False
         
         await self.capture_screenshot()
@@ -132,87 +139,99 @@ class DiscordAutomation:
     async def _select_dob(self, label: str, option_text: str) -> bool:
         """Select DOB by clicking combobox, waiting for listbox, clicking option."""
         try:
-            print(f"[Activity] Selecting {label}: {option_text}")
+            self._log_activity(f"Selecting {label}: {option_text}")
             
-            # Click the combobox to open the dropdown
-            combobox = self._page.get_by_role("combobox", {"name": label})
-            if await combobox.count() == 0:
-                # Fallback to CSS selector
-                combobox = self._page.locator(f'[role="combobox"][aria-label="{label}"]')
-            if await combobox.count() == 0:
-                print(f"[Activity] Combobox {label} not found")
-                return False
+            # Try multiple selectors for Discord's custom dropdown
+            selectors = [
+                f'input[aria-label="{label}"]',
+                f'[data-testid="dob-{label.lower()}"] input',
+                f'input[placeholder*="{label}"]',
+                f'#{label.lower()}',
+                f'#{label.lower()}-input',
+            ]
             
-            await combobox.first.click()
-            await asyncio.sleep(0.5)
+            for sel in selectors:
+                try:
+                    element = self._page.locator(sel)
+                    if await element.count() > 0:
+                        await element.first.click()
+                        await asyncio.sleep(1.0)
+                        
+                        # Wait for options to be visible
+                        await asyncio.sleep(0.5)
+                        
+                        # Try to find and click the option
+                        option = self._page.locator(f'text="{option_text}", div:has-text("{option_text}")')
+                        if await option.count() > 0:
+                            await option.first.scroll_into_view_if_needed()
+                            await option.first.click()
+                            await asyncio.sleep(0.3)
+                            return True
+                        
+                        # Try role-based options
+                        option = self._page.get_by_role("option", {"name": option_text})
+                        if await option.count() > 0:
+                            await option.first.click()
+                            await asyncio.sleep(0.3)
+                            return True
+                        
+                        break
+                except Exception:
+                    continue
             
-            # Wait for listbox (dropdown) to appear
+            # Fallback: try to fill directly if it's an input field
             try:
-                listbox = self._page.get_by_role("listbox")
-                await listbox.wait_for(state="visible", timeout=5000)
-            except:
-                print(f"[Activity] Listbox not found for {label}, trying options directly")
+                input_field = self._page.locator(f'input[aria-label="{label}"], input[placeholder*="{label}"]')
+                if await input_field.count() > 0:
+                    await input_field.first.fill(option_text)
+                    self._log_activity(f"Filled {label} directly with: {option_text}")
+                    return True
+            except Exception:
+                pass
             
-            # Try to find and click the option
-            option = self._page.get_by_role("option", {"name": option_text})
-            if await option.count() > 0:
-                await option.first.scroll_into_view_if_needed()
-                await option.first.click()
-                await asyncio.sleep(0.3)
-                return True
+            self._log_activity(f"Failed to select {label}: {option_text} not found")
             
-            # Try partial match
-            option = self._page.locator(f'[role="option"]:has-text("{option_text}")')
-            if await option.count() > 0:
-                await option.first.scroll_into_view_if_needed()
-                await option.first.click()
-                await asyncio.sleep(0.3)
-                return True
-            
-            # Try clicking by text anywhere
-            option = self._page.locator(f'div:has-text("{option_text}")')
-            if await option.count() > 0:
-                await option.first.scroll_into_view_if_needed()
-                await option.first.click()
-                await asyncio.sleep(0.3)
-                return True
-            
-            print(f"[Activity] Option '{option_text}' not found for {label}")
-            # Debug: list available options
-            all_opts = self._page.locator('[role="option"]')
-            count = await all_opts.count()
-            if count > 0:
+            # Debug: show available elements
+            try:
+                all_inputs = self._page.locator('input')
+                count = await all_inputs.count()
                 for i in range(min(count, 10)):
-                    text = await all_opts.nth(i).inner_text()
-                    print(f"[Activity]   Available: {text[:50]}")
+                    name = await all_inputs.nth(i).get_attribute('name')
+                    placeholder = await all_inputs.nth(i).get_attribute('placeholder')
+                    aria = await all_inputs.nth(i).get_attribute('aria-label')
+                    if name or placeholder or aria:
+                        self._log_activity(f"  Input: name={name}, placeholder={placeholder}, aria={aria}")
+            except Exception:
+                pass
+            
             return False
             
         except Exception as e:
-            print(f"[Activity] Failed to select {label} '{option_text}': {e}")
+            self._log_activity(f"Failed to select {label} '{option_text}': {e}")
             return False
 
     async def _fill_registration_form(self) -> bool:
         try:
-            print("[Activity] Navigating to Discord registration page...")
+            self._log_activity("Navigating to Discord registration page...")
             await self._page.goto('https://discord.com/register', wait_until='networkidle')
             await asyncio.sleep(3)
             
-            print(f"[Activity] Filling email: {self._email}")
+            self._log_activity(f"Filling email: {self._email}")
             await self._page.wait_for_selector('input[name="email"]', timeout=15000)
             await self._page.locator('input[name="email"]').fill(self._email)
             await self._human_pause()
             
             display_name = self._username[:15] if len(self._username) > 15 else self._username
-            print(f"[Activity] Filling display name: {display_name}")
+            self._log_activity(f"Filling display name: {display_name}")
             await self._page.wait_for_selector('input[name="global_name"]', timeout=10000)
             await self._page.locator('input[name="global_name"]').fill(display_name)
             await self._human_pause()
             
-            print(f"[Activity] Filling username: {self._username}")
+            self._log_activity(f"Filling username: {self._username}")
             await self._page.locator('input[name="username"]').fill(self._username)
             await self._human_pause()
             
-            print("[Activity] Filling password")
+            self._log_activity("Filling password")
             await self._page.locator('input[name="password"]').fill(self._password)
             await self._human_pause()
             
@@ -222,7 +241,7 @@ class DiscordAutomation:
             months = ['January', 'February', 'March', 'April', 'May', 'June',
                      'July', 'August', 'September', 'October', 'November', 'December']
             month_name = months[month_val - 1]
-            print(f"[Activity] Selecting DOB: {month_name} {day_val}, {year_val}")
+            self._log_activity(f"Selecting DOB: {month_name} {day_val}, {year_val}")
             
             await self._select_dob("Month", month_name)
             await self._human_pause()
@@ -233,18 +252,18 @@ class DiscordAutomation:
             await self._select_dob("Year", year_val)
             await self._human_pause()
             
-            print("[Activity] Clicking Create Account button")
+            self._log_activity("Clicking Create Account button")
             await self._page.get_by_role("button", {"name": "Create Account"}).click()
             await asyncio.sleep(5)
             
             if await self._solve_hcaptcha_if_present():
-                print("[Activity] Registration completed")
+                self._log_activity("Registration completed")
                 return True
-            print("[Activity] Registration failed - hCaptcha error")
+            self._log_activity("Registration failed - hCaptcha error")
             return False
             
         except Exception as e:
-            print(f"[Activity] Form filling error: {e}")
+            self._log_activity(f"Form filling error: {e}")
             import traceback
             traceback.print_exc()
             return False
@@ -296,6 +315,12 @@ class DiscordAutomation:
         if self._screenshots:
             return self._screenshots[-1]
         return ""
+
+    def get_activity_log(self) -> list:
+        return self._activity_log[-100:]
+
+    def clear_activity_log(self) -> None:
+        self._activity_log.clear()
 
 
 async def run_discord_automation(config_path: str = "config.json"):
