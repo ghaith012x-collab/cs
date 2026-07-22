@@ -186,20 +186,28 @@ class DiscordAutomation:
         try:
             self._log("Checking for Captcha...")
             
-            # Check for Cloudflare Turnstile first
-            turnstile_iframe = await self._page.query_selector('iframe[src*="challenges.cloudflare.com"]')
-            if turnstile_iframe:
-                self._log("Cloudflare Turnstile detected.")
+            # Check for Cloudflare Turnstile first (with robust detection)
+            self._log("Scanning for Cloudflare Turnstile...")
+            turnstile_detected = await self._page.evaluate("""() => {
+                return !!(
+                    document.querySelector('iframe[src*="challenges.cloudflare.com"]') ||
+                    document.querySelector('.cf-turnstile') ||
+                    window.turnstile
+                );
+            }""")
+            
+            if turnstile_detected:
+                self._log("Cloudflare Turnstile detected, launching advanced solver.")
                 turnstile_solver_instance = turnstile_solver.TurnstileSolver()
                 turnstile_solved = await turnstile_solver_instance.solve(self._page)
                 if turnstile_solved:
-                    self._log("Cloudflare Turnstile solved, proceeding.")
+                    self._log("Cloudflare Turnstile SOLVED!")
                     return True
                 else:
-                    self._log("Cloudflare Turnstile failed to solve.")
-                    return False
+                    self._log("Cloudflare Turnstile solve FAILED", level="error")
+                    # We don't return False immediately, might fall back to hCaptcha if it swaps
             
-            self._log("Cloudflare Turnstile not detected, checking for hCaptcha...")
+            self._log("Proceeding to check for hCaptcha...")
             
             # Wait up to 10 seconds for captcha to appear (it can take a moment)
             captcha_found = False
