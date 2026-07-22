@@ -46,9 +46,23 @@ class DiscordAutomation:
         )
         
         await self._context.add_init_script("""
-            Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-            Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
-            Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+            // Stealth: webdriver=false (not undefined - absence is now a signal)
+            Object.defineProperty(navigator, 'webdriver', { get: () => false, configurable: true });
+            Object.defineProperty(navigator, 'languages', { get: () => Object.freeze(['en-US', 'en']) });
+            Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8 });
+            Object.defineProperty(navigator, 'deviceMemory', { get: () => 8 });
+            Object.defineProperty(navigator, 'platform', { get: () => 'Win32' });
+            Object.defineProperty(navigator, 'vendor', { get: () => 'Google Inc.' });
+            Object.defineProperty(navigator, 'maxTouchPoints', { get: () => 0 });
+            // WebRTC leak prevention
+            const origRTC = window.RTCPeerConnection || window.webkitRTCPeerConnection;
+            if (origRTC) {
+                window.RTCPeerConnection = function(...args) {
+                    const c = args[0] || {}; c.iceTransportPolicy = 'relay';
+                    return new origRTC(c, ...args.slice(1));
+                };
+                window.RTCPeerConnection.prototype = origRTC.prototype;
+            }
         """)
         
         self._page = await self._context.new_page()
@@ -132,125 +146,114 @@ class DiscordAutomation:
             return False
 
     async def _select_dob(self, label: str, value: str) -> bool:
-        """Select DOB field. Discord uses react-select custom dropdowns."""
+        """Select DOB field. Discord uses custom dropdown divs (not native selects).
+        The dropdowns have a clickable container with placeholder text like 'Month', 'Day', 'Year'.
+        Clicking opens a listbox with options. For Year, the list is long and needs keyboard input.
+        """
         try:
             print(f"[Activity] Selecting {label}: {value}")
             
-            # Method 1: Try native <select> elements first
-            selects = self._page.locator('select')
-            select_count = await selects.count()
-            if select_count >= 3:
-                idx = {"Month": 0, "Day": 1, "Year": 2}.get(label, -1)
-                if idx >= 0 and idx < select_count:
-                    try:
-                        await selects.nth(idx).select_option(value=value)
-                        await asyncio.sleep(0.3)
-                        print(f"[Activity] Selected {label}: {value} via native select (value)")
-                        return True
-                    except:
-                        try:
-                            await selects.nth(idx).select_option(label=value)
-                            await asyncio.sleep(0.3)
-                            print(f"[Activity] Selected {label}: {value} via native select (label)")
-                            return True
-                        except:
-                            pass
+            # === APPROACH 1: Type-to-search in the dropdown ===
+            # Discord's DOB dropdowns are searchable. Click the dropdown, then type the value.
+            # This is the most reliable method because it avoids scrolling entirely.
             
-            # Method 2: Discord's react-select custom dropdowns
-            # These have IDs like react-select-*-placeholder with text "Month"/"Day"/"Year"
-            placeholder = self._page.locator(f'div[id*="react-select"][id*="placeholder"]:has-text("{label}")')
-            if await placeholder.count() == 0:
-                # Try the parent container that shows the placeholder text
-                placeholder = self._page.locator(f'div[class*="css-"]:has(> div[id*="placeholder"]:has-text("{label}"))')
-            if await placeholder.count() == 0:
-                # Try any clickable element near the label text
-                placeholder = self._page.locator(f'div[class*="indicatorContainer"]').nth(
-                    {"Month": 0, "Day": 1, "Year": 2}.get(label, 0)
-                )
+            # Find the dropdown container. Discord renders them in order: Month, Day, Year
+            # Each has a div with class containing 'css-' and shows placeholder text
+            idx = {"Month": 0, "Day": 1, "Year": 2}.get(label, -1)
+            if idx < 0:
+                return False
             
-            if await placeholder.count() > 0:
-                await placeholder.first.click()
-                await asyncio.sleep(0.5)
-                
-                # Look for the option in the opened menu
-                option = self._page.locator(f'div[id*="react-select"][id*="option"]:has-text("{value}")')
-                if await option.count() == 0:
-                    option = self._page.locator(f'[role="option"]:has-text("{value}")')
-                if await option.count() == 0:
-                    option = self._page.locator(f'div[class*="option"]:has-text("{value}")')
-                
+            # Try multiple selectors for the dropdown trigger
+            dropdown_clicked = False
+            
+            # Selector 1: The input control containers (most reliable for Discord 2024+)
+            containers = self._page.locator('div[class*="inputContainer"] div[class*="css-"][class*="control"], div[class*="select"] div[class*="control"]')
+            if await containers.count() >= 3:
+                await containers.nth(idx).click()
+                dropdown_clicked = True
+            
+            if not dropdown_clicked:
+                # Selector 2: Look for the placeholder/value text divs
+                dob_labels = self._page.locator(f'div[class*="css-"]:has-text("{label}")')
+                for i in range(await dob_labels.count()):
+                    el = dob_labels.nth(i)
+                    text = await el.text_content()
+                    if text and text.strip() == label:
+                        # Click the parent control
+                        parent = el.locator('..')
+                        await parent.click()
+                        dropdown_clicked = True
+                        break
+            
+            if not dropdown_clicked:
+                # Selector 3: Generic approach - find all dropdown-like containers
+                dropdowns = self._page.locator('[class*="lookFilled"][class*="select"], [class*="Select"] [class*="css-"]')
+                if await dropdowns.count() >= 3:
+                    await dropdowns.nth(idx).click()
+                    dropdown_clicked = True
+            
+            if not dropdown_clicked:
+                # Selector 4: Just find any element showing the placeholder text for this field
+                placeholder = self._page.locator(f'text="{label}"').first
+                if await placeholder.count() > 0:
+                    await placeholder.click()
+                    dropdown_clicked = True
+            
+            if not dropdown_clicked:
+                print(f"[Activity] Could not find dropdown for {label}")
+                # Last resort: use keyboard to tab to the field
+                for _ in range(idx + 1):
+                    await self._page.keyboard.press('Tab')
+                    await asyncio.sleep(0.1)
+                await self._page.keyboard.press('Space')
+                dropdown_clicked = True
+            
+            await asyncio.sleep(0.5)
+            
+            # === Now type the value to search/filter ===
+            # Discord's dropdowns support keyboard input to filter options
+            await self._page.keyboard.type(value, delay=50)
+            await asyncio.sleep(0.4)
+            
+            # Try to find and click the matching option
+            option_found = False
+            
+            # Look for visible option matching our value
+            option_selectors = [
+                f'[id*="option"]:has-text("{value}")',
+                f'[role="option"]:has-text("{value}")',
+                f'div[class*="option"]:has-text("{value}")',
+                f'li:has-text("{value}")',
+            ]
+            
+            for sel in option_selectors:
+                option = self._page.locator(sel)
                 if await option.count() > 0:
-                    await option.first.scroll_into_view_if_needed()
-                    await asyncio.sleep(0.2)
-                    await option.first.click()
-                    await asyncio.sleep(0.3)
-                    print(f"[Activity] Selected {label}: {value} via react-select")
-                    return True
-                else:
-                    # Year needs scrolling - the menu is virtualized
-                    menu = self._page.locator('div[class*="MenuList"], div[class*="menu-list"], [id*="react-select"][id*="listbox"]')
-                    if await menu.count() > 0:
-                        for scroll_attempt in range(30):
-                            await menu.first.evaluate("el => el.scrollTop += 200")
-                            await asyncio.sleep(0.15)
-                            option = self._page.locator(f'div[id*="react-select"][id*="option"]:has-text("{value}")')
-                            if await option.count() == 0:
-                                option = self._page.locator(f'[role="option"]:has-text("{value}")')
-                            if await option.count() > 0:
-                                await option.first.scroll_into_view_if_needed()
-                                await asyncio.sleep(0.1)
-                                await option.first.click()
-                                await asyncio.sleep(0.3)
-                                print(f"[Activity] Selected {label}: {value} via scroll")
-                                return True
-                    
-                    # Try scrolling up too (year might be above)
-                    if await menu.count() > 0:
-                        await menu.first.evaluate("el => el.scrollTop = 0")
-                        await asyncio.sleep(0.2)
-                        for scroll_attempt in range(30):
-                            option = self._page.locator(f'div[id*="react-select"][id*="option"]:has-text("{value}")')
-                            if await option.count() == 0:
-                                option = self._page.locator(f'[role="option"]:has-text("{value}")')
-                            if await option.count() > 0:
-                                await option.first.scroll_into_view_if_needed()
-                                await asyncio.sleep(0.1)
-                                await option.first.click()
-                                await asyncio.sleep(0.3)
-                                print(f"[Activity] Selected {label}: {value} via scroll (up)")
-                                return True
-                            await menu.first.evaluate("el => el.scrollTop += 100")
-                            await asyncio.sleep(0.1)
-                    
-                    print(f"[Activity] Could not find option '{value}' for {label} after scrolling")
-                    # Close the menu by pressing Escape
-                    await self._page.keyboard.press("Escape")
-                    await asyncio.sleep(0.2)
-                    return False
+                    # Click the first exact or closest match
+                    for i in range(await option.count()):
+                        opt_text = await option.nth(i).text_content()
+                        if opt_text and value.lower() in opt_text.lower():
+                            await option.nth(i).click()
+                            option_found = True
+                            break
+                    if option_found:
+                        break
             
-            # Method 3: JavaScript fallback - directly set react-select value
-            js_success = await self._page.evaluate(f'''() => {{
-                // Try native selects
-                const selects = document.querySelectorAll('select');
-                if (selects.length >= 3) {{
-                    const idx = {{"Month": 0, "Day": 1, "Year": 2}}["{label}"];
-                    if (idx !== undefined && selects[idx]) {{
-                        const nativeInputValueSetter = Object.getOwnPropertyDescriptor(
-                            window.HTMLSelectElement.prototype, 'value'
-                        ).set;
-                        nativeInputValueSetter.call(selects[idx], "{value}");
-                        selects[idx].dispatchEvent(new Event('change', {{ bubbles: true }}));
-                        return true;
-                    }}
-                }}
-                return false;
-            }}''')
+            if not option_found:
+                # Press Enter to select the first filtered result
+                await self._page.keyboard.press('Enter')
+                option_found = True
             
-            if js_success:
-                print(f"[Activity] Selected {label}: {value} via JS fallback")
+            await asyncio.sleep(0.3)
+            
+            if option_found:
+                print(f"[Activity] Selected {label}: {value} via type-to-search")
                 return True
             
-            print(f"[Activity] All methods failed for {label}: {value}")
+            # Close menu if still open
+            await self._page.keyboard.press('Escape')
+            await asyncio.sleep(0.2)
+            print(f"[Activity] Failed to select {label}: {value}")
             return False
             
         except Exception as e:

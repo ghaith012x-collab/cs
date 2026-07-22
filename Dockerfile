@@ -25,19 +25,21 @@ RUN apt-get update && apt-get install -y \
     libpango-1.0-0 \
     && rm -rf /var/lib/apt/lists/*
 
+# Install torch+torchvision CPU first (pinned compatible versions)
 RUN pip install --no-cache-dir \
+    torch==2.2.0+cpu torchvision==0.17.0+cpu --index-url https://download.pytorch.org/whl/cpu && \
+    pip install --no-cache-dir \
+    open-clip-torch==2.24.0 \
     playwright==1.40.0 \
     opencv-python-headless==4.9.0.80 \
     numpy==1.26.4 \
     aiofiles==23.1.0 \
     aiohttp==3.9.1 \
-    open-clip-torch==2.24.0 \
-    Pillow==10.2.0 && \
-    pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu torch==2.1.0
+    Pillow==10.2.0
 
 RUN python -m playwright install chromium
 
-COPY app.py server.py captcha_solver.py requirements.txt ./
+COPY app.py server.py captcha_solver.py config.json requirements.txt ./
 COPY test/ ./test/
 RUN chmod +r ./test/site.html 2>/dev/null || true
 
