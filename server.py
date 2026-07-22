@@ -28,7 +28,7 @@ class DiscordAutomation:
         self._playwright = await async_playwright().start()
         
         args = [
-            '--disable-blink-features=AutomationControlled',
+            '--disable-blink-features=AutomationDetected',
             '--no-sandbox',
             '--disable-setuid-sandbox',
             '--disable-webgl',
@@ -57,9 +57,10 @@ class DiscordAutomation:
         with open(config_path, 'r') as f:
             config = json.load(f)
         
-        self._email = config.get('email', '')
-        self._username = config.get('username', self._generate_username())
-        self._password = config.get('password', self._generate_password())
+        self._email = config.get('email', '') or ''
+        self._username = config.get('username', '') or self._generate_username()
+        self._password = config.get('password', '') or self._generate_password()
+        print(f"[Config] Email: {self._email}, Username: {self._username}, Password set: {bool(self._password)}")
     
     def _generate_username(self) -> str:
         chars = 'abcdefghijklmnopqrstuvwxyz'
@@ -96,11 +97,6 @@ class DiscordAutomation:
         if not self._page:
             await self.initialize()
         
-        await self._page.goto('https://discord.com/register', wait_until='networkidle')
-        await asyncio.sleep(2)
-        
-        await self.capture_screenshot()
-        
         success = await self._fill_registration_form()
         
         await self.capture_screenshot()
@@ -129,91 +125,129 @@ class DiscordAutomation:
             print(f"hCaptcha solve error: {e}")
             return True
 
+    async def _select_dob(self, label: str, option_text: str) -> bool:
+        """Select DOB using multiple strategies: click+type+Enter, keyboard nav, JS."""
+        try:
+            combobox = self._page.locator(f'[role="combobox"][aria-label="{label}"]')
+            if await combobox.count() == 0:
+                print(f"[Activity] Combobox {label} not found")
+                return False
+            
+            print(f"[Activity] Selecting {label}: {option_text}")
+            
+            # Strategy 1: Click combobox, find input, type, press Enter
+            await combobox.first.click()
+            await asyncio.sleep(0.5)
+            
+            # Find input inside combobox
+            input_loc = self._page.locator(f'[role="combobox"][aria-label="{label}"] input')
+            if await input_loc.count() == 0:
+                input_loc = self._page.locator(f'[id^="react-select-"][id$="-input"]')
+            if await input_loc.count() == 0:
+                input_loc = combobox.first
+            
+            await input_loc.first.fill(option_text)
+            await asyncio.sleep(0.3)
+            await input_loc.first.press("Enter")
+            await asyncio.sleep(0.5)
+            return True
+            
+        except Exception as e:
+            print(f"[Activity] Strategy 1 failed for {label}: {e}")
+            
+            # Strategy 2: Keyboard navigation - click, ArrowDown, Enter
+            try:
+                await combobox.first.click()
+                await asyncio.sleep(0.5)
+                await self._page.keyboard.press("ArrowDown")
+                await asyncio.sleep(0.2)
+                await self._page.keyboard.press("Enter")
+                await asyncio.sleep(0.5)
+                return True
+            except Exception as e2:
+                print(f"[Activity] Strategy 2 failed for {label}: {e2}")
+                
+                # Strategy 3: JavaScript click on option
+                try:
+                    result = await self._page.evaluate(f"""
+                        () => {{
+                            const cb = document.querySelector('[role="combobox"][aria-label="{label}"]');
+                            if (!cb) return false;
+                            cb.click();
+                            setTimeout(() => {{
+                                const options = document.querySelectorAll('[role="option"]');
+                                for (const opt of options) {{
+                                    if (opt.textContent && opt.textContent.includes("{option_text}")) {{
+                                        opt.click();
+                                        return true;
+                                    }}
+                                }}
+                                return false;
+                            }}, 500);
+                        }}
+                    """)
+                    await asyncio.sleep(0.5)
+                    return True
+                except Exception as e3:
+                    print(f"[Activity] All strategies failed for {label}: {e3}")
+                    return False
+
     async def _fill_registration_form(self) -> bool:
         try:
-            email_input = await self._page.wait_for_selector(
-                'input[type="email"], input[name="email"], #email',
-                timeout=10000
-            )
+            print("[Activity] Navigating to Discord registration page...")
+            await self._page.goto('https://discord.com/register', wait_until='networkidle')
+            await asyncio.sleep(3)
             
-            email = self._email or await self.read_email_from_file('test/site.html')
-            await email_input.fill(email)
+            print(f"[Activity] Filling email: {self._email}")
+            await self._page.wait_for_selector('input[name="email"]', timeout=15000)
+            await self._page.locator('input[name="email"]').fill(self._email)
             await self._human_pause()
             
-            username_input = await self._page.wait_for_selector(
-                'input[autocomplete="username"], input[name="username"], #username',
-                timeout=10000
-            )
-            await username_input.fill(self._username)
+            display_name = self._username[:15] if len(self._username) > 15 else self._username
+            print(f"[Activity] Filling display name: {display_name}")
+            await self._page.wait_for_selector('input[name="global_name"]', timeout=10000)
+            await self._page.locator('input[name="global_name"]').fill(display_name)
             await self._human_pause()
             
-            password_input = await self._page.wait_for_selector(
-                'input[type="password"], input[name="password"], #password',
-                timeout=10000
-            )
-            await password_input.fill(self._password)
+            print(f"[Activity] Filling username: {self._username}")
+            await self._page.locator('input[name="username"]').fill(self._username)
             await self._human_pause()
             
-            confirm_input = await self._page.query_selector(
-                'input[autocomplete="new-password"], input[name="password-confirm"], #password-confirm'
-            )
-            if confirm_input:
-                await confirm_input.fill(self._password)
-                await self._human_pause()
+            print("[Activity] Filling password")
+            await self._page.locator('input[name="password"]').fill(self._password)
+            await self._human_pause()
             
-            dob_selectors = [
-                'select[name="day"], select#day',
-                'select[name="month"], select#month',
-                'select[name="year"], select#year'
-            ]
+            month_val = random.randint(1, 12)
+            day_val = str(random.randint(1, 28))
+            year_val = str(random.randint(1990, 2003))
+            months = ['January', 'February', 'March', 'April', 'May', 'June',
+                     'July', 'August', 'September', 'October', 'November', 'December']
+            month_name = months[month_val - 1]
+            print(f"[Activity] Selecting DOB: {month_name} {day_val}, {year_val}")
             
-            day_select = await self._page.query_selector(dob_selectors[0])
-            month_select = await self._page.query_selector(dob_selectors[1])
-            year_select = await self._page.query_selector(dob_selectors[2])
+            await self._select_dob("Month", month_name)
+            await self._human_pause()
             
-            if day_select:
-                await day_select.select_option(str(random.randint(1, 28)))
-                await self._human_pause()
+            await self._select_dob("Day", day_val)
+            await self._human_pause()
             
-            if month_select:
-                await month_select.select_option(str(random.randint(1, 12)))
-                await self._human_pause()
+            await self._select_dob("Year", year_val)
+            await self._human_pause()
             
-            if year_select:
-                years = [str(y) for y in range(1990, 2005)]
-                await year_select.select_option(random.choice(years))
-                await self._human_pause()
+            print("[Activity] Clicking Create Account button")
+            await self._page.get_by_role("button", {"name": "Create Account"}).click()
+            await asyncio.sleep(5)
             
-            submit_selectors = [
-                'button[type="submit"]',
-                'button[name="submit"]',
-                '#provided-choices-recaptcha-response button',
-                'div[role="button"]:has-text("Next")',
-                'div[role="button"]:has-text("Continue")'
-            ]
-            
-            submit_btn = None
-            for selector in submit_selectors:
-                try:
-                    submit_btn = await self._page.query_selector(selector)
-                    if submit_btn:
-                        break
-                except:
-                    continue
-            
-            if submit_btn:
-                await self._human_click(submit_btn)
-                await asyncio.sleep(3)
-                
-                if await self._solve_hcaptcha_if_present():
-                    return True
-                else:
-                    return False
-            
+            if await self._solve_hcaptcha_if_present():
+                print("[Activity] Registration completed")
+                return True
+            print("[Activity] Registration failed - hCaptcha error")
             return False
             
         except Exception as e:
-            print(f"Form filling error: {e}")
+            print(f"[Activity] Form filling error: {e}")
+            import traceback
+            traceback.print_exc()
             return False
 
     async def _human_click(self, element) -> None:
