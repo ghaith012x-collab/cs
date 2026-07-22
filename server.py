@@ -97,7 +97,11 @@ class DiscordAutomation:
         if not self._page:
             await self.initialize()
         
-        success = await self._fill_registration_form()
+        try:
+            success = await asyncio.wait_for(self._fill_registration_form(), timeout=60)
+        except asyncio.TimeoutError:
+            print("[Activity] Form filling timed out after 60 seconds")
+            success = False
         
         await self.capture_screenshot()
         
@@ -126,7 +130,7 @@ class DiscordAutomation:
             return True
 
     async def _select_dob(self, label: str, option_text: str) -> bool:
-        """Select DOB using multiple strategies: click+type+Enter, keyboard nav, JS."""
+        """Select DOB using multiple strategies: click+type+Enter, keyboard nav, JS with scroll."""
         try:
             combobox = self._page.locator(f'[role="combobox"][aria-label="{label}"]')
             if await combobox.count() == 0:
@@ -167,27 +171,44 @@ class DiscordAutomation:
             except Exception as e2:
                 print(f"[Activity] Strategy 2 failed for {label}: {e2}")
                 
-                # Strategy 3: JavaScript click on option
+                # Strategy 3: JavaScript with scroll to find option
                 try:
-                    result = await self._page.evaluate(f"""
+                    await self._page.evaluate(f"""
                         () => {{
                             const cb = document.querySelector('[role="combobox"][aria-label="{label}"]');
                             if (!cb) return false;
                             cb.click();
-                            setTimeout(() => {{
-                                const options = document.querySelectorAll('[role="option"]');
-                                for (const opt of options) {{
-                                    if (opt.textContent && opt.textContent.includes("{option_text}")) {{
-                                        opt.click();
-                                        return true;
-                                    }}
-                                }}
-                                return false;
-                            }}, 500);
                         }}
                     """)
                     await asyncio.sleep(0.5)
-                    return True
+                    
+                    # Search for option in the entire document (portal might render elsewhere)
+                    result = await self._page.evaluate(f"""
+                        () => {{
+                            const options = document.querySelectorAll('[role="option"]');
+                            for (const opt of options) {{
+                                if (opt.textContent && opt.textContent.trim() === "{option_text}") {{
+                                    opt.scrollIntoView({{block: "center", inline: "center"}});
+                                    opt.click();
+                                    return true;
+                                }}
+                            }}
+                            // Try partial match
+                            for (const opt of options) {{
+                                if (opt.textContent && opt.textContent.includes("{option_text}")) {{
+                                    opt.scrollIntoView({{block: "center", inline: "center"}});
+                                    opt.click();
+                                    return true;
+                                }}
+                            }}
+                            return false;
+                        }}
+                    """)
+                    await asyncio.sleep(0.5)
+                    if result:
+                        return True
+                    print(f"[Activity] JS strategy did not find option {option_text} for {label}")
+                    return False
                 except Exception as e3:
                     print(f"[Activity] All strategies failed for {label}: {e3}")
                     return False
