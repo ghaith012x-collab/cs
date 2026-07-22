@@ -10,7 +10,7 @@ from typing import Optional
 from playwright.async_api import async_playwright, Page, BrowserContext
 
 import captcha_solver
-import turnstile_solver
+
 
 
 class DiscordAutomation:
@@ -184,30 +184,9 @@ class DiscordAutomation:
     async def _solve_hcaptcha_if_present(self) -> bool:
         """Detect and solve hCaptcha with robust multi-method detection."""
         try:
-            self._log("Checking for Captcha...")
+            self._log("Checking for hCaptcha...")
             
-            # Check for Cloudflare Turnstile first (with robust detection)
-            self._log("Scanning for Cloudflare Turnstile...")
-            turnstile_detected = await self._page.evaluate("""() => {
-                return !!(
-                    document.querySelector('iframe[src*="challenges.cloudflare.com"]') ||
-                    document.querySelector('.cf-turnstile') ||
-                    window.turnstile
-                );
-            }""")
-            
-            if turnstile_detected:
-                self._log("Cloudflare Turnstile detected, launching advanced solver.")
-                turnstile_solver_instance = turnstile_solver.TurnstileSolver()
-                turnstile_solved = await turnstile_solver_instance.solve(self._page)
-                if turnstile_solved:
-                    self._log("Cloudflare Turnstile SOLVED!")
-                    return True
-                else:
-                    self._log("Cloudflare Turnstile solve FAILED", level="error")
-                    # We don't return False immediately, might fall back to hCaptcha if it swaps
-            
-            self._log("Proceeding to check for hCaptcha...")
+
             
             # Wait up to 10 seconds for captcha to appear (it can take a moment)
             captcha_found = False
