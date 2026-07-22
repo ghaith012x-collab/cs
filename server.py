@@ -140,11 +140,34 @@ class DiscordAutomation:
                 # Fallback to CSS selector
                 combobox = self._page.locator(f'[role="combobox"][aria-label="{label}"]')
             if await combobox.count() == 0:
+                # Try matching by placeholder text or nearby label
+                combobox = self._page.locator(f'select:near(:text("{label}"))')
+            if await combobox.count() == 0:
+                # Try generic select elements in order (Month=0, Day=1, Year=2)
+                selects = self._page.locator('select')
+                select_count = await selects.count()
+                if select_count > 0:
+                    idx = {"Month": 0, "Day": 1, "Year": 2}.get(label, -1)
+                    if idx >= 0 and idx < select_count:
+                        # Use native select
+                        await selects.nth(idx).select_option(label=option_text)
+                        await asyncio.sleep(0.3)
+                        print(f"[Activity] Selected {label}: {option_text} via native select")
+                        return True
                 print(f"[Activity] Combobox {label} not found")
                 return False
             
+            # Check if it's a native <select> element
+            tag = await combobox.first.evaluate("el => el.tagName.toLowerCase()")
+            if tag == 'select':
+                await combobox.first.select_option(label=option_text)
+                await asyncio.sleep(0.3)
+                print(f"[Activity] Selected {label}: {option_text} via native select")
+                return True
+            
+            # Custom dropdown - click to open
             await combobox.first.click()
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(0.8)
             
             # Wait for listbox (dropdown) to appear
             try:
@@ -153,29 +176,66 @@ class DiscordAutomation:
             except:
                 print(f"[Activity] Listbox not found for {label}, trying options directly")
             
-            # Try to find and click the option
+            # Try exact match with role=option
+            option = self._page.get_by_role("option", {"name": option_text, "exact": True})
+            if await option.count() > 0:
+                await option.first.scroll_into_view_if_needed()
+                await asyncio.sleep(0.2)
+                await option.first.click()
+                await asyncio.sleep(0.3)
+                return True
+            
+            # Try non-exact role match
             option = self._page.get_by_role("option", {"name": option_text})
             if await option.count() > 0:
                 await option.first.scroll_into_view_if_needed()
+                await asyncio.sleep(0.2)
                 await option.first.click()
                 await asyncio.sleep(0.3)
                 return True
             
-            # Try partial match
+            # Try partial match with role=option
             option = self._page.locator(f'[role="option"]:has-text("{option_text}")')
             if await option.count() > 0:
                 await option.first.scroll_into_view_if_needed()
+                await asyncio.sleep(0.2)
                 await option.first.click()
                 await asyncio.sleep(0.3)
                 return True
             
-            # Try clicking by text anywhere
-            option = self._page.locator(f'div:has-text("{option_text}")')
+            # Try li elements inside the dropdown
+            option = self._page.locator(f'li:has-text("{option_text}")')
             if await option.count() > 0:
                 await option.first.scroll_into_view_if_needed()
+                await asyncio.sleep(0.2)
                 await option.first.click()
                 await asyncio.sleep(0.3)
                 return True
+            
+            # Try any visible element with exact text
+            option = self._page.locator(f'[role="listbox"] >> text="{option_text}"')
+            if await option.count() > 0:
+                await option.first.scroll_into_view_if_needed()
+                await asyncio.sleep(0.2)
+                await option.first.click()
+                await asyncio.sleep(0.3)
+                return True
+            
+            # Last resort: scroll through listbox to find the option
+            listbox = self._page.locator('[role="listbox"]')
+            if await listbox.count() > 0:
+                # Scroll down in the listbox to find the year/option
+                for scroll_attempt in range(10):
+                    option = self._page.locator(f'[role="option"]:has-text("{option_text}")')
+                    if await option.count() > 0:
+                        await option.first.scroll_into_view_if_needed()
+                        await asyncio.sleep(0.2)
+                        await option.first.click()
+                        await asyncio.sleep(0.3)
+                        return True
+                    # Scroll down inside the listbox
+                    await listbox.first.evaluate("el => el.scrollTop += 200")
+                    await asyncio.sleep(0.3)
             
             print(f"[Activity] Option '{option_text}' not found for {label}")
             # Debug: list available options
@@ -189,6 +249,8 @@ class DiscordAutomation:
             
         except Exception as e:
             print(f"[Activity] Failed to select {label} '{option_text}': {e}")
+            import traceback
+            traceback.print_exc()
             return False
 
     async def _fill_registration_form(self) -> bool:
@@ -218,7 +280,7 @@ class DiscordAutomation:
             
             month_val = random.randint(1, 12)
             day_val = str(random.randint(1, 28))
-            year_val = str(random.randint(1990, 2003))
+            year_val = str(random.randint(1990, 1999))
             months = ['January', 'February', 'March', 'April', 'May', 'June',
                      'July', 'August', 'September', 'October', 'November', 'December']
             month_name = months[month_val - 1]
