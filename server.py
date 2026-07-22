@@ -130,88 +130,66 @@ class DiscordAutomation:
             return True
 
     async def _select_dob(self, label: str, option_text: str) -> bool:
-        """Select DOB using multiple strategies: click+type+Enter, keyboard nav, JS with scroll."""
+        """Select DOB by clicking combobox, waiting for listbox, clicking option."""
         try:
-            combobox = self._page.locator(f'[role="combobox"][aria-label="{label}"]')
+            print(f"[Activity] Selecting {label}: {option_text}")
+            
+            # Click the combobox to open the dropdown
+            combobox = self._page.get_by_role("combobox", {"name": label})
+            if await combobox.count() == 0:
+                # Fallback to CSS selector
+                combobox = self._page.locator(f'[role="combobox"][aria-label="{label}"]')
             if await combobox.count() == 0:
                 print(f"[Activity] Combobox {label} not found")
                 return False
             
-            print(f"[Activity] Selecting {label}: {option_text}")
-            
-            # Strategy 1: Click combobox, find input, type, press Enter
             await combobox.first.click()
             await asyncio.sleep(0.5)
             
-            # Find input inside combobox
-            input_loc = self._page.locator(f'[role="combobox"][aria-label="{label}"] input')
-            if await input_loc.count() == 0:
-                input_loc = self._page.locator(f'[id^="react-select-"][id$="-input"]')
-            if await input_loc.count() == 0:
-                input_loc = combobox.first
+            # Wait for listbox (dropdown) to appear
+            try:
+                listbox = self._page.get_by_role("listbox")
+                await listbox.wait_for(state="visible", timeout=5000)
+            except:
+                print(f"[Activity] Listbox not found for {label}, trying options directly")
             
-            await input_loc.first.fill(option_text)
-            await asyncio.sleep(0.3)
-            await input_loc.first.press("Enter")
-            await asyncio.sleep(0.5)
-            return True
+            # Try to find and click the option
+            option = self._page.get_by_role("option", {"name": option_text})
+            if await option.count() > 0:
+                await option.first.scroll_into_view_if_needed()
+                await option.first.click()
+                await asyncio.sleep(0.3)
+                return True
+            
+            # Try partial match
+            option = self._page.locator(f'[role="option"]:has-text("{option_text}")')
+            if await option.count() > 0:
+                await option.first.scroll_into_view_if_needed()
+                await option.first.click()
+                await asyncio.sleep(0.3)
+                return True
+            
+            # Try clicking by text anywhere
+            option = self._page.locator(f'div:has-text("{option_text}")')
+            if await option.count() > 0:
+                await option.first.scroll_into_view_if_needed()
+                await option.first.click()
+                await asyncio.sleep(0.3)
+                return True
+            
+            print(f"[Activity] Option '{option_text}' not found for {label}")
+            # Debug: list available options
+            all_opts = self._page.locator('[role="option"]')
+            count = await all_opts.count()
+            if count > 0:
+                for i in range(min(count, 10)):
+                    text = await all_opts.nth(i).inner_text()
+                    print(f"[Activity]   Available: {text[:50]}")
+            return False
             
         except Exception as e:
-            print(f"[Activity] Strategy 1 failed for {label}: {e}")
-            
-            # Strategy 2: Keyboard navigation - click, ArrowDown, Enter
-            try:
-                await combobox.first.click()
-                await asyncio.sleep(0.5)
-                await self._page.keyboard.press("ArrowDown")
-                await asyncio.sleep(0.2)
-                await self._page.keyboard.press("Enter")
-                await asyncio.sleep(0.5)
-                return True
-            except Exception as e2:
-                print(f"[Activity] Strategy 2 failed for {label}: {e2}")
-                
-                # Strategy 3: JavaScript with scroll to find option
-                try:
-                    await self._page.evaluate(f"""
-                        () => {{
-                            const cb = document.querySelector('[role="combobox"][aria-label="{label}"]');
-                            if (!cb) return false;
-                            cb.click();
-                        }}
-                    """)
-                    await asyncio.sleep(0.5)
-                    
-                    # Search for option in the entire document (portal might render elsewhere)
-                    result = await self._page.evaluate(f"""
-                        () => {{
-                            const options = document.querySelectorAll('[role="option"]');
-                            for (const opt of options) {{
-                                if (opt.textContent && opt.textContent.trim() === "{option_text}") {{
-                                    opt.scrollIntoView({{block: "center", inline: "center"}});
-                                    opt.click();
-                                    return true;
-                                }}
-                            }}
-                            // Try partial match
-                            for (const opt of options) {{
-                                if (opt.textContent && opt.textContent.includes("{option_text}")) {{
-                                    opt.scrollIntoView({{block: "center", inline: "center"}});
-                                    opt.click();
-                                    return true;
-                                }}
-                            }}
-                            return false;
-                        }}
-                    """)
-                    await asyncio.sleep(0.5)
-                    if result:
-                        return True
-                    print(f"[Activity] JS strategy did not find option {option_text} for {label}")
-                    return False
-                except Exception as e3:
-                    print(f"[Activity] All strategies failed for {label}: {e3}")
-                    return False
+            print(f"[Activity] Failed to select {label} '{option_text}': {e}")
+            return False
 
     async def _fill_registration_form(self) -> bool:
         try:
