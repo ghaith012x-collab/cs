@@ -337,6 +337,17 @@ class DiscordAutomation:
                 scan_start = asyncio.get_event_loop().time()
                 scan_duration = 15  # seconds
                 
+                # All possible hCaptcha iframe selectors
+                captcha_selectors = [
+                    "iframe[src*='newassets.hcaptcha.com/captcha']",
+                    "iframe[src*='hcaptcha.com/captcha']",
+                    "iframe[src*='imgs.hcaptcha.com']",
+                    "iframe[title*='hCaptcha challenge']",
+                    "iframe[title*='hcaptcha challenge']",
+                    "iframe[data-hcaptcha-widget-id]",
+                    "iframe[src*='hcaptcha'][style*='width']",
+                ]
+                
                 while (asyncio.get_event_loop().time() - scan_start) < scan_duration:
                     # Check if page navigated away (success!)
                     try:
@@ -348,21 +359,51 @@ class DiscordAutomation:
                     except:
                         pass
                     
-                    # Check for active captcha challenge
+                    # Check ALL possible captcha iframe selectors
+                    for sel in captcha_selectors:
+                        try:
+                            challenge_iframe = self._page.locator(sel)
+                            challenge_count = await challenge_iframe.count()
+                            
+                            if challenge_count > 0:
+                                for i in range(challenge_count):
+                                    try:
+                                        frame = challenge_iframe.nth(i)
+                                        box = await frame.bounding_box()
+                                        if box and box['width'] > 100 and box['height'] > 100:
+                                            is_visible = await frame.is_visible()
+                                            if is_visible:
+                                                new_captcha = True
+                                                self._log(f"New active captcha detected! (selector: {sel}, size: {box['width']:.0f}x{box['height']:.0f})")
+                                                break
+                                    except:
+                                        continue
+                            if new_captcha:
+                                break
+                        except:
+                            continue
+                    
+                    if new_captcha:
+                        break
+                    
+                    # Also check for any large overlay/modal that appeared (captcha container)
                     try:
-                        challenge_iframe = self._page.locator("iframe[src*='newassets.hcaptcha.com/captcha']")
-                        challenge_count = await challenge_iframe.count()
-                        
-                        if challenge_count > 0:
-                            box = await challenge_iframe.first.bounding_box()
-                            if box and box['width'] > 100 and box['height'] > 100:
-                                is_visible = await challenge_iframe.first.is_visible()
-                                if is_visible:
-                                    new_captcha = True
-                                    self._log(f"New active captcha detected! (size: {box['width']:.0f}x{box['height']:.0f})")
-                                    break
+                        overlay = self._page.locator("div[style*='position: fixed'], div[style*='position:fixed'], .hcaptcha-box, #hcaptcha, .captcha-container")
+                        if await overlay.count() > 0:
+                            for i in range(await overlay.count()):
+                                box = await overlay.nth(i).bounding_box()
+                                if box and box['width'] > 200 and box['height'] > 200:
+                                    # Check if it contains an iframe
+                                    inner_frames = await overlay.nth(i).locator("iframe").count()
+                                    if inner_frames > 0:
+                                        new_captcha = True
+                                        self._log(f"Captcha overlay/container detected! (size: {box['width']:.0f}x{box['height']:.0f})")
+                                        break
                     except:
                         pass
+                    
+                    if new_captcha:
+                        break
                     
                     await asyncio.sleep(1.5)  # Poll every 1.5s
                 

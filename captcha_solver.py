@@ -502,17 +502,32 @@ class ChallengeDetector:
 
     async def _check_challenge_disappeared(self) -> bool:
         try:
-            # Challenge iframe gone AND no error state
-            iframe_count = await self.page.locator("iframe[src*='newassets.hcaptcha.com/captcha']").count()
-            if iframe_count > 0:
-                # Iframe exists - check if it's actually visible (might be hidden after solve)
+            # Check ALL possible challenge iframe selectors
+            challenge_selectors = [
+                "iframe[src*='newassets.hcaptcha.com/captcha']",
+                "iframe[src*='hcaptcha.com/captcha']",
+                "iframe[src*='imgs.hcaptcha.com']",
+                "iframe[title*='hCaptcha challenge']",
+                "iframe[title*='hcaptcha challenge']",
+            ]
+            for sel in challenge_selectors:
                 try:
-                    box = await self.page.locator("iframe[src*='newassets.hcaptcha.com/captcha']").first.bounding_box()
-                    if box and box['height'] > 50:
-                        return False  # Still visible = not solved
+                    iframe_count = await self.page.locator(sel).count()
+                    if iframe_count > 0:
+                        # Check if any are actually visible
+                        for i in range(iframe_count):
+                            try:
+                                frame = self.page.locator(sel).nth(i)
+                                is_vis = await frame.is_visible()
+                                if is_vis:
+                                    box = await frame.bounding_box()
+                                    if box and box['height'] > 50 and box['width'] > 50:
+                                        return False  # Still visible = NOT solved
+                            except:
+                                continue
                 except:
-                    pass
-            return iframe_count == 0
+                    continue
+            return True  # No visible challenge iframe found = disappeared
         except:
             return False
 
@@ -583,33 +598,59 @@ class ChallengeDetector:
             return ("", [], "", [])
 
     async def detect_challenge_type(self) -> str:
-        """Detect the type of challenge presented."""
+        """Detect the type of challenge presented. Tries multiple iframe selectors."""
         challenge_type = "unknown"
+        
+        # Try multiple iframe selectors to find the challenge
+        iframe_selectors = [
+            "iframe[src*='newassets.hcaptcha.com/captcha']",
+            "iframe[src*='hcaptcha.com/captcha']",
+            "iframe[src*='imgs.hcaptcha.com']",
+            "iframe[title*='hCaptcha challenge']",
+            "iframe[title*='hcaptcha challenge']",
+        ]
+        
+        iframe_locator = None
+        for iframe_sel in iframe_selectors:
+            try:
+                loc = self.page.frame_locator(iframe_sel)
+                # Test if this frame has content
+                test_el = loc.locator("body")
+                if await test_el.count() > 0:
+                    iframe_locator = loc
+                    break
+            except:
+                continue
+        
+        if not iframe_locator:
+            # Fallback: use the first one anyway
+            iframe_locator = self.page.frame_locator("iframe[src*='hcaptcha.com']")
+        
         try:
-            iframe_locator = self.page.frame_locator("iframe[src*='newassets.hcaptcha.com/captcha']")
             prompt_text = ""
-            for selector in [".challenge-header .prompt-text", ".prompt-text", ".challenge-header", ".task-text"]:
+            for selector in [".challenge-header .prompt-text", ".prompt-text", ".challenge-header", ".task-text", "h2", ".prompt-padding"]:
                 try:
                     el = iframe_locator.locator(selector)
                     if await el.count() > 0:
                         prompt_text = (await el.first.text_content() or "").lower()
                         if prompt_text:
+                            print(f"ChallengeDetector: prompt_text = '{prompt_text}'")
                             break
                 except:
                     continue
 
             if any(kw in prompt_text for kw in ["break the pattern", "odd one out", "doesn't belong", "doesn't fit", "not like the others"]):
                 challenge_type = "pattern"
-            elif any(kw in prompt_text for kw in ["drag", "place", "move", "drop", "fit", "put"]):
+            elif any(kw in prompt_text for kw in ["drag", "place", "move", "drop", "fit", "put", "to the"]):
                 challenge_type = "drag"
-            elif any(kw in prompt_text for kw in ["select all", "click all", "containing", "images of", "with a", "please click"]):
+            elif any(kw in prompt_text for kw in ["select all", "click all", "containing", "images of", "with a", "please click", "click each"]):
                 challenge_type = "grid"
             else:
                 # Check for DOM-based detection
                 try:
                     if await iframe_locator.locator('[role="slider"], .slider-track, .slider-handle').count() > 0:
                         challenge_type = "slider"
-                    elif await iframe_locator.locator('.draggable, [draggable="true"], .drag-item').count() > 0:
+                    elif await iframe_locator.locator('.draggable, [draggable="true"], .drag-item, .challenge-item[draggable], img[style*="cursor: grab"], img[style*="cursor:grab"]').count() > 0:
                         challenge_type = "drag"
                     elif await iframe_locator.locator('.task-image .image, .challenge-item img').count() > 0:
                         challenge_type = "grid"
@@ -617,6 +658,8 @@ class ChallengeDetector:
                     pass
         except:
             pass
+        
+        print(f"ChallengeDetector: detected type = '{challenge_type}'")
         return challenge_type
 
 
@@ -1366,13 +1409,48 @@ class DragSolver(PlaywrightSolver):
         for round_num in range(1, self.config.max_challenge_rounds + 1):
             print(f"DragSolver: Round {round_num}/{self.config.max_challenge_rounds}")
             try:
-                iframe_locator = page.frame_locator("iframe[src*='newassets.hcaptcha.com/captcha']")
+                # Try multiple iframe selectors
+                iframe_locator = None
+                iframe_selectors = [
+                    "iframe[src*='newassets.hcaptcha.com/captcha']",
+                    "iframe[src*='hcaptcha.com/captcha']",
+                    "iframe[src*='imgs.hcaptcha.com']",
+                    "iframe[title*='hCaptcha challenge']",
+                    "iframe[title*='hcaptcha challenge']",
+                ]
+                for iframe_sel in iframe_selectors:
+                    try:
+                        loc = page.frame_locator(iframe_sel)
+                        body = loc.locator("body")
+                        if await body.count() > 0:
+                            iframe_locator = loc
+                            break
+                    except:
+                        continue
+                
+                if not iframe_locator:
+                    iframe_locator = page.frame_locator("iframe[src*='hcaptcha.com']")
+
+                # Read the prompt text to understand what to drag where
+                prompt_text = ""
+                for selector in [".challenge-header .prompt-text", ".prompt-text", ".challenge-header", ".task-text", "h2", ".prompt-padding"]:
+                    try:
+                        el = iframe_locator.locator(selector)
+                        if await el.count() > 0:
+                            prompt_text = (await el.first.text_content() or "").strip()
+                            if prompt_text:
+                                break
+                    except:
+                        continue
+                print(f"DragSolver: Prompt = '{prompt_text}'")
 
                 # Find the draggable element
                 draggable_box = None
                 draggable_el = None
                 drag_selectors = [".draggable", "[draggable='true']", ".drag-item", ".puzzle-piece",
-                                  ".drag-icon", ".moveable", ".source-item", "img.draggable"]
+                                  ".drag-icon", ".moveable", ".source-item", "img.draggable",
+                                  ".challenge-item[draggable]", "img[style*='cursor: grab']",
+                                  "img[style*='cursor:grab']", ".icon", ".target-icon"]
                 for sel in drag_selectors:
                     try:
                         el = iframe_locator.locator(sel)
@@ -1380,6 +1458,7 @@ class DragSolver(PlaywrightSolver):
                             draggable_box = await el.first.bounding_box()
                             if draggable_box:
                                 draggable_el = el.first
+                                print(f"DragSolver: Found draggable via iframe selector '{sel}'")
                                 break
                     except:
                         continue
@@ -1393,14 +1472,29 @@ class DragSolver(PlaywrightSolver):
                                 draggable_box = await el.first.bounding_box()
                                 if draggable_box:
                                     draggable_el = el.first
+                                    print(f"DragSolver: Found draggable via page selector '{sel}'")
                                     break
                         except:
                             continue
 
                 if not draggable_box:
-                    print("DragSolver: No draggable element found")
-                    await asyncio.sleep(0.5)
-                    continue
+                    # Last resort: use Moondream6 to find the draggable element visually
+                    print("DragSolver: No draggable element found via DOM, using Moondream6...")
+                    screenshot_bytes = await page.screenshot()
+                    b64 = base64.b64encode(screenshot_bytes).decode("utf-8")
+                    ollama = await self._get_ollama()
+                    find_prompt = f"This is a captcha that says '{prompt_text}'. I need to find the draggable object/icon. What are its x,y pixel coordinates (center)? Reply with ONLY two numbers: x,y"
+                    answer = await ollama.vision_query_with_retry(find_prompt, b64, max_tokens=30)
+                    if answer:
+                        nums = re.findall(r'\d+', answer)
+                        if len(nums) >= 2:
+                            draggable_box = {'x': int(nums[0]) - 15, 'y': int(nums[1]) - 15, 'width': 30, 'height': 30}
+                            print(f"DragSolver: Moondream6 found draggable at ({nums[0]}, {nums[1]})")
+                    
+                    if not draggable_box:
+                        print("DragSolver: No draggable element found at all")
+                        await asyncio.sleep(0.5)
+                        continue
 
                 source_x = draggable_box['x'] + draggable_box['width'] / 2
                 source_y = draggable_box['y'] + draggable_box['height'] / 2
@@ -1526,13 +1620,33 @@ class DragSolver(PlaywrightSolver):
         except Exception as e:
             print(f"  Contour match failed: {e}")
 
-        # Method 4: Moondream6 Vision (semantic understanding)
+        # Method 4: Moondream6 Vision (semantic understanding - uses actual prompt text)
         try:
             screenshot_bytes = await page.screenshot()
             b64 = base64.b64encode(screenshot_bytes).decode("utf-8")
             ollama = await self._get_ollama()
 
-            prompt = "This is a drag-and-drop captcha. There is a moveable piece/icon that needs to be placed at a specific location on the image. Where should it be placed? Reply with ONLY the x,y pixel coordinates as two numbers separated by a comma. Example: 340,250"
+            # Use the actual captcha prompt text for better accuracy
+            # Get prompt_text from the challenge
+            challenge_prompt = ""
+            try:
+                iframe_locator_inner = page.frame_locator("iframe[src*='hcaptcha.com']")
+                for sel in [".prompt-text", ".challenge-header", ".task-text", "h2"]:
+                    try:
+                        el = iframe_locator_inner.locator(sel)
+                        if await el.count() > 0:
+                            challenge_prompt = (await el.first.text_content() or "").strip()
+                            if challenge_prompt:
+                                break
+                    except:
+                        continue
+            except:
+                pass
+
+            if challenge_prompt:
+                prompt = f"This is a captcha challenge. The instruction says: '{challenge_prompt}'. Where should the object be dragged TO (the target/destination)? Reply with ONLY the x,y pixel coordinates. Example: 340,250"
+            else:
+                prompt = "This is a drag-and-drop captcha. There is a moveable piece/icon that needs to be placed at a specific location on the image. Where should it be placed? Reply with ONLY the x,y pixel coordinates as two numbers separated by a comma. Example: 340,250"
 
             answer = await ollama.vision_query_with_retry(prompt, b64, max_tokens=30)
             if answer:
