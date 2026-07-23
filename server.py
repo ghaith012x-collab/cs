@@ -284,49 +284,91 @@ class DiscordAutomation:
             except Exception as e:
                 self._log(f"Checkbox click attempt: {e}")
             
-            # Now solve the full challenge
+            # Solve with loop: re-detect captcha after clicking Create Account
             config = captcha_solver.SolverConfig(
                 headless=False,
-                clip_confidence_threshold=0.50,
+                clip_confidence_threshold=0.45,
                 max_challenge_rounds=5,
-                timeout=45
+                timeout=35,
+                rate_limit_min_delay=0.05,
+                rate_limit_max_delay=0.15,
+                min_solve_time_per_round=1.2,
+                ollama_timeout=20,
+                ollama_num_ctx=1024,
+                ollama_temperature=0.05,
             )
             
-            # Use MasterSolver with automatic routing and fallback chain
-            self._log("Attempting MasterSolver (auto-routing with Moondream6)...")
+            max_captcha_loops = 5  # Handle up to 5 consecutive captchas
             master_solver = captcha_solver.MasterSolver(config)
-            success = await master_solver.solve(self._page)
-            await master_solver.close()
             
-            if success:
-                self._log("hCaptcha SOLVED via MasterSolver!")
-                await asyncio.sleep(2)
+            for captcha_attempt in range(1, max_captcha_loops + 1):
+                self._log(f"Captcha attempt {captcha_attempt}/{max_captcha_loops} - Attempting MasterSolver...")
+                success = await master_solver.solve(self._page)
                 
-                # Always click "Create Account" again after solving captcha
+                if not success:
+                    self._log(f"hCaptcha solve FAILED on attempt {captcha_attempt}")
+                    await master_solver.close()
+                    return False
+                
+                self._log(f"hCaptcha SOLVED on attempt {captcha_attempt}!")
+                await asyncio.sleep(1.5)
+                
+                # Click "Create Account" after solving
                 self._log("Clicking Create Account after captcha solve...")
                 try:
                     create_btn = self._page.locator('button:has-text("Create Account"), button:has-text("create account"), button[type="submit"]:has-text("Create"), button:has-text("Register"), button:has-text("Sign Up")')
                     if await create_btn.count() > 0:
                         await create_btn.first.click()
                         self._log("Clicked Create Account button.")
-                        await asyncio.sleep(3)
                     else:
-                        # Fallback: try pressing Enter or finding any submit button
                         submit_btn = self._page.locator('button[type="submit"]')
                         if await submit_btn.count() > 0:
                             await submit_btn.first.click()
                             self._log("Clicked submit button (fallback).")
-                            await asyncio.sleep(3)
                         else:
                             self._log("No Create Account button found, pressing Enter...")
                             await self._page.keyboard.press("Enter")
-                            await asyncio.sleep(3)
                 except Exception as btn_err:
                     self._log(f"Error clicking Create Account: {btn_err}")
-            else:
-                self._log("hCaptcha solve FAILED")
+                
+                # Wait and check if another captcha appeared
+                await asyncio.sleep(2.5)
+                
+                # Detect if a new captcha appeared
+                new_captcha = False
+                try:
+                    # Check for hCaptcha iframe
+                    captcha_iframe = self._page.locator("iframe[src*='hcaptcha.com'], iframe[src*='newassets.hcaptcha.com']")
+                    if await captcha_iframe.count() > 0:
+                        # Double-check it's actually visible/active
+                        box = await captcha_iframe.first.bounding_box()
+                        if box and box['width'] > 50 and box['height'] > 50:
+                            new_captcha = True
+                            self._log("New captcha detected after clicking Create Account!")
+                except:
+                    pass
+                
+                if not new_captcha:
+                    # Also check for challenge modal/overlay
+                    try:
+                        challenge_visible = await self._page.locator("iframe[src*='newassets.hcaptcha.com/captcha']").count() > 0
+                        if challenge_visible:
+                            new_captcha = True
+                            self._log("Challenge iframe still visible, re-solving...")
+                    except:
+                        pass
+                
+                if not new_captcha:
+                    self._log("No new captcha detected - proceeding!")
+                    await master_solver.close()
+                    return True
+                
+                self._log(f"Re-solving captcha (loop {captcha_attempt + 1})...")
+                await asyncio.sleep(1)
             
-            return success
+            self._log(f"Exhausted {max_captcha_loops} captcha attempts")
+            await master_solver.close()
+            return False
         except Exception as e:
             self._log(f"hCaptcha solve error: {e}")
             import traceback
