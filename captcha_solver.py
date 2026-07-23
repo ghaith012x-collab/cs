@@ -419,42 +419,39 @@ class ChallengeDetector:
         self.page = page
 
     async def is_solved(self) -> bool:
-        """Strict multi-signal verification that captcha is ACTUALLY solved.
-        Requires at least 2 positive signals to confirm, or 1 very strong signal (token present).
-        Also does a double-check after a short delay to avoid false positives."""
+        """Verify captcha is solved. Uses multiple signals with error-awareness.
+        Key logic:
+        - If error/retry message is showing -> NOT solved (immediate)
+        - If token present -> SOLVED (strongest proof)
+        - If challenge iframe disappeared (and no error) -> SOLVED (challenge accepted)
+        - If checkbox is checked -> SOLVED
+        - Otherwise -> NOT solved
+        """
         
-        # First check
         signals = await self._collect_signals()
-        strong_signals = signals['token_present']  # Token is the strongest proof
-        weak_signals = sum([
-            signals['success_class'],
-            signals['checkbox_checked'],
-            signals['challenge_disappeared'],
-        ])
         
         # Token present = definitely solved
-        if strong_signals:
+        if signals['token_present']:
             return True
         
-        # Need at least 2 weak signals to believe it
-        if weak_signals < 2:
-            return False
-        
-        # Double-check after brief delay (catches false positives from DOM transitions)
-        await asyncio.sleep(0.5)
-        signals2 = await self._collect_signals()
-        
-        # Confirm the signals are still there (not just a momentary DOM change)
-        if signals2['token_present']:
+        # Checkbox checked in hCaptcha = solved
+        if signals['checkbox_checked']:
             return True
         
-        persistent_signals = sum([
-            signals2['success_class'],
-            signals2['checkbox_checked'],
-            signals2['challenge_disappeared'],
-        ])
+        # Challenge iframe gone + no error = solved (the challenge was accepted)
+        if signals['challenge_disappeared']:
+            # Double-check it's really gone after a brief moment
+            await asyncio.sleep(0.4)
+            still_gone = await self._check_challenge_disappeared()
+            error_now = await self._check_error_present()
+            if still_gone and not error_now:
+                return True
         
-        return persistent_signals >= 2
+        # Success class present
+        if signals['success_class']:
+            return True
+        
+        return False
 
     async def _collect_signals(self) -> dict:
         """Collect all solve signals at once."""

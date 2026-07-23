@@ -331,30 +331,37 @@ class DiscordAutomation:
                 except Exception as btn_err:
                     self._log(f"Error clicking Create Account: {btn_err}")
                 
-                # Wait and check if another captcha appeared
-                await asyncio.sleep(2.5)
+                # Wait and check if another captcha ACTUALLY appeared
+                await asyncio.sleep(3)
                 
-                # Detect if a new captcha appeared
+                # Strict detection: only re-solve if there's a VISIBLE, ACTIVE challenge
                 new_captcha = False
                 try:
-                    # Check for hCaptcha iframe
-                    captcha_iframe = self._page.locator("iframe[src*='hcaptcha.com'], iframe[src*='newassets.hcaptcha.com']")
-                    if await captcha_iframe.count() > 0:
-                        # Double-check it's actually visible/active
-                        box = await captcha_iframe.first.bounding_box()
-                        if box and box['width'] > 50 and box['height'] > 50:
-                            new_captcha = True
-                            self._log("New captcha detected after clicking Create Account!")
-                except:
-                    pass
+                    # Check specifically for the challenge iframe (the one with tiles/images)
+                    challenge_iframe = self._page.locator("iframe[src*='newassets.hcaptcha.com/captcha']")
+                    challenge_count = await challenge_iframe.count()
+                    
+                    if challenge_count > 0:
+                        # Must be visible with real dimensions (not a hidden leftover)
+                        box = await challenge_iframe.first.bounding_box()
+                        if box and box['width'] > 100 and box['height'] > 100:
+                            # Final check: is it actually on-screen (not off-screen or opacity:0)?
+                            is_visible = await challenge_iframe.first.is_visible()
+                            if is_visible:
+                                new_captcha = True
+                                self._log(f"New active captcha detected! (size: {box['width']:.0f}x{box['height']:.0f})")
+                except Exception as detect_err:
+                    self._log(f"Captcha detection check: {detect_err}")
                 
+                # Additional check: see if the page has navigated away from signup
                 if not new_captcha:
-                    # Also check for challenge modal/overlay
                     try:
-                        challenge_visible = await self._page.locator("iframe[src*='newassets.hcaptcha.com/captcha']").count() > 0
-                        if challenge_visible:
-                            new_captcha = True
-                            self._log("Challenge iframe still visible, re-solving...")
+                        current_url = self._page.url
+                        # If URL changed (e.g., moved to email verification), we're done
+                        if any(kw in current_url for kw in ['verify', 'confirm', 'welcome', 'home', 'dashboard', 'app']):
+                            self._log(f"Page navigated to: {current_url} - signup successful!")
+                            await master_solver.close()
+                            return True
                     except:
                         pass
                 
