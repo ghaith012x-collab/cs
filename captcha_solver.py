@@ -426,16 +426,19 @@ class ChallengeDetector:
         - If challenge iframe disappeared (and no error) -> SOLVED (challenge accepted)
         - If checkbox is checked -> SOLVED
         - Otherwise -> NOT solved
+        Prints the reason so you can verify it's legit.
         """
         
         signals = await self._collect_signals()
         
-        # Token present = definitely solved
+        # Token present = definitely solved (hCaptcha backend accepted the answer)
         if signals['token_present']:
+            print("[SOLVE PROOF] h-captcha-response token is SET (hCaptcha backend confirmed solve)")
             return True
         
         # Checkbox checked in hCaptcha = solved
         if signals['checkbox_checked']:
+            print("[SOLVE PROOF] hCaptcha checkbox aria-checked=true (widget confirmed solve)")
             return True
         
         # Challenge iframe gone + no error = solved (the challenge was accepted)
@@ -445,10 +448,12 @@ class ChallengeDetector:
             still_gone = await self._check_challenge_disappeared()
             error_now = await self._check_error_present()
             if still_gone and not error_now:
+                print("[SOLVE PROOF] Challenge iframe disappeared + no error (challenge accepted by server)")
                 return True
         
         # Success class present
         if signals['success_class']:
+            print("[SOLVE PROOF] Success/solved CSS class detected in DOM")
             return True
         
         return False

@@ -331,47 +331,48 @@ class DiscordAutomation:
                 except Exception as btn_err:
                     self._log(f"Error clicking Create Account: {btn_err}")
                 
-                # Wait and check if another captcha ACTUALLY appeared
-                await asyncio.sleep(3)
-                
-                # Strict detection: only re-solve if there's a VISIBLE, ACTIVE challenge
+                # Scan for 15 seconds to detect if a new captcha appears
+                self._log("Scanning for new captcha (15s window)...")
                 new_captcha = False
-                try:
-                    # Check specifically for the challenge iframe (the one with tiles/images)
-                    challenge_iframe = self._page.locator("iframe[src*='newassets.hcaptcha.com/captcha']")
-                    challenge_count = await challenge_iframe.count()
-                    
-                    if challenge_count > 0:
-                        # Must be visible with real dimensions (not a hidden leftover)
-                        box = await challenge_iframe.first.bounding_box()
-                        if box and box['width'] > 100 and box['height'] > 100:
-                            # Final check: is it actually on-screen (not off-screen or opacity:0)?
-                            is_visible = await challenge_iframe.first.is_visible()
-                            if is_visible:
-                                new_captcha = True
-                                self._log(f"New active captcha detected! (size: {box['width']:.0f}x{box['height']:.0f})")
-                except Exception as detect_err:
-                    self._log(f"Captcha detection check: {detect_err}")
+                scan_start = asyncio.get_event_loop().time()
+                scan_duration = 15  # seconds
                 
-                # Additional check: see if the page has navigated away from signup
-                if not new_captcha:
+                while (asyncio.get_event_loop().time() - scan_start) < scan_duration:
+                    # Check if page navigated away (success!)
                     try:
                         current_url = self._page.url
-                        # If URL changed (e.g., moved to email verification), we're done
                         if any(kw in current_url for kw in ['verify', 'confirm', 'welcome', 'home', 'dashboard', 'app']):
                             self._log(f"Page navigated to: {current_url} - signup successful!")
                             await master_solver.close()
                             return True
                     except:
                         pass
+                    
+                    # Check for active captcha challenge
+                    try:
+                        challenge_iframe = self._page.locator("iframe[src*='newassets.hcaptcha.com/captcha']")
+                        challenge_count = await challenge_iframe.count()
+                        
+                        if challenge_count > 0:
+                            box = await challenge_iframe.first.bounding_box()
+                            if box and box['width'] > 100 and box['height'] > 100:
+                                is_visible = await challenge_iframe.first.is_visible()
+                                if is_visible:
+                                    new_captcha = True
+                                    self._log(f"New active captcha detected! (size: {box['width']:.0f}x{box['height']:.0f})")
+                                    break
+                    except:
+                        pass
+                    
+                    await asyncio.sleep(1.5)  # Poll every 1.5s
                 
                 if not new_captcha:
-                    self._log("No new captcha detected - proceeding!")
+                    self._log(f"No captcha appeared after {scan_duration}s scan - proceeding!")
                     await master_solver.close()
                     return True
                 
                 self._log(f"Re-solving captcha (loop {captcha_attempt + 1})...")
-                await asyncio.sleep(1)
+                await asyncio.sleep(0.5)
             
             self._log(f"Exhausted {max_captcha_loops} captcha attempts")
             await master_solver.close()
