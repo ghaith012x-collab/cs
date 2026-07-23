@@ -85,6 +85,11 @@ class AppHost:
             await self._automation.initialize()
             self._automation.load_config(self._config_path)
             
+            # Start screenshot loop as background task DURING signup
+            screenshot_task = asyncio.create_task(
+                self._capture_periodic_screenshots(config.get('camera_interval', 3))
+            )
+            
             success = await self._automation.start_discord_signup()
             
             if success:
@@ -92,7 +97,8 @@ class AppHost:
             else:
                 print("✗ Automation failed")
             
-            await self._capture_periodic_screenshots(config.get('camera_interval', 3))
+            # Keep capturing after signup too
+            await screenshot_task
             
         except Exception as e:
             print(f"Error during automation: {e}")
