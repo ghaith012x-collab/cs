@@ -292,28 +292,17 @@ class DiscordAutomation:
                 timeout=45
             )
             
-            # Try DragSolver first (handles hCaptcha drag-to-fit challenges)
-            self._log("Attempting DragSolver...")
-            drag_solver = captcha_solver.DragSolver(config)
-            success = await drag_solver.solve(self._page)
+            # Use MasterSolver with automatic routing and fallback chain
+            self._log("Attempting MasterSolver (auto-routing with Moondream6)...")
+            master_solver = captcha_solver.MasterSolver(config)
+            success = await master_solver.solve(self._page)
+            await master_solver.close()
             
             if success:
-                self._log("hCaptcha SOLVED via DragSolver!")
-                await asyncio.sleep(3)
-                return True
-            
-            # DragSolver returned False - either failed or it's not a drag challenge
-            # Fall back to GodSolver for grid challenges
-            self._log("DragSolver failed or not applicable, falling back to GodSolver...")
-            god_solver = captcha_solver.GodSolver(config)
-            success = await god_solver.solve(self._page)
-            await god_solver.close()
-            
-            if success:
-                self._log("hCaptcha SOLVED via GodSolver!")
+                self._log("hCaptcha SOLVED via MasterSolver!")
                 await asyncio.sleep(3)
             else:
-                self._log("hCaptcha solve FAILED (both solvers)")
+                self._log("hCaptcha solve FAILED")
             
             return success
         except Exception as e:
