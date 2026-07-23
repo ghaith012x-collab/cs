@@ -419,15 +419,66 @@ class ChallengeDetector:
         self.page = page
 
     async def is_solved(self) -> bool:
-        """Check multiple indicators that the captcha has been solved."""
+        """Strict multi-signal verification that captcha is ACTUALLY solved.
+        Requires at least 2 positive signals to confirm, or 1 very strong signal (token present).
+        Also does a double-check after a short delay to avoid false positives."""
+        
+        # First check
+        signals = await self._collect_signals()
+        strong_signals = signals['token_present']  # Token is the strongest proof
+        weak_signals = sum([
+            signals['success_class'],
+            signals['checkbox_checked'],
+            signals['challenge_disappeared'],
+        ])
+        
+        # Token present = definitely solved
+        if strong_signals:
+            return True
+        
+        # Need at least 2 weak signals to believe it
+        if weak_signals < 2:
+            return False
+        
+        # Double-check after brief delay (catches false positives from DOM transitions)
+        await asyncio.sleep(0.5)
+        signals2 = await self._collect_signals()
+        
+        # Confirm the signals are still there (not just a momentary DOM change)
+        if signals2['token_present']:
+            return True
+        
+        persistent_signals = sum([
+            signals2['success_class'],
+            signals2['checkbox_checked'],
+            signals2['challenge_disappeared'],
+        ])
+        
+        return persistent_signals >= 2
+
+    async def _collect_signals(self) -> dict:
+        """Collect all solve signals at once."""
         checks = [
             self._check_success_class(),
             self._check_checkbox_checked(),
             self._check_challenge_disappeared(),
             self._check_token_present(),
+            self._check_error_present(),
         ]
         results = await asyncio.gather(*checks, return_exceptions=True)
-        return any(r is True for r in results)
+        
+        # If error is showing, definitely NOT solved
+        error_present = results[4] is True if not isinstance(results[4], Exception) else False
+        if error_present:
+            return {'success_class': False, 'checkbox_checked': False, 
+                    'challenge_disappeared': False, 'token_present': False}
+        
+        return {
+            'success_class': results[0] is True if not isinstance(results[0], Exception) else False,
+            'checkbox_checked': results[1] is True if not isinstance(results[1], Exception) else False,
+            'challenge_disappeared': results[2] is True if not isinstance(results[2], Exception) else False,
+            'token_present': results[3] is True if not isinstance(results[3], Exception) else False,
+        }
 
     async def _check_success_class(self) -> bool:
         try:
@@ -437,21 +488,55 @@ class ChallengeDetector:
 
     async def _check_checkbox_checked(self) -> bool:
         try:
+            # Check the hCaptcha checkbox iframe specifically
+            checkbox_iframe = self.page.frame_locator("iframe[src*='hcaptcha.com/checkbox']")
+            checked = await checkbox_iframe.locator('[aria-checked="true"]').count() > 0
+            if checked:
+                return True
+            # Also check page-level
             return await self.page.locator('[aria-checked="true"]').count() > 0
         except:
             return False
 
     async def _check_challenge_disappeared(self) -> bool:
         try:
+            # Challenge iframe gone AND no error state
             iframe_count = await self.page.locator("iframe[src*='newassets.hcaptcha.com/captcha']").count()
+            if iframe_count > 0:
+                # Iframe exists - check if it's actually visible (might be hidden after solve)
+                try:
+                    box = await self.page.locator("iframe[src*='newassets.hcaptcha.com/captcha']").first.bounding_box()
+                    if box and box['height'] > 50:
+                        return False  # Still visible = not solved
+                except:
+                    pass
             return iframe_count == 0
         except:
             return False
 
     async def _check_token_present(self) -> bool:
         try:
-            token = await self.page.evaluate("document.querySelector('[name=\"h-captcha-response\"]')?.value")
-            return bool(token and len(token) > 10)
+            token = await self.page.evaluate("document.querySelector('[name=\"h-captcha-response\"]')?.value || document.querySelector('textarea[name=\"h-captcha-response\"]')?.value || ''")
+            return bool(token and len(token) > 20)  # Real tokens are long (>100 chars usually)
+        except:
+            return False
+
+    async def _check_error_present(self) -> bool:
+        """Check if an error/retry message is showing (means NOT solved)."""
+        try:
+            iframe_locator = self.page.frame_locator("iframe[src*='newassets.hcaptcha.com/captcha']")
+            error_selectors = [
+                '.error-text', '.display-error', '.task-error',
+                'text=Try again', 'text=Incorrect', 'text=Please try again',
+                '.challenge-error', '[class*="error"]'
+            ]
+            for sel in error_selectors:
+                try:
+                    if await iframe_locator.locator(sel).count() > 0:
+                        return True
+                except:
+                    continue
+            return False
         except:
             return False
 
