@@ -300,7 +300,29 @@ class DiscordAutomation:
             
             if success:
                 self._log("hCaptcha SOLVED via MasterSolver!")
-                await asyncio.sleep(3)
+                await asyncio.sleep(2)
+                
+                # Always click "Create Account" again after solving captcha
+                self._log("Clicking Create Account after captcha solve...")
+                try:
+                    create_btn = self._page.locator('button:has-text("Create Account"), button:has-text("create account"), button[type="submit"]:has-text("Create"), button:has-text("Register"), button:has-text("Sign Up")')
+                    if await create_btn.count() > 0:
+                        await create_btn.first.click()
+                        self._log("Clicked Create Account button.")
+                        await asyncio.sleep(3)
+                    else:
+                        # Fallback: try pressing Enter or finding any submit button
+                        submit_btn = self._page.locator('button[type="submit"]')
+                        if await submit_btn.count() > 0:
+                            await submit_btn.first.click()
+                            self._log("Clicked submit button (fallback).")
+                            await asyncio.sleep(3)
+                        else:
+                            self._log("No Create Account button found, pressing Enter...")
+                            await self._page.keyboard.press("Enter")
+                            await asyncio.sleep(3)
+                except Exception as btn_err:
+                    self._log(f"Error clicking Create Account: {btn_err}")
             else:
                 self._log("hCaptcha solve FAILED")
             
