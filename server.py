@@ -310,8 +310,8 @@ class DiscordAutomation:
                     await master_solver.close()
                     return False
                 
-                self._log(f"hCaptcha SOLVED on attempt {captcha_attempt}!")
-                await asyncio.sleep(1.5)
+                self._log(f"hCaptcha SOLVED on attempt {captcha_attempt}! (verified via token or checkbox)")
+                await asyncio.sleep(1.0)
                 
                 # Click "Create Account" after solving
                 self._log("Clicking Create Account after captcha solve...")

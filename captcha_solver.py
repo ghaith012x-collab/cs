@@ -419,42 +419,41 @@ class ChallengeDetector:
         self.page = page
 
     async def is_solved(self) -> bool:
-        """Verify captcha is solved. Uses multiple signals with error-awareness.
-        Key logic:
-        - If error/retry message is showing -> NOT solved (immediate)
-        - If token present -> SOLVED (strongest proof)
-        - If challenge iframe disappeared (and no error) -> SOLVED (challenge accepted)
-        - If checkbox is checked -> SOLVED
-        - Otherwise -> NOT solved
-        Prints the reason so you can verify it's legit.
+        """Strict verification that captcha is ACTUALLY solved.
+        ONLY trusts hard proof:
+        - Token present (h-captcha-response has value) = 100% solved
+        - Checkbox aria-checked=true = 100% solved
+        - Iframe disappeared is NOT trusted alone (could be new round loading)
         """
         
         signals = await self._collect_signals()
         
-        # Token present = definitely solved (hCaptcha backend accepted the answer)
+        # Token present = DEFINITELY solved (hCaptcha backend accepted the answer)
         if signals['token_present']:
             print("[SOLVE PROOF] h-captcha-response token is SET (hCaptcha backend confirmed solve)")
             return True
         
-        # Checkbox checked in hCaptcha = solved
+        # Checkbox checked in hCaptcha = DEFINITELY solved
         if signals['checkbox_checked']:
             print("[SOLVE PROOF] hCaptcha checkbox aria-checked=true (widget confirmed solve)")
             return True
         
-        # Challenge iframe gone + no error = solved (the challenge was accepted)
+        # Challenge iframe gone — BUT only trust this if token is also set after waiting
+        # (iframe can disappear temporarily when loading new round)
         if signals['challenge_disappeared']:
-            # Double-check it's really gone after a brief moment
-            await asyncio.sleep(0.4)
-            still_gone = await self._check_challenge_disappeared()
-            error_now = await self._check_error_present()
-            if still_gone and not error_now:
-                print("[SOLVE PROOF] Challenge iframe disappeared + no error (challenge accepted by server)")
+            # Wait a bit and re-check for token (it might take a moment to populate)
+            await asyncio.sleep(1.0)
+            token_now = await self._check_token_present()
+            if token_now:
+                print("[SOLVE PROOF] Token confirmed after iframe disappeared")
                 return True
-        
-        # Success class present
-        if signals['success_class']:
-            print("[SOLVE PROOF] Success/solved CSS class detected in DOM")
-            return True
+            checkbox_now = await self._check_checkbox_checked()
+            if checkbox_now:
+                print("[SOLVE PROOF] Checkbox confirmed after iframe disappeared")
+                return True
+            # Iframe gone but no token/checkbox = probably just loading new round
+            print("[SOLVE WARNING] Iframe disappeared but NO token/checkbox - likely new round loading, NOT solved")
+            return False
         
         return False
 
@@ -1353,14 +1352,20 @@ class GodSolver(PlaywrightSolver):
                 except:
                     pass
 
-                await asyncio.sleep(self.config.min_solve_time_per_round)
+                # Wait for hCaptcha to process our answer
+                await asyncio.sleep(2.0)
 
                 if await detector.is_solved():
                     print("GodSolver: SOLVED!")
                     return True
 
-                print("GodSolver: Not solved yet, checking for new challenge...")
-                await asyncio.sleep(random.uniform(0.5, 1.5))
+                # Check if error/retry is showing
+                error_showing = await detector._check_error_present()
+                if error_showing:
+                    print(f"GodSolver: WRONG ANSWER in round {round_num} - hCaptcha showing error/retry")
+                else:
+                    print(f"GodSolver: Round {round_num} - new challenge loaded (previous answer may have been wrong)")
+                await asyncio.sleep(random.uniform(0.5, 1.0))
 
             except Exception as e:
                 print(f"GodSolver: Error in round {round_num}: {e}")
