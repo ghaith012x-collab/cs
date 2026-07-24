@@ -438,8 +438,7 @@ class ChallengeDetector:
             print("[SOLVE PROOF] hCaptcha checkbox aria-checked=true (widget confirmed solve)")
             return True
         
-        # Challenge iframe gone — BUT only trust this if token is also set after waiting
-        # (iframe can disappear temporarily when loading new round)
+        # Challenge iframe gone — check additional signals
         if signals['challenge_disappeared']:
             # Wait a bit and re-check for token (it might take a moment to populate)
             await asyncio.sleep(1.0)
@@ -451,8 +450,35 @@ class ChallengeDetector:
             if checkbox_now:
                 print("[SOLVE PROOF] Checkbox confirmed after iframe disappeared")
                 return True
-            # Iframe gone but no token/checkbox = probably just loading new round
-            print("[SOLVE WARNING] Iframe disappeared but NO token/checkbox - likely new round loading, NOT solved")
+            
+            # Check if page navigated away (hCaptcha auto-passed or form submitted)
+            try:
+                current_url = self.page.url
+                if any(kw in current_url for kw in ['verify', 'confirm', 'welcome', 'home', 'dashboard', 'app', 'channels']):
+                    print(f"[SOLVE PROOF] Page navigated to {current_url} - captcha passed!")
+                    return True
+            except:
+                pass
+            
+            # Check if the hCaptcha container/widget is completely gone from DOM
+            try:
+                any_hcaptcha = await self.page.locator("iframe[src*='hcaptcha'], .h-captcha, #hcaptcha, [data-hcaptcha-widget-id]").count()
+                if any_hcaptcha == 0:
+                    # Entire hCaptcha widget removed from page = definitely passed
+                    print("[SOLVE PROOF] Entire hCaptcha widget removed from DOM - captcha passed!")
+                    return True
+            except:
+                pass
+            
+            # Wait one more second and check token again (sometimes it's slow)
+            await asyncio.sleep(1.5)
+            token_final = await self._check_token_present()
+            if token_final:
+                print("[SOLVE PROOF] Token appeared after delay")
+                return True
+            
+            # Iframe gone but no other proof
+            print("[SOLVE WARNING] Iframe disappeared but NO token/checkbox/navigation - likely new round loading, NOT solved")
             return False
         
         return False
