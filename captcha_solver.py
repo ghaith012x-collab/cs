@@ -664,87 +664,53 @@ class DragSolver:
             if await self._try_muscle_memory(page, iframe, box, template_key):
                 return True
 
-        # ── Method 3: Y-AXIS GRID SWEEP ──
-        # Smart sweep: drag from left edge to right edge at every Y position.
-        # hCaptcha drag objects are always on one side of the iframe,
-        # targets on the other, at similar Y heights.
-        # Sweeping ALL Y positions at ~25px intervals = ~20 drags × 0.3s = ~6s!
-        self._log('[Drag] Y-sweep (60 positions)...')
+        # ── Method 3: HUMAN-LIKE Y-SWEEP ──
+        # Sweeps ALL Y positions with proper human-like Mouse.drag(fast=True).
+        # The key fix: use self._try_drag() → Mouse.drag(), NOT raw page.mouse with steps=3.
+        # hCaptcha detects robotic steps=3 but tolerates human-like jerk curves.
+        # ~60 positions × 0.6s per drag (with post-wait) = ~36s.
+        self._log('[Drag] Human Y-sweep (60 positions)...')
         bx, by, bw, bh = box['x'], box['y'], box['width'], box['height']
         
-        # Pre-compute Y positions to try (top 70% of iframe, 10px steps)
+        # Generate Y positions covering top 70% of iframe at 10px intervals
         y_positions = list(range(int(by + bh * 0.05), int(by + bh * 0.70), 10))
-        random.shuffle(y_positions)  # Shuffle to avoid hCaptcha detecting pattern
         
-        # Left start, right target (most common)
-        left_x = bx + bw * 0.08  # 8% from left
-        right_x = bx + bw * 0.82  # 82% from left
+        left_x = bx + bw * 0.08
+        right_x = bx + bw * 0.82
         
-        for attempt, y in enumerate(y_positions[:60]):
-            # Alternate direction per attempt
-            if attempt % 2 == 0:
-                sx, sy = left_x + random.uniform(-15, 15), y + random.uniform(-5, 5)
-                ex, ey = right_x + random.uniform(-15, 15), y + random.uniform(-5, 5)
+        for idx, y in enumerate(y_positions[:60]):
+            if idx % 2 == 0:
+                sx = left_x + random.uniform(-5, 5)
+                sy = y + random.uniform(-3, 3)
+                ex = right_x + random.uniform(-10, 10)
+                ey = y + random.uniform(-3, 3)
             else:
-                sx, sy = right_x + random.uniform(-15, 15), y + random.uniform(-5, 5)
-                ex, ey = left_x + random.uniform(-15, 15), y + random.uniform(-5, 5)
+                sx = right_x + random.uniform(-5, 5)
+                sy = y + random.uniform(-3, 3)
+                ex = left_x + random.uniform(-10, 10)
+                ey = y + random.uniform(-3, 3)
             
-            try:
-                await page.mouse.move(sx, sy)
-                await page.mouse.down()
-                await page.mouse.move(ex, ey, steps=3)
-                await page.mouse.up()
-                await asyncio.sleep(0.2)
-            except Exception:
-                break
-            
-            if await Verifier(page).solved():
-                await _click_verify(page)
-                await asyncio.sleep(0.2)
-                if await Verifier(page).solved():
-                    self._log(f'[Drag] ✓ Sweep @Y={y:.0f}')
-                    await self._save_template_on_success(
-                        page, iframe, box, (sx, sy, ex, ey), template_key)
-                    return True
-            
-            if attempt > 0 and attempt % 15 == 0:
-                self._log(f'[Drag] Sweep: {attempt}/{len(y_positions)}')
+            if await self._try_drag(page, sx, sy, ex, ey, f'Y-{idx}', fast=True):
+                await self._save_template_on_success(page, iframe, box, (sx, sy, ex, ey), template_key)
+                return True
         
-        # If left→right sweep failed, try right→left with different offsets
-        self._log('[Drag] Y-sweep offset pass...')
-        for attempt, y in enumerate(y_positions[:40]):
-            # Try smaller drag distance (object might be closer together)
-            left_x2 = bx + bw * 0.15
-            right_x2 = bx + bw * 0.65
-            
-            if attempt % 2 == 0:
-                sx = left_x2 + random.uniform(-10, 10)
-                ex = right_x2 + random.uniform(-10, 10)
+        # Pass 2: Offset positions (different start/end X + varied Y)
+        self._log('[Drag] Human Y-sweep pass 2 (offset)...')
+        for idx, y in enumerate(y_positions[:40]):
+            if idx % 2 == 0:
+                sx = bx + bw * 0.15 + random.uniform(-5, 5)
+                ex = bx + bw * 0.65 + random.uniform(-8, 8)
             else:
-                sx = right_x2 + random.uniform(-10, 10)
-                ex = left_x2 + random.uniform(-10, 10)
+                sx = bx + bw * 0.65 + random.uniform(-5, 5)
+                ex = bx + bw * 0.15 + random.uniform(-8, 8)
             sy = y + random.uniform(-5, 5)
-            ey = y + random.uniform(-15, 15)
+            ey = y + random.uniform(-10, 10)
             
-            try:
-                await page.mouse.move(sx, sy)
-                await page.mouse.down()
-                await page.mouse.move(ex, ey, steps=2)
-                await page.mouse.up()
-                await asyncio.sleep(0.18)
-            except Exception:
-                break
-            
-            if await Verifier(page).solved():
-                await _click_verify(page)
-                await asyncio.sleep(0.2)
-                if await Verifier(page).solved():
-                    self._log(f'[Drag] ✓ Sweep2 @Y={y:.0f}')
-                    await self._save_template_on_success(
-                        page, iframe, box, (sx, sy, ex, ey), template_key)
-                    return True
+            if await self._try_drag(page, sx, sy, ex, ey, f'Y2-{idx}', fast=True):
+                await self._save_template_on_success(page, iframe, box, (sx, sy, ex, ey), template_key)
+                return True
         
-        self._log('[Drag] ✗ Sweep failed', level='error')
+        self._log('[Drag] ✗ Y-sweep failed', level='error')
         return False
 
     async def _js_find_drag_elements(self, page: Page, iframe, box: dict) -> Optional[Tuple]:
