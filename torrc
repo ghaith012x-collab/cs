@@ -5,7 +5,7 @@
 SOCKSPort 0.0.0.0:9050
 ControlPort 9051
 CookieAuthentication 0
-DataDirectory /var/lib/tor
+DataDirectory /tmp/tor_data
 Log notice stdout
 
 ## Don't be a relay

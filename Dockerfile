@@ -23,7 +23,8 @@ RUN pip install --no-cache-dir \
     Pillow==10.2.0 \
     onnxruntime>=1.18.1 \
     onnx>=1.16.0 \
-    protobuf>=3.20.3
+    protobuf>=3.20.3 \
+    asyncpg>=0.29.0
 
 # Donwload YOLO model as alternative (fallback if ultralytics export fails)
 RUN mkdir -p /app/_models && \
@@ -49,7 +50,7 @@ RUN mkdir -p _models && \
     -O _models/yolo11n.onnx && \
     echo "YOLO model downloaded" || echo "WARNING: YOLO download failed, will retry at runtime"
 
-COPY app.py server.py captcha_solver.py vision_ai.py config.json requirements.txt ./
+COPY app.py server.py captcha_solver.py vision_ai.py database.py farm.py config.json requirements.txt ./
 COPY torrc /etc/tor/torrc
 COPY test/ ./test/
 
