@@ -263,9 +263,11 @@ class AppHost:
             if self._farm and self._farm.running:
                 return web.json_response({"status": "already_running"})
             try:
-                self._farm = FarmSession(db=self._db, log=self._log)
-                ok = await self._farm.start()
-                return web.json_response({"status": "started" if ok else "failed"})
+                # Get mode from query param: ?mode=demo or ?mode=discord
+                mode = request.query.get('mode', 'demo')
+                self._farm = FarmSession(db=self._db)
+                ok = await self._farm.start(mode=mode)
+                return web.json_response({"status": "started", "mode": mode} if ok else {"status": "failed"})
             except Exception as e:
                 return web.json_response({"status": "error", "error": str(e)}, status=500)
 
@@ -278,7 +280,7 @@ class AppHost:
         async def handle_farm_status(request):
             if self._farm:
                 return web.json_response(self._farm.get_status())
-            return web.json_response({"running": False, "captchas_solved": 0, "captchas_failed": 0, "total_captchas": 0, "recognitions_count": 0})
+            return web.json_response({"running": False, "mode": "demo", "captchas_captured": 0, "tiles_saved_total": 0, "recognitions_count": 0})
 
         async def handle_farm_recognitions(request):
             if self._farm:
@@ -299,6 +301,31 @@ class AppHost:
                 return web.json_response(summary)
             return web.json_response([])
 
+        async def handle_farm_logs(request):
+            if self._farm:
+                logs = self._farm.get_logs(count=50)
+                return web.json_response(logs)
+            return web.json_response([])
+
+        async def handle_farm_mode(request):
+            """Switch farm mode: POST /api/farm/mode with {"mode": "discord"}"""
+            if not self._farm:
+                return web.json_response({"status": "not_initialized"}, status=400)
+            try:
+                data = await request.json()
+                new_mode = data.get('mode', 'demo')
+                if new_mode not in ['demo', 'discord']:
+                    return web.json_response({"status": "invalid_mode"}, status=400)
+                # Stop current farm
+                if self._farm.running:
+                    await self._farm.stop()
+                # Start new farm with new mode
+                self._farm = FarmSession(db=self._db)
+                ok = await self._farm.start(mode=new_mode)
+                return web.json_response({"status": "switched", "mode": new_mode})
+            except Exception as e:
+                return web.json_response({"status": "error", "error": str(e)}, status=500)
+
         app = web.Application()
         app.router.add_get('/', handle_root)
         app.router.add_post('/start', handle_start)
@@ -315,6 +342,8 @@ class AppHost:
         app.router.add_get('/api/farm/recognitions', handle_farm_recognitions)
         app.router.add_get('/api/farm/cam', handle_farm_cam)
         app.router.add_get('/api/farm/knowledge', handle_farm_db_summary)
+        app.router.add_get('/api/farm/logs', handle_farm_logs)
+        app.router.add_post('/api/farm/mode', handle_farm_mode)
         
         runner = web.AppRunner(app)
         await runner.setup()
@@ -466,87 +495,103 @@ FARM_HTML = """<!doctype html><html><head><meta name="viewport" content="width=d
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:system-ui;background:#0a0f1e;color:#f1f5f9;min-height:100vh;display:flex;flex-direction:column}
-.top-bar{display:flex;justify-content:space-between;align-items:center;padding:16px 24px;background:#131a2e;border-bottom:1px solid #1e2a45}
-.top-bar h1{font-size:20px;font-weight:700;background:linear-gradient(135deg,#fbbf24,#f59e0b);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
-.back-btn{background:#1e2a45;color:#94a3b8;padding:8px 18px;border-radius:10px;border:0;font-size:14px;font-weight:600;cursor:pointer;text-decoration:none;transition:all .15s}
+.top-bar{display:flex;justify-content:space-between;align-items:center;padding:12px 20px;background:#131a2e;border-bottom:1px solid #1e2a45;flex-wrap:wrap;gap:8px}
+.top-bar h1{font-size:18px;font-weight:700;background:linear-gradient(135deg,#fbbf24,#f59e0b);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+.top-controls{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.back-btn{background:#1e2a45;color:#94a3b8;padding:7px 14px;border-radius:8px;border:0;font-size:13px;font-weight:600;cursor:pointer;text-decoration:none;transition:all .15s}
 .back-btn:hover{background:#2a3a5a;color:#f1f5f9}
-.main{flex:1;display:flex;gap:20px;padding:20px 24px;max-width:1400px;margin:0 auto;width:100%}
+.main{flex:1;display:flex;gap:16px;padding:16px 20px;max-width:1400px;margin:0 auto;width:100%}
 @media(max-width:900px){.main{flex-direction:column}}
 .left-panel{flex:1;min-width:0}
-.right-panel{width:380px;flex-shrink:0;display:flex;flex-direction:column;gap:16px}
+.right-panel{width:380px;flex-shrink:0;display:flex;flex-direction:column;gap:12px}
 @media(max-width:900px){.right-panel{width:100%}}
-.card{background:#131a2e;border-radius:14px;padding:18px;border:1px solid #1e2a45}
-.card-title{font-size:13px;font-weight:600;color:#64748b;text-transform:uppercase;letter-spacing:.5px;margin-bottom:12px}
-.cam-wrap{background:#000;border-radius:12px;overflow:hidden;min-height:300px;position:relative}
-.cam-wrap img{width:100%;display:block;min-height:300px;object-fit:contain}
-.cam-placeholder{display:flex;align-items:center;justify-content:center;min-height:300px;color:#475569;font-size:14px}
-.controls{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
-.btn-start{background:linear-gradient(135deg,#22c55e,#16a34a);color:white;padding:12px 28px;border-radius:12px;border:0;font-weight:700;font-size:15px;cursor:pointer;transition:all .15s}
-.btn-start:hover{transform:scale(1.03);box-shadow:0 4px 20px rgba(34,197,94,.3)}
+.card{background:#131a2e;border-radius:12px;padding:14px;border:1px solid #1e2a45}
+.card-title{font-size:12px;font-weight:600;color:#64748b;text-transform:uppercase;letter-spacing:.5px;margin-bottom:10px}
+.cam-wrap{background:#000;border-radius:10px;overflow:hidden;min-height:250px;position:relative}
+.cam-wrap img{width:100%;display:block;min-height:250px;object-fit:contain}
+.cam-placeholder{display:flex;align-items:center;justify-content:center;min-height:250px;color:#475569;font-size:13px}
+.controls{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.btn-start{background:linear-gradient(135deg,#22c55e,#16a34a);color:white;padding:10px 22px;border-radius:10px;border:0;font-weight:700;font-size:14px;cursor:pointer;transition:all .15s}
+.btn-start:hover{transform:scale(1.03)}
 .btn-start:disabled{opacity:.5;cursor:not-allowed;transform:none}
-.btn-stop-farm{background:linear-gradient(135deg,#ef4444,#dc2626);color:white;padding:12px 28px;border-radius:12px;border:0;font-weight:700;font-size:15px;cursor:pointer;transition:all .15s}
-.btn-stop-farm:hover{transform:scale(1.03);box-shadow:0 4px 20px rgba(239,68,68,.3)}
-.stats{display:flex;gap:12px;flex-wrap:wrap}
-.stat{background:#0d1326;border-radius:10px;padding:12px 16px;text-align:center;flex:1;min-width:70px}
-.stat-value{font-size:24px;font-weight:800;color:#fbbf24}
-.stat-label{font-size:11px;color:#64748b;text-transform:uppercase;margin-top:2px}
-.stat-value.solved{color:#22c55e}
-.stat-value.failed{color:#ef4444}
-.recog-list{flex:1;overflow-y:auto;max-height:400px;min-height:200px}
-.recog-item{background:#0d1326;border-radius:8px;padding:10px 12px;margin-bottom:6px;border-left:3px solid #6366f1}
-.recog-item.success{border-left-color:#22c55e}
-.recog-item.failed{border-left-color:#ef4444}
-.recog-time{font-size:11px;color:#4b5563}
-.recog-type{font-size:11px;color:#818cf8;font-weight:600}
-.recog-text{font-size:13px;color:#e2e8f0;margin-top:2px}
-.recog-objects{display:flex;gap:4px;flex-wrap:wrap;margin-top:4px}
-.recog-object{background:#1e2a45;color:#fbbf24;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:600}
-.recog-empty{color:#475569;font-size:13px;text-align:center;padding:40px 0}
-.knowledge-list{max-height:200px;overflow-y:auto}
-.knowledge-item{display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid #1a2440;font-size:13px}
+.btn-stop-farm{background:linear-gradient(135deg,#ef4444,#dc2626);color:white;padding:10px 22px;border-radius:10px;border:0;font-weight:700;font-size:14px;cursor:pointer;transition:all .15s}
+.btn-stop-farm:hover{transform:scale(1.03)}
+.stats{display:flex;gap:10px;flex-wrap:wrap}
+.stat{background:#0d1326;border-radius:8px;padding:10px 14px;text-align:center;flex:1;min-width:65px}
+.stat-value{font-size:22px;font-weight:800;color:#fbbf24}
+.stat-value.green{color:#22c55e}
+.stat-value.blue{color:#818cf8}
+.stat-label{font-size:10px;color:#64748b;text-transform:uppercase;margin-top:2px}
+.recog-list{flex:1;overflow-y:auto;max-height:350px;min-height:150px}
+.recog-item{background:#0d1326;border-radius:6px;padding:8px 10px;margin-bottom:4px;border-left:3px solid #818cf8;font-size:12px}
+.recog-item .time{color:#4b5563;font-size:10px}
+.recog-item .type{color:#818cf8;font-weight:600;font-size:10px}
+.recog-item .text{color:#e2e8f0;margin-top:1px}
+.recog-item .objects{display:flex;gap:3px;flex-wrap:wrap;margin-top:3px}
+.recog-item .obj-tag{background:#1e2a45;color:#fbbf24;padding:1px 6px;border-radius:3px;font-size:10px;font-weight:600}
+.recog-empty{color:#475569;font-size:12px;text-align:center;padding:30px 0}
+.knowledge-list{max-height:180px;overflow-y:auto}
+.knowledge-item{display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid #1a2440;font-size:12px}
 .knowledge-item:last-child{border:0}
 .knowledge-name{color:#e2e8f0;font-weight:500}
 .knowledge-count{color:#fbbf24;font-weight:700}
-.status-badge{display:inline-flex;align-items:center;gap:6px;padding:6px 14px;border-radius:20px;font-size:13px;font-weight:600}
+.status-badge{display:inline-flex;align-items:center;gap:5px;padding:4px 12px;border-radius:16px;font-size:12px;font-weight:600}
 .status-badge.running{background:#064e3b;color:#6ee7b7}
 .status-badge.stopped{background:#27272a;color:#a1a1aa}
+.log-box{background:#0d1326;border-radius:8px;padding:10px;max-height:200px;overflow-y:auto;font-family:monospace;font-size:11px;line-height:1.6}
+.log-entry{padding:2px 0;border-bottom:1px solid #1a2440}
+.log-time{color:#4b5563;margin-right:6px}
+.log-info{color:#a7f3d0}
+.log-warn{color:#fde68a}
+.log-error{color:#fca5a5}
+.badge-demo{background:#6366f1;color:white;padding:2px 8px;border-radius:4px;font-size:10px;font-weight:700}
+.badge-discord{background:#5865f2;color:white;padding:2px 8px;border-radius:4px;font-size:10px;font-weight:700}
 </style></head><body>
 <div class="top-bar">
   <a href="/" class="back-btn">← Back</a>
   <h1>⚗️ Recognition Farm</h1>
-  <div id="statusBadge" class="status-badge stopped">■ Stopped</div>
+  <div class="top-controls">
+    <span id="modeBadge" class="badge-demo">DEMO</span>
+    <div id="statusBadge" class="status-badge stopped">■ Stopped</div>
+  </div>
 </div>
 <div class="main">
   <div class="left-panel">
     <div class="card">
-      <div class="card-title">Live Cam</div>
+      <div class="card-title">🎥 Live Cam</div>
       <div class="cam-wrap" id="camWrap">
         <div class="cam-placeholder" id="camPlaceholder">Farm not started</div>
         <img id="camShot" alt="Live view" style="display:none">
       </div>
     </div>
-    <div class="card" style="margin-top:16px">
+    <div class="card" style="margin-top:12px">
       <div class="controls" id="controls">
         <button class="btn-start" id="btnStart" onclick="farmStart()">▶ Start Farming</button>
-        <button class="btn-stop-farm" id="btnStop" onclick="farmStop()" style="display:none">■ Stop Farming</button>
+        <button class="btn-start" id="btnStartDiscord" onclick="farmStartDiscord()" style="display:none">▶ Farm Discord</button>
+        <button class="btn-stop-farm" id="btnStop" onclick="farmStop()" style="display:none">■ Stop</button>
+        <button class="mode-btn" id="modeDemo" onclick="switchMode('demo')">🌐 Demo</button>
+        <button class="mode-btn" id="modeDiscord" onclick="switchMode('discord')">💬 Discord</button>
       </div>
-      <div class="stats" style="margin-top:14px" id="stats">
-        <div class="stat"><div class="stat-value solved" id="statSolved">0</div><div class="stat-label">Solved</div></div>
-        <div class="stat"><div class="stat-value failed" id="statFailed">0</div><div class="stat-label">Failed</div></div>
-        <div class="stat"><div class="stat-value" id="statTotal">0</div><div class="stat-label">Total</div></div>
+      <div class="stats" style="margin-top:10px" id="stats">
+        <div class="stat"><div class="stat-value green" id="statCaptured">0</div><div class="stat-label">Captured</div></div>
+        <div class="stat"><div class="stat-value blue" id="statTiles">0</div><div class="stat-label">Tiles Saved</div></div>
         <div class="stat"><div class="stat-value" id="statLearned">0</div><div class="stat-label">Learned</div></div>
       </div>
+    </div>
+    <div class="card">
+      <div class="card-title">📋 Farm Logs</div>
+      <div class="log-box" id="logBox"><div class="log-entry"><span class="log-time">--:--:--</span><span class="log-info">Waiting to start...</span></div></div>
     </div>
   </div>
   <div class="right-panel">
     <div class="card">
-      <div class="card-title">🧠 Recent Recognitions</div>
+      <div class="card-title">🧠 Recent Captures</div>
       <div class="recog-list" id="recogList">
-        <div class="recog-empty">Start farming to see recognitions...</div>
+        <div class="recog-empty">Start farming to see captures...</div>
       </div>
     </div>
     <div class="card">
-      <div class="card-title">📊 Knowledge Database</div>
+      <div class="card-title">📊 Knowledge DB</div>
       <div class="knowledge-list" id="knowledgeList">
         <div class="recog-empty">No data yet</div>
       </div>
@@ -555,95 +600,124 @@ body{font-family:system-ui;background:#0a0f1e;color:#f1f5f9;min-height:100vh;dis
 </div>
 <script>
 let pollInterval;
-
 async function api(path,opts){return fetch(path,opts)}
-
 async function farmStart(){
   document.getElementById('btnStart').disabled=true;
   document.getElementById('btnStart').textContent='Starting...';
-  let r=await api('/api/farm/start',{method:'POST'});
+  document.getElementById('btnStartDiscord').disabled=true;
+  let r=await api('/api/farm/start?mode=demo',{method:'POST'});
   let x=await r.json();
   if(x.status==='started'){
     document.getElementById('btnStart').style.display='none';
+    document.getElementById('btnStartDiscord').style.display='none';
     document.getElementById('btnStop').style.display='inline-block';
+    document.getElementById('modeBadge').textContent='DEMO';
+    document.getElementById('modeBadge').className='badge-demo';
     pollInterval=setInterval(pollStatus,2000);
   } else {
     document.getElementById('btnStart').disabled=false;
-    document.getElementById('btnStart').textContent='\u25b6 Start Farming';
-    alert('Failed to start: '+x.status);
+    document.getElementById('btnStart').textContent='▶ Start Farming';
+    document.getElementById('btnStartDiscord').disabled=false;
   }
 }
-
+async function farmStartDiscord(){
+  document.getElementById('btnStart').disabled=true;
+  document.getElementById('btnStartDiscord').disabled=true;
+  document.getElementById('btnStartDiscord').textContent='Starting...';
+  let r=await api('/api/farm/start?mode=discord',{method:'POST'});
+  let x=await r.json();
+  if(x.status==='started'){
+    document.getElementById('btnStart').style.display='none';
+    document.getElementById('btnStartDiscord').style.display='none';
+    document.getElementById('btnStop').style.display='inline-block';
+    document.getElementById('modeBadge').textContent='DISCORD';
+    document.getElementById('modeBadge').className='badge-discord';
+    pollInterval=setInterval(pollStatus,2000);
+  } else {
+    document.getElementById('btnStart').disabled=false;
+    document.getElementById('btnStartDiscord').disabled=false;
+    document.getElementById('btnStartDiscord').textContent='▶ Farm Discord';
+  }
+}
+async function switchMode(mode){
+  if(mode==='demo'){
+    document.getElementById('btnStart').style.display='inline-block';
+    document.getElementById('btnStartDiscord').style.display='none';
+    document.getElementById('modeBadge').textContent='DEMO';
+    document.getElementById('modeBadge').className='badge-demo';
+  } else {
+    document.getElementById('btnStart').style.display='none';
+    document.getElementById('btnStartDiscord').style.display='inline-block';
+    document.getElementById('modeBadge').textContent='DISCORD';
+    document.getElementById('modeBadge').className='badge-discord';
+  }
+}
 async function farmStop(){
   clearInterval(pollInterval);
   await api('/api/farm/stop',{method:'POST'});
   document.getElementById('btnStart').style.display='inline-block';
+  document.getElementById('btnStartDiscord').style.display='inline-block';
   document.getElementById('btnStop').style.display='none';
   document.getElementById('btnStart').disabled=false;
-  document.getElementById('btnStart').textContent='\u25b6 Start Farming';
+  document.getElementById('btnStart').textContent='▶ Start Farming';
+  document.getElementById('btnStartDiscord').disabled=false;
+  document.getElementById('btnStartDiscord').textContent='▶ Farm Discord';
   document.getElementById('statusBadge').className='status-badge stopped';
-  document.getElementById('statusBadge').innerHTML='\u25a0 Stopped';
+  document.getElementById('statusBadge').innerHTML='■ Stopped';
 }
-
 async function pollStatus(){
   try{
-    // Farm status
-    let r=await api('/api/farm/status');
-    let s=await r.json();
-    document.getElementById('statSolved').textContent=s.captchas_solved||0;
-    document.getElementById('statFailed').textContent=s.captchas_failed||0;
-    document.getElementById('statTotal').textContent=s.total_captchas||0;
-    
+    let r=await api('/api/farm/status');let s=await r.json();
+    document.getElementById('statCaptured').textContent=s.captchas_captured||0;
+    document.getElementById('statTiles').textContent=s.tiles_saved_total||0;
+
     let badge=document.getElementById('statusBadge');
-    if(s.running){badge.className='status-badge running';badge.innerHTML='\u25b6 Running'}
-    else{badge.className='status-badge stopped';badge.innerHTML='\u25a0 Stopped'}
-    
-    // Cam
+    if(s.running){badge.className='status-badge running';badge.innerHTML='▶ Running'}
+    else{badge.className='status-badge stopped';badge.innerHTML='■ Stopped'}
+
     let img=document.getElementById('camShot');let ph=document.getElementById('camPlaceholder');
-    if(s.captchas_solved+s.captchas_failed>0){
-      img.src='/api/farm/cam?'+Date.now();
-      img.style.display='block';ph.style.display='none'
-    } else if(s.running){
-      img.src='/api/farm/cam?'+Date.now();
-      img.style.display='block';ph.style.display='none'
-    }
-    
-    // Recognitions
-    let rr=await api('/api/farm/recognitions');
-    let recs=await rr.json();
+    if(s.running||s.captchas_captured>0){img.src='/api/farm/cam?'+Date.now();img.style.display='block';ph.style.display='none'}
+    else{img.style.display='none';ph.style.display='flex'}
+
+    let rr=await api('/api/farm/recognitions');let recs=await rr.json();
     let rl=document.getElementById('recogList');
-    if(recs.length===0){
-      rl.innerHTML='<div class="recog-empty">Waiting for captchas...</div>';
-    } else {
+    if(recs.length===0){rl.innerHTML='<div class=\"recog-empty\">Waiting for captchas...</div>'}
+    else{
       let html='';
-      for(let r of recs.slice(0,30)){
-        let cls=r.success?'success':'failed';
-        let icon=r.success?'\u2705':'\u274c';
+      for(let r of recs.slice(0,25)){
+        let icon=r.tiles_saved>0?'✅':'⏳';
         let type=r.challenge_type||'?';
         let objects=(r.objects_found||[]).join(', ');
         let time=new Date(r.timestamp*1000).toLocaleTimeString();
-        html+='<div class="recog-item '+cls+'">';
-        html+='<div><span class="recog-time">'+time+'</span> <span class="recog-type">'+type+'</span> <span>'+icon+'</span></div>';
-        html+='<div class="recog-text">'+(r.challenge_text||'')+'</div>';
-        if(objects)html+='<div class="recog-objects">'+objects.split(',').map(o=>'<span class="recog-object">'+o.trim()+'</span>').join('')+'</div>';
+        let src=r.source||'demo';
+        html+='<div class=\"recog-item\">';
+        html+='<div><span class=\"time\">'+time+'</span> <span class=\"type\">'+src.toUpperCase()+'/'+type+'</span> '+icon+'</div>';
+        html+='<div class=\"text\">'+(r.challenge_text||'')+'</div>';
+        if(objects)html+='<div class=\"objects\">'+objects.split(',').map(o=>'<span class=\"obj-tag\">'+o.trim()+'</span>').join('')+'</div>';
         html+='</div>';
       }
       rl.innerHTML=html;
     }
-    
-    // Knowledge
-    let kr=await api('/api/farm/knowledge');
-    let k=await kr.json();
+
+    let kr=await api('/api/farm/knowledge');let k=await kr.json();
     document.getElementById('statLearned').textContent=k.length;
     let kl=document.getElementById('knowledgeList');
-    if(k.length===0){
-      kl.innerHTML='<div class="recog-empty">No data yet</div>';
-    } else {
+    if(k.length===0){kl.innerHTML='<div class=\"recog-empty\">No data yet</div>'}
+    else{
       let html='';
-      for(let item of k.slice(0,20)){
-        html+='<div class="knowledge-item"><span class="knowledge-name">'+item.class_name+'</span><span class="knowledge-count">'+item.sample_count+'</span></div>';
-      }
+      for(let item of k.slice(0,20)){html+='<div class=\"knowledge-item\"><span class=\"knowledge-name\">'+item.class_name+'</span><span class=\"knowledge-count\">'+item.sample_count+'</span></div>'}
       kl.innerHTML=html;
+    }
+
+    let lr=await api('/api/farm/logs');let logs=await lr.json();
+    let lb=document.getElementById('logBox');
+    if(logs.length>0){
+      let html='';
+      for(let e of logs.slice(-30).reverse()){
+        let cls='log-'+e.level;
+        html+='<div class=\"log-entry\"><span class=\"log-time\">'+e.time+'</span><span class=\"'+cls+'\">'+e.msg+'</span></div>';
+      }
+      lb.innerHTML=html;
     }
   }catch(e){console.log('Poll error:',e)}
 }
