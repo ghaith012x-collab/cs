@@ -286,16 +286,9 @@ class DiscordAutomation:
             
             # Solve with loop: re-detect captcha after clicking Create Account
             config = captcha_solver.SolverConfig(
-                headless=False,
-                clip_confidence_threshold=0.45,
-                max_challenge_rounds=5,
-                timeout=35,
-                rate_limit_min_delay=0.05,
-                rate_limit_max_delay=0.15,
-                min_solve_time_per_round=1.2,
-                ollama_timeout=20,
-                ollama_num_ctx=1024,
-                ollama_temperature=0.05,
+                ollama_base_url="http://localhost:11434",
+                max_rounds=2,
+                timeout=20,
             )
             
             max_captcha_loops = 5  # Handle up to 5 consecutive captchas
