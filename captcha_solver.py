@@ -779,7 +779,7 @@ class DragSolver:
     @staticmethod
     def _extract_drag_subjects(text: str) -> Tuple[str, str]:
         """Extract draggable object and target from challenge text.
-        E.g. 'Drag the spaceship to the star' → ('spaceship', 'star')
+        E.g. 'Please drag the spaceship to the star' → ('spaceship', 'star')
              'Move the fish to the water' → ('fish', 'water')
         """
         obj, target = "object", "target"
@@ -787,26 +787,50 @@ class DragSolver:
             return obj, target
         t = text.lower().strip()
 
+        # Remove leading polite words like "please", "now", "kindly"
+        for polite in ['please ', 'kindly ', 'now ']:
+            if t.startswith(polite):
+                t = t[len(polite):].strip()
+
+        # Helper: get next real word, skipping articles
+        def _next_word(words_list, idx):
+            if idx < len(words_list):
+                w = words_list[idx]
+                if w in ('the', 'a', 'an', 'your', 'this'):
+                    if idx + 1 < len(words_list):
+                        return words_list[idx + 1]
+                return w
+            return ""
+
         # Pattern: "Drag/Move/Place [the] X [to/into/onto/in] [the] Y"
         for prefix in ['drag', 'move', 'slide', 'place']:
             if t.startswith(prefix):
-                rest = t[len(prefix):].strip().lstrip("the ").strip()
-                # Find "to", "into", "onto", "in" separator
+                rest = t[len(prefix):].strip()
+                # Strip leading articles
+                for art in ['the ', 'a ', 'an ', 'your ']:
+                    if rest.startswith(art):
+                        rest = rest[len(art):]
+                # Find separator
                 for sep in [' to ', ' into ', ' onto ', ' in ']:
                     if sep in rest:
                         parts = rest.split(sep, 1)
-                        obj = parts[0].strip().strip('the ').strip().split()[0] if parts[0].strip() else obj
-                        target_raw = parts[1].strip().strip('the ').strip()
-                        target = target_raw.split()[0] if target_raw else target
+                        obj_part = parts[0].strip()
+                        target_part = parts[1].strip()
+                        # Get first real word of each
+                        for art in ['the ', 'a ', 'an ', 'your ']:
+                            if target_part.startswith(art):
+                                target_part = target_part[len(art):]
+                        obj = obj_part.split()[0] if obj_part else obj
+                        target = target_part.split()[0] if target_part else target
                         return obj, target
 
-        # Broader fallback: find subject after "drag/move" and object after "to"
+        # Fallback: search for "drag/move" + "to" anywhere in text
         words = t.split()
         for i, w in enumerate(words):
             if w in ('drag', 'move', 'slide', 'place') and i + 1 < len(words):
-                obj = words[i + 1].lstrip('the').strip()
+                obj = _next_word(words, i + 1)
             if w == 'to' and i + 1 < len(words):
-                target = words[i + 1].lstrip('the').strip()
+                target = _next_word(words, i + 1)
 
         return obj, target
 
