@@ -25,6 +25,9 @@ from PIL import Image
 from playwright.async_api import Page
 import aiohttp
 
+# YOLO AI Vision (loaded lazily on first use)
+import vision_ai
+
 
 @dataclass
 class SolverConfig:
@@ -322,6 +325,9 @@ class GridSolver:
         text = await _challenge_text(page)
         self._log(f"[Grid] Challenge: '{text[:60]}' | area {box['width']:.0f}x{box['height']:.0f}")
 
+        # Get YOLO iframe screenshot for AI detection
+        yolo_raw = await iframe.screenshot() if iframe else None
+
         # Get example image + tiles for OpenCV matching
         tiles_pil, tile_boxes = await self._get_tiles_dom(page, box)
         if not tiles_pil:
@@ -332,11 +338,14 @@ class GridSolver:
 
         self._log(f"[Grid] {len(tiles_pil)} tiles")
 
-        # Method 1: OpenCV template matching (instant, no AI)
-        # Works when grid has an "example" image — matches example against each tile
-        nums = await self._solve_opencv(page)
+        # Method 0: YOLO AI — detect tiles with objects directly
+        nums = await self._solve_yolo(page, yolo_raw)
         if nums:
-            self._log(f"[Grid] OpenCV matched tiles: {nums}")
+            self._log(f"[Grid] YOLO matched tiles: {nums}")
+        
+        if not nums:
+            # Method 1: OpenCV template matching
+            nums = await self._solve_opencv(page)
         else:
             # Method 2: Moondream AI (slow but works for text-based challenges)
             self._log("[Grid] OpenCV failed, trying Moondream...")
@@ -372,6 +381,18 @@ class GridSolver:
         ok = await Verifier(page).solved()
         self._log(f"[Grid] {'✓' if ok else '✗'}")
         return ok
+
+    async def _solve_yolo(self, page: Page, iframe_screenshot: Optional[bytes] = None) -> Optional[List[int]]:
+        """Use YOLOv11n to detect which grid tiles contain objects.
+        Works great with pre-trained COCO model — detects common objects."""
+        try:
+            if not iframe_screenshot or len(iframe_screenshot) < 100:
+                return None
+            nums = await vision_ai.detect_grid_tiles(iframe_screenshot, log=self._log)
+            return nums
+        except Exception as e:
+            self._log(f'[Grid] YOLO error: {e}', level='warn')
+            return None
 
     async def _solve_opencv(self, page: Page) -> Optional[List[int]]:
         """Use OpenCV template matching to find tiles matching the example image.
@@ -603,10 +624,19 @@ class DragSolver:
         _, template_key = self._extract_drag_subjects(text)
         _load_templates()
 
+        # ── Method 0: YOLO AI OBJECT DETECTION ──
+        # Uses YOLOv11n ONNX Runtime (~56ms per inference) to detect
+        # actual drag objects in the iframe screenshot.
+        yolo_result = await self._yolo_detect(page, iframe, box)
+        if yolo_result:
+            sx, sy, ex, ey, cls_src, cls_tgt, conf_src, conf_tgt = yolo_result
+            self._log(f'[Drag] YOLO: {cls_src}({conf_src}%)→{cls_tgt}({conf_tgt}%) at ({sx:.0f},{sy:.0f})→({ex:.0f},{ey:.0f})')
+            if await self._try_drag(page, sx, sy, ex, ey, 'YOLO', fast=True):
+                await self._save_template_on_success(page, iframe, box,
+                                                     (sx, sy, ex, ey), template_key)
+                return True
+
         # ── Method 1: OPENCV CANVAS OBJECT DETECTION ──
-        # Screenshots the iframe, finds objects using MSER + adaptive thresholding.
-        # For L+R case: returns ALL L-R pairs (tries each).
-        # For R-only/L-only: tries MULTIPLE drags internally.
         all_pairs = await self._opencv_find_all_pairs(page, iframe, box)
         if all_pairs:
             for i, (sx, sy, ex, ey) in enumerate(all_pairs[:6]):  # Max 6 pairs, fast drags
@@ -662,6 +692,35 @@ class DragSolver:
 
         self._log('[Drag] ✗ Failed', level='error')
         return False
+
+    async def _yolo_detect(self, page: Page, iframe, box: dict) -> Optional[Tuple]:
+        """Use YOLOv11n ONNX model to detect drag objects in iframe screenshot.
+        
+        Runs at ~56ms on CPU — much faster and more accurate than OpenCV heuristics.
+        Returns (sx_page, sy_page, ex_page, ey_page, cls_src, cls_tgt, conf_src, conf_tgt)
+        or None if detection fails.
+        """
+        try:
+            raw = await iframe.screenshot()
+            if not raw or len(raw) < 100:
+                return None
+
+            result = await vision_ai.detect_drag_objects(raw, log=self._log)
+            if not result:
+                return None
+
+            sx_iframe, sy_iframe, ex_iframe, ey_iframe = result[:4]
+            
+            # Convert iframe-relative to page-absolute coordinates
+            sx = box['x'] + sx_iframe
+            sy = box['y'] + sy_iframe
+            ex = box['x'] + ex_iframe
+            ey = box['y'] + ey_iframe
+
+            return (sx, sy, ex, ey) + result[4:]
+        except Exception as e:
+            self._log(f'[Drag] YOLO error: {e}', level='warn')
+            return None
 
     async def _opencv_find_all_pairs(self, page: Page, iframe, box: dict) -> List[Tuple]:
         """Find ALL possible drag→target pairs from iframe screenshot.

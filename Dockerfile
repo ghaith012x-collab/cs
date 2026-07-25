@@ -13,14 +13,17 @@ RUN apt-get update && apt-get install -y \
 # Install Ollama
 RUN curl -fsSL https://ollama.com/install.sh | sh
 
-# Install Python dependencies (no more torch/torchvision/CLIP — saves ~2GB)
+# Install Python dependencies (ONNX Runtime for YOLO AI ~56ms CPU inference)
 RUN pip install --no-cache-dir \
     playwright==1.40.0 \
     opencv-python-headless==4.9.0.80 \
     numpy==1.26.4 \
     aiofiles==23.1.0 \
     aiohttp==3.9.1 \
-    Pillow==10.2.0
+    Pillow==10.2.0 \
+    onnxruntime==1.17.1 \
+    onnx==1.16.0 \
+    protobuf==3.20.3
 
 RUN python -m playwright install chromium
 
@@ -35,7 +38,14 @@ RUN ollama serve & \
     fi && \
     kill $OLLAMA_PID 2>/dev/null || true
 
-COPY app.py server.py captcha_solver.py config.json requirements.txt ./
+# Pre-download YOLOv11n ONNX model (~5.5MB) for fast CPU inference
+# This model runs at ~56ms per inference — replaces slow Moondream
+RUN mkdir -p _models && \
+    wget -q https://github.com/ultralytics/assets/releases/download/v8.3.0/yolo11n.onnx \
+    -O _models/yolo11n.onnx && \
+    echo "YOLO model downloaded" || echo "WARNING: YOLO download failed, will retry at runtime"
+
+COPY app.py server.py captcha_solver.py vision_ai.py config.json requirements.txt ./
 COPY torrc /etc/tor/torrc
 COPY test/ ./test/
 
