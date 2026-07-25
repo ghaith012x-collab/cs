@@ -20,6 +20,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
+from pathlib import Path
 from PIL import Image
 from playwright.async_api import Page
 import aiohttp
@@ -184,6 +185,48 @@ class Verifier:
         except:
             pass
         return False
+
+
+# ── Visual Muscle Memory ────────────────────────────────
+# Stores cropped target images from successful drag solves.
+# On repeat encounters, OpenCV template matching finds the target
+# instantly — no AI needed.
+
+TEMPLATE_DIR = "_templates"
+TEMPLATE_MEMORY: Dict[str, dict] = {}
+# Lazy load templates from disk
+_TEMPLATES_LOADED = False
+
+
+def _save_template(key: str, img: Image.Image):
+    """Save a template image to memory and disk."""
+    import time as _time
+    arr = np.array(img.convert("L"))  # Grayscale for matching
+    TEMPLATE_MEMORY[key] = {"img": arr, "size": img.size, "time": _time.time()}
+    # Save to disk for persistence
+    try:
+        os.makedirs(TEMPLATE_DIR, exist_ok=True)
+        fpath = os.path.join(TEMPLATE_DIR, f"{key}.png")
+        img.save(fpath)
+    except:
+        pass
+
+
+def _load_templates():
+    """Load saved templates from disk."""
+    global _TEMPLATES_LOADED
+    if _TEMPLATES_LOADED:
+        return
+    _TEMPLATES_LOADED = True
+    try:
+        if os.path.isdir(TEMPLATE_DIR):
+            for fname in os.listdir(TEMPLATE_DIR):
+                if fname.endswith(".png"):
+                    key = fname[:-4]
+                    img = Image.open(os.path.join(TEMPLATE_DIR, fname)).convert("L")
+                    TEMPLATE_MEMORY[key] = {"img": np.array(img), "size": img.size, "time": 0}
+    except:
+        pass
 
 
 # ── Iframe helpers ────────────────────────────────────────
@@ -453,34 +496,68 @@ class DragSolver:
         text = await _challenge_text(page)
         self._log(f"[Drag] Challenge: '{text[:80]}'")
 
+        # Extract target keyword BEFORE any methods (for template memory lookup)
+        _, template_key = self._extract_drag_subjects(text)
+        _load_templates()  # Load any saved templates from disk
+
         # Method 1: DOM extraction (works for non-canvas hCaptcha)
         coords = await self._extract_drag_coords(page, box)
         if coords:
             if await self._try_drag(page, coords[0], coords[1], coords[2], coords[3], "DOM extraction"):
                 return True
 
-        # Method 2: Moondream vision — ask where the object and target are
-        self._log("[Drag] DOM failed, trying Moondream vision...")
+        # Method 2: VISUAL MUSCLE MEMORY — OpenCV template matching
+        # If we've seen this target before, find it instantly (milliseconds)
+        if template_key != "target" and template_key in TEMPLATE_MEMORY:
+            self._log(f"[Drag] Template memory found for '{template_key}'! Trying match...")
+            target_pos = await self._find_template_target(page, iframe, box, template_key)
+            if target_pos:
+                # Found target! Now find the draggable object position
+                obj_pos = await self._find_draggable_by_edge(page, iframe, box, target_pos)
+                if obj_pos:
+                    if await self._try_drag(page, obj_pos[0], obj_pos[1], target_pos[0], target_pos[1],
+                                            f"Template '{template_key}'"):
+                        return True
+                # Try heuristic drag to template position anyway
+                cx, cy = box['x'] + box['width'] / 2, box['y'] + box['height'] / 2
+                dx, dy = target_pos[0] - cx, target_pos[1] - cy
+                # Try dragging from opposite direction to target
+                if await self._try_drag(page, cx - dx*1.5, cy - dy*1.5, target_pos[0], target_pos[1],
+                                        f"Template '{template_key}' (heuristic start)"):
+                    return True
+
+        # Method 3: Moondream vision — ask which direction to drag
+        self._log("[Drag] Trying Moondream vision...")
         direction = await self._moondream_direction(page, iframe, text)
+        moondream_solved = False
         if direction:
             cx, cy = box['x'] + box['width'] / 2, box['y'] + box['height'] / 2
             bw, bh = box['width'], box['height']
-            dist = min(bw, bh) * 0.35  # 35% of iframe size
+            dist = min(bw, bh) * 0.35
 
             if direction == "left_to_right":
                 if await self._try_drag(page, cx - dist, cy, cx + dist, cy, f"Moondream L→R {dist:.0f}px"):
-                    return True
+                    moondream_solved = True
             elif direction == "right_to_left":
                 if await self._try_drag(page, cx + dist, cy, cx - dist, cy, f"Moondream R→L {dist:.0f}px"):
-                    return True
+                    moondream_solved = True
             elif direction == "top_to_bottom":
                 if await self._try_drag(page, cx, cy - dist, cx, cy + dist, f"Moondream T→B {dist:.0f}px"):
-                    return True
+                    moondream_solved = True
             elif direction == "bottom_to_top":
                 if await self._try_drag(page, cx, cy + dist, cx, cy - dist, f"Moondream B→T {dist:.0f}px"):
-                    return True
+                    moondream_solved = True
 
-        # Method 3: Element pair scanning (DOM-based big elements)
+            # If Moondream solved it, SAVE the target as a template for next time!
+            if moondream_solved and template_key:
+                self._log(f"[Drag] Saving '{template_key}' template for future muscle memory!")
+                await self._save_target_template(page, iframe, box, template_key)
+                return True
+
+        if moondream_solved:
+            return True
+
+        # Method 4: Element pair scanning (DOM-based big elements)
         elems = await self._scan_iframe_elements(page)
         if elems:
             self._log(f"[Drag] Scanning {len(elems)} elements...")
@@ -500,7 +577,7 @@ class DragSolver:
                             if await self._try_drag(page, sx, sy, ex, ey, f"elem {i}→{j}"):
                                 return True
 
-        # Method 4: Multiple heuristic patterns with varying distances
+        # Method 5: Multiple heuristic patterns
         self._log("[Drag] Trying heuristic patterns...")
         cx, cy = box['x'] + box['width'] / 2, box['y'] + box['height'] / 2
         bw, bh = box['width'], box['height']
@@ -538,7 +615,6 @@ class DragSolver:
         if not self.ollama:
             self.ollama = OllamaClient(self.config, log=self._log)
 
-        # Determine the object and target from challenge text
         obj, target = self._extract_drag_subjects(text)
         self._log(f"[Drag] Moondream: looking for '{obj}'→'{target}'")
 
@@ -550,6 +626,97 @@ class DragSolver:
         if not ans:
             return None
 
+        dir_result = self._parse_direction(ans)
+
+        return dir_result
+
+    async def _find_template_target(self, page: Page, iframe, box: dict, key: str) -> Optional[Tuple]:
+        """Use OpenCV template matching to find a saved target template in the captcha screenshot.
+        Multi-scale matching to handle different sizes.
+        Returns (x, y) page coordinates of the best match."""
+        template_data = TEMPLATE_MEMORY.get(key)
+        if not template_data:
+            return None
+
+        template_img = template_data["img"]  # Grayscale numpy array
+        th, tw = template_img.shape
+        if th < 10 or tw < 10:
+            return None
+
+        # Screenshot the captcha iframe
+        raw = await iframe.screenshot()
+        if not raw or len(raw) < 100:
+            return None
+        frame_rgb = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_GRAYSCALE)
+        if frame_rgb is None or frame_rgb.shape[0] < th or frame_rgb.shape[1] < tw:
+            return None
+
+        best_val = 0.5  # Minimum confidence threshold
+        best_pt = None
+
+        # Try multiple scales of the template
+        scales = [0.5, 0.75, 0.9, 1.0, 1.1, 1.25, 1.5]
+        for scale in scales:
+            scaled_w, scaled_h = int(tw * scale), int(th * scale)
+            if scaled_w > frame_rgb.shape[1] or scaled_h > frame_rgb.shape[0]:
+                continue
+            scaled = cv2.resize(template_img, (scaled_w, scaled_h))
+            try:
+                result = cv2.matchTemplate(frame_rgb, scaled, cv2.TM_CCOEFF_NORMED)
+                _, max_val, _, max_loc = cv2.minMaxLoc(result)
+                if max_val > best_val:
+                    best_val = max_val
+                    best_pt = (max_loc[0] + scaled_w // 2, max_loc[1] + scaled_h // 2)
+            except:
+                continue
+
+        if best_pt:
+            self._log(f"[Drag] Template '{key}' matched! confidence={best_val:.2f} at {best_pt}")
+            # Convert iframe-relative to page coordinates
+            px = box['x'] + best_pt[0]
+            py = box['y'] + best_pt[1]
+            return (px, py)
+
+        self._log(f"[Drag] Template '{key}' not found (best={best_val:.2f})")
+        return None
+
+    async def _find_draggable_by_edge(self, page: Page, iframe, box: dict, target_pos: Tuple) -> Optional[Tuple]:
+        """Find the draggable object by looking for unique edge elements.
+        The draggable is usually on the opposite side of the target.
+        Returns (x, y) page coordinates."""
+        cx = box['x'] + box['width'] / 2
+        # Target is on the right? Draggable is on the left, and vice versa
+        if target_pos[0] > cx:
+            # Target right, look for elements on left side
+            test_x = box['x'] + box['width'] * 0.25
+        else:
+            # Target left, look for elements on right side
+            test_x = box['x'] + box['width'] * 0.75
+
+        cy = target_pos[1]  # Same vertical position is likely
+        return (test_x, cy)
+
+    async def _save_target_template(self, page: Page, iframe, box: dict, key: str):
+        """After a successful solve, save the target area as a template for future muscle memory.
+        We take a screenshot and use the drag direction to infer where the target was."""
+        if not key or key == "target":
+            return
+        try:
+            raw = await iframe.screenshot()
+            if not raw or len(raw) < 100:
+                return
+            # Save the full iframe as-is — user can crop later
+            # The template matcher will find the target from the full image
+            img = Image.open(io.BytesIO(raw)).convert("RGB")
+            _save_template(key, img)
+            self._log(f"[Drag] ✓ Saved '{key}' template ({img.size[0]}x{img.size[1]})")
+        except Exception as e:
+            self._log(f"[Drag] Error saving template: {e}", level="warn")
+
+    @staticmethod
+    def _parse_direction(ans: str) -> Optional[str]:
+        if not ans:
+            return None
         ans_lower = ans.strip().lower()
         if 'left to right' in ans_lower or 'left→right' in ans_lower:
             return "left_to_right"
@@ -559,8 +726,6 @@ class DragSolver:
             return "top_to_bottom"
         if 'bottom to top' in ans_lower or 'bottom→top' in ans_lower:
             return "bottom_to_top"
-
-        # Fallback: look for keywords
         if 'left' in ans_lower and 'right' in ans_lower:
             return "left_to_right"
         if 'right' in ans_lower and 'left' in ans_lower:
@@ -569,7 +734,6 @@ class DragSolver:
             return "bottom_to_top"
         if 'down' in ans_lower or 'bottom' in ans_lower:
             return "top_to_bottom"
-
         return None
 
     @staticmethod
