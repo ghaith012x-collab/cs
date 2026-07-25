@@ -480,10 +480,15 @@ class GridSolver:
 # ═══════════════════════════════════════════════════════════
 
 class DragSolver:
+    """Solves drag-to-target captchas by:
+    1. Smart DOM extraction — finds draggable + target elements via CSS property analysis
+    2. Multi-object canvas detection — finds distinct colored objects via OpenCV color clustering
+    3. Fast heuristic patterns — just 8 targeted attempts (captcha expires fast!)
+    """
+
     def __init__(self, config: SolverConfig, log: Optional[Callable] = None):
         self.config = config
         self._log = log or (lambda *a: None)
-        self.ollama: Optional[OllamaClient] = None
 
     async def solve(self, page: Page) -> bool:
         self._log("[Drag] Starting...")
@@ -496,97 +501,141 @@ class DragSolver:
         text = await _challenge_text(page)
         self._log(f"[Drag] Challenge: '{text[:80]}'")
 
-        # Extract target keyword for template memory lookup
+        # Extract target keyword for template memory
         _, template_key = self._extract_drag_subjects(text)
-        _load_templates()  # Load any saved templates from disk
+        _load_templates()
 
-        # Method 1: CANVAS DRAG SOLVER — reads pixel data from the hCaptcha canvas
-        # Uses OpenCV to find the draggable object and target by color/shape analysis.
-        # Works FIRST time, no AI needed, no templates needed.
-        self._log("[Drag] Scanning canvas for drag objects...")
-        drag_coords = await self._solve_canvas_drag(page, iframe, box)
-        if drag_coords:
-            sx, sy, ex, ey = drag_coords
-            if await self._try_drag(page, sx, sy, ex, ey, "Canvas"):
-                # Save template for future muscle memory!
-                if template_key:
-                    inf_dir = self._infer_direction(sx, sy, ex, ey)
-                    await self._save_target_template(page, iframe, box, template_key, inf_dir)
+        # ── Method 1: SMART DOM EXTRACTION ──
+        # Finds elements with specific characteristics of draggable objects and targets
+        dom_coords = await self._dom_smart_extract(page, box)
+        if dom_coords:
+            if await self._try_drag(page, *dom_coords, "DOM"):
+                await self._save_template_on_success(page, iframe, box, dom_coords, template_key)
                 return True
 
-        # Method 2: VISUAL MUSCLE MEMORY — OpenCV template matching (if we've seen this target)
-        if template_key != "target":
-            target_pos = await self._find_template_target(page, iframe, box, template_key)
-            if target_pos:
-                self._log(f"[Drag] Muscle memory found target for '{template_key}'!")
-                obj_pos = await self._find_draggable_by_edge(page, iframe, box, target_pos)
-                if obj_pos:
-                    if await self._try_drag(page, obj_pos[0], obj_pos[1], target_pos[0], target_pos[1],
-                                            f"Memory '{template_key}'"):
-                        return True
-                cx, cy = box['x'] + box['width'] / 2, box['y'] + box['height'] / 2
-                dx, dy = target_pos[0] - cx, target_pos[1] - cy
-                if await self._try_drag(page, cx - dx*1.5, cy - dy*1.5, target_pos[0], target_pos[1],
-                                        f"Memory '{template_key}' (fallback)"):
+        # ── Method 2: CANVAS COLOR CLUSTERING ──
+        # Uses color segmentation to find distinct objects (rocketship, star) by hue
+        canvas_coords = await self._canvas_color_cluster(page, box)
+        if canvas_coords:
+            if await self._try_drag(page, *canvas_coords, "Canvas"):
+                await self._save_template_on_success(page, iframe, box, canvas_coords, template_key)
+                return True
+
+        # ── Method 3: VISUAL MUSCLE MEMORY ──
+        if template_key and template_key != "target":
+            if await self._try_muscle_memory(page, iframe, box, template_key):
+                return True
+
+        # ── Method 4: MULTI-OBJECT CANVAS PAIRS ──
+        # Find ALL colored objects and try every pair combination
+        pair_coords = await self._canvas_pair_detection(page, box)
+        if pair_coords:
+            for coords in pair_coords[:6]:  # Try up to 6 best pairs
+                if await self._try_drag(page, *coords, "Pair"):
                     return True
 
-        # Method 3: DOM extraction (works for non-canvas hCaptcha)
-        coords = await self._extract_drag_coords(page, box)
-        if coords:
-            if await self._try_drag(page, coords[0], coords[1], coords[2], coords[3], "DOM"):
-                return True
-
-        # Method 4: Element pair scanning
-        elems = await self._scan_iframe_elements(page)
-        if elems:
-            self._log(f"[Drag] Scanning {len(elems)} elements...")
-            for i in range(len(elems)):
-                for j in range(len(elems)):
-                    if i == j:
-                        continue
-                    e1, e2 = elems[i], elems[j]
-                    a1, a2 = e1['w'] * e1['h'], e2['w'] * e2['h']
-                    if 0.5 < a1 / a2 < 2.0:
-                        sx = e1['x'] + e1['w']/2 + box['x']
-                        sy = e1['y'] + e1['h']/2 + box['y']
-                        ex = e2['x'] + e2['w']/2 + box['x']
-                        ey = e2['y'] + e2['h']/2 + box['y']
-                        dist = math.hypot(ex - sx, ey - sy)
-                        if 30 < dist < 400:
-                            if await self._try_drag(page, sx, sy, ex, ey, f"elem {i}→{j}"):
-                                if template_key:
-                                    await self._save_target_template(page, iframe, box, template_key)
-                                return True
-
-        # Method 5: Heuristic patterns
-        self._log("[Drag] Trying heuristic patterns...")
+        # ── Method 5: FAST HEURISTICS ──
+        # Just 8 targeted attempts — fast enough to hit before captcha expiry
+        self._log("[Drag] Fast heuristics (8 attempts)...")
         cx, cy = box['x'] + box['width'] / 2, box['y'] + box['height'] / 2
-        bw, bh = box['width'], box['height']
-        for frac in [0.25, 0.35, 0.45, 0.55, 0.65]:
-            d = min(bw, bh) * frac
-            for dx, dy, label in [(-d, 0, 'L'), (d, 0, 'R'), (0, -d, 'U'), (0, d, 'D'),
-                                  (-d*0.7, -d*0.3, 'UL'), (d*0.7, d*0.3, 'DR'),
-                                  (d*0.3, -d*0.5, 'UR'), (-d*0.3, d*0.5, 'DL')]:
-                if await self._try_drag(page, cx + dx, cy + dy, cx - dx, cy - dy,
-                                        f"heuristic {frac:.2f} {label}"):
-                    if template_key:
-                        inf_dir = self._infer_direction(dx, dy, -dx, -dy)
-                        await self._save_target_template(page, iframe, box, template_key, inf_dir)
+        max_d = min(box['width'], box['height']) * 0.45
+        for dist in [max_d * 0.4, max_d * 0.6, max_d * 0.8, max_d * 1.0]:
+            for dx in [-dist, dist]:
+                sx, sy = cx + dx * 0.6, cy + random.uniform(-15, 15)
+                ex, ey = cx - dx * 0.6, cy + random.uniform(-15, 15)
+                if await self._try_drag(page, sx, sy, ex, ey,
+                                        f"Fast {dist:.0f}px {'L→R' if dx>0 else 'R→L'}"):
                     return True
 
         self._log("[Drag] ✗ Failed", level="error")
         return False
 
-    async def _solve_canvas_drag(self, page: Page, iframe, box: dict) -> Optional[Tuple]:
-        """Analyze the hCaptcha iframe canvas to find draggable object and target.
-        Uses OpenCV color/shape analysis to find:
-        - The draggable object (small, colorful, usually near edges)
-        - The target area (highlighted region, usually opposite side)
-        
-        Returns (start_x, start_y, end_x, end_y) in page coordinates, or None."""
+    async def _dom_smart_extract(self, page: Page, box: dict) -> Optional[Tuple]:
+        """Smart DOM extraction: finds draggable element + target zone
+        by analyzing CSS properties, position, z-index, and class names."""
+        for sel in IFRAME_SELS:
+            try:
+                f = page.frame_locator(sel)
+                data = await f.first.evaluate("""() => {
+    const results = [];
+    for (const el of document.querySelectorAll('*')) {
+        const tag = el.tagName;
+        if (tag === 'SCRIPT' || tag === 'STYLE' || tag === 'LINK') continue;
+        const rect = el.getBoundingClientRect();
+        if (rect.width < 25 || rect.width > 350) continue;
+        if (rect.height < 25 || rect.height > 350) continue;
+        const style = window.getComputedStyle(el);
+        const pos = style.position;
+        const zIdx = parseInt(style.zIndex) || 0;
+        const bg = style.backgroundImage || '';
+        const isDraggable = el.draggable || style.cursor === 'grab' || style.cursor === 'move';
+        const cls = (el.className || '').toLowerCase();
+        const isTarget = cls.includes('target') || cls.includes('drop') || cls.includes('zone') ||
+                         style.borderStyle === 'dashed' || style.border.includes('dash') ||
+                         style.outlineStyle === 'dashed';
+        const hasSrc = el.tagName === 'IMG' && el.src && el.src.length > 0;
+        const hasBg = bg.includes('url(') || bg.includes('data:image');
+        results.push({
+            tag, cls: cls.slice(0, 60),
+            x: rect.x, y: rect.y, w: rect.width, h: rect.height,
+            position: pos, zIndex: zIdx,
+            isImgWithSrc: hasSrc, isBgImg: hasBg,
+            isDraggable, isTarget,
+        });
+    }
+    // Priority 1: draggable flag + target flag
+    for (const el of results) {
+        if (el.isDraggable) {
+            for (const t of results) {
+                if (t.isTarget && t !== el) return { source: el, target: t };
+            }
+        }
+    }
+    // Priority 2: images with src + target-class elements
+    const imgs = results.filter(e => e.isImgWithSrc || e.isBgImg);
+    const targets = results.filter(e => e.isTarget);
+    if (imgs.length && targets.length) {
+        return { source: imgs[0], target: targets[0] };
+    }
+    // Priority 3: two small elements with high z-index
+    const smallEls = results.filter(e => e.w < 120 && e.h < 120 && e.zIndex > 0);
+    if (smallEls.length >= 2) {
+        return { source: smallEls[0], target: smallEls[1] };
+    }
+    // Priority 4: elements on opposite sides of center
+    const mid = 300;
+    const leftEls = results.filter(e => e.x + e.w/2 < mid);
+    const rightEls = results.filter(e => e.x + e.w/2 > mid);
+    if (leftEls.length && rightEls.length) {
+        const src = leftEls.sort((a,b) => b.zIndex - a.zIndex)[0];
+        const tgt = rightEls.sort((a,b) => b.zIndex - a.zIndex)[0];
+        return { source: src, target: tgt };
+    }
+    return null;
+}""")
+                if data and 'source' in data and 'target' in data:
+                    src, tgt = data['source'], data['target']
+                    sx = box['x'] + src['x'] + src['w'] / 2
+                    sy = box['y'] + src['y'] + src['h'] / 2
+                    ex = box['x'] + tgt['x'] + tgt['w'] / 2
+                    ey = box['y'] + tgt['y'] + tgt['h'] / 2
+                    self._log(f"[Drag] DOM: img=({src['x']:.0f},{src['y']:.0f} {src['w']:.0f}x{src['h']:.0f}) "
+                              f"target=({tgt['x']:.0f},{tgt['y']:.0f} {tgt['w']:.0f}x{tgt['h']:.0f})")
+                    return (sx, sy, ex, ey)
+            except:
+                continue
+        return None
+
+    async def _canvas_color_cluster(self, page: Page, box: dict) -> Optional[Tuple]:
+        """Find drag objects by HSV color clustering. Detects distinct colored regions
+        (drag objects are usually bright red/orange/blue against muted backgrounds)."""
         try:
-            raw = await iframe.screenshot()
-            if not raw or len(raw) < 500:
+            for sel in IFRAME_SELS:
+                f = page.frame_locator(sel)
+                raw = await f.first.screenshot()
+                if raw and len(raw) >= 500:
+                    break
+            else:
                 return None
 
             img = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_COLOR)
@@ -596,93 +645,175 @@ class DragSolver:
             if h < 50 or w < 50:
                 return None
 
-            # Convert to HSV for color analysis
-            hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+            # Denoise + convert to HSV
+            denoised = cv2.bilateralFilter(img, 9, 75, 75)
+            hsv = cv2.cvtColor(denoised, cv2.COLOR_BGR2HSV)
 
-            # Strategy 1: Find the most saturated region (draggable object)
-            # Drag objects are usually colorful against a muted background
-            saturation = hsv[:, :, 1].astype(np.float32)
-            # Blur to reduce noise
-            saturation = cv2.GaussianBlur(saturation, (5, 5), 0)
-            # Find the top 5% most saturated pixels
-            sat_thresh = np.percentile(saturation[saturation > 10], 95)
-            _, sat_mask = cv2.threshold(saturation, max(sat_thresh, 80), 255, cv2.THRESH_BINARY)
-            sat_mask = sat_mask.astype(np.uint8)
+            # Try multiple color ranges to find bright objects
+            ranges = [
+                (np.array([0, 80, 80]), np.array([15, 255, 255])),    # Red
+                (np.array([160, 80, 80]), np.array([180, 255, 255])), # Red (wrapped)
+                (np.array([90, 60, 60]), np.array([130, 255, 255])),  # Blue
+                (np.array([15, 80, 80]), np.array([35, 255, 255])),   # Orange/Yellow
+                (np.array([40, 60, 60]), np.array([80, 255, 255])),   # Green
+                (np.array([0, 100, 80]), np.array([180, 255, 255])),  # Any bright
+            ]
 
-            # Find connected components (blobs) of saturated pixels
-            num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(sat_mask, 8)
-            
-            draggable_candidates = []
-            for i in range(1, num_labels):  # Skip background
-                area = stats[i, cv2.CC_STAT_AREA]
-                cx_blob = centroids[i][0]
-                cy_blob = centroids[i][1]
-                # Draggable: area between 50-2000 px, not at center
-                if 50 < area < 2000:
-                    # Distance from center
-                    dist_from_center = math.hypot(cx_blob - w/2, cy_blob - h/2)
-                    draggable_candidates.append((dist_from_center, area, cx_blob, cy_blob))
+            objects = []
+            for lower, upper in ranges:
+                mask = cv2.inRange(hsv, lower, upper)
+                mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+                mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
+                num, labels, stats, cents = cv2.connectedComponentsWithStats(mask, 8)
+                for i in range(1, num):
+                    area = stats[i, cv2.CC_STAT_AREA]
+                    if 50 < area < 3000:
+                        objects.append({
+                            'cx': cents[i][0], 'cy': cents[i][1], 'area': area,
+                            'left': stats[i, cv2.CC_STAT_LEFT],
+                            'top': stats[i, cv2.CC_STAT_TOP],
+                            'right': stats[i, cv2.CC_STAT_LEFT] + stats[i, cv2.CC_STAT_WIDTH],
+                            'bottom': stats[i, cv2.CC_STAT_TOP] + stats[i, cv2.CC_STAT_HEIGHT],
+                        })
 
-            if draggable_candidates:
-                # The draggable is usually FARTHEST from center (at edge)
-                draggable_candidates.sort(reverse=True)  # Farthest first
-                best_dist, best_area, drag_x, drag_y = draggable_candidates[0]
-                
-                # The target is usually on the OPPOSITE side from the draggable
-                # If draggable is on left, target is on right, etc.
-                target_x = w - drag_x
-                target_y = drag_y + random.uniform(-10, 10)  # Same vertical level
-                
-                # But also look for a second saturated blob on the opposite side
-                if len(draggable_candidates) >= 2:
-                    # Check if there's a saturated blob on the opposite side
-                    second_candidates = [c for c in draggable_candidates 
-                                        if abs(c[2] - target_x) < w * 0.3 and abs(c[3] - target_y) < h * 0.3]
-                    if second_candidates:
-                        second = second_candidates[0]
-                        target_x, target_y = second[2], second[3]
+            if not objects:
+                self._log("[Drag] Canvas: no colored objects")
+                return None
 
-                self._log(f"[Drag] Canvas found objects: drag=({drag_x:.0f},{drag_y:.0f}) → target=({target_x:.0f},{target_y:.0f})")
-                
-                # Convert iframe-relative to page coordinates
-                page_sx = box['x'] + drag_x
-                page_sy = box['y'] + drag_y
-                page_ex = box['x'] + target_x
-                page_ey = box['y'] + target_y
-                
-                return (page_sx, page_sy, page_ex, page_ey)
+            # Merge overlapping objects (same object detected in multiple color ranges)
+            merged = []
+            for obj in sorted(objects, key=lambda o: o['area'], reverse=True):
+                overlap = False
+                for m in merged:
+                    ix = max(0, min(obj['right'], m['right']) - max(obj['left'], m['left']))
+                    iy = max(0, min(obj['bottom'], m['bottom']) - max(obj['top'], m['top']))
+                    if ix > 0 and iy > 0:
+                        if obj['area'] > m['area']:
+                            m.update(obj)
+                        overlap = True
+                        break
+                if not overlap:
+                    merged.append(obj)
 
-            # Strategy 2: Look for distinct edges using Canny
-            edges = cv2.Canny(img, 50, 150)
-            # Find the object by looking at the region with highest edge density
-            # (The draggable object has more edges than the background)
-            cell_size = 30
-            best_edge_density = 0
-            best_edge_region = (w//4, h//2)
-            for y_cell in range(0, h - cell_size, cell_size):
-                for x_cell in range(0, w - cell_size, cell_size):
-                    region = edges[y_cell:y_cell+cell_size, x_cell:x_cell+cell_size]
-                    density = np.sum(region) / (cell_size * cell_size)
-                    if density > best_edge_density:
-                        best_edge_density = density
-                        best_edge_region = (x_cell + cell_size//2, y_cell + cell_size//2)
-            
-            if best_edge_density > 20:
-                drag_x, drag_y = best_edge_region
-                target_x = w - drag_x
-                target_y = drag_y
-                self._log(f"[Drag] Canvas edge detection: drag=({drag_x:.0f},{drag_y:.0f}) → target=({target_x:.0f},{target_y:.0f})")
-                return (box['x'] + drag_x, box['y'] + drag_y, box['x'] + target_x, box['y'] + target_y)
+            objects = merged
+            self._log(f"[Drag] Canvas: {len(objects)} object(s)")
 
-            self._log("[Drag] Canvas: no objects found", level="warn")
+            if len(objects) >= 2:
+                objects.sort(key=lambda o: o['cx'])
+                for i in range(len(objects)):
+                    for j in range(i + 1, len(objects)):
+                        o1, o2 = objects[i], objects[j]
+                        dist = abs(o1['cx'] - o2['cx'])
+                        y_diff = abs(o1['cy'] - o2['cy'])
+                        if dist > 50 and y_diff < h * 0.5:
+                            # Left object = draggable, right = target (or vice versa by size)
+                            if o1['area'] > o2['area']:
+                                drag, tgt = o2, o1
+                            else:
+                                drag, tgt = o1, o2
+                            page_sx = box['x'] + drag['cx']
+                            page_sy = box['y'] + drag['cy']
+                            page_ex = box['x'] + tgt['cx']
+                            page_ey = box['y'] + tgt['cy']
+                            self._log(f"[Drag] Canvas: ({drag['cx']:.0f},{drag['cy']:.0f})→({tgt['cx']:.0f},{tgt['cy']:.0f})")
+                            return (page_sx, page_sy, page_ex, page_ey)
+
+            # Single object: mirror to opposite side (common fallback)
+            if len(objects) == 1:
+                o = objects[0]
+                self._log(f"[Drag] Canvas single: ({o['cx']:.0f},{o['cy']:.0f})→mirrored")
+                return (box['x'] + o['cx'], box['y'] + o['cy'],
+                        box['x'] + w - o['cx'], box['y'] + o['cy'])
+
             return None
         except Exception as e:
             self._log(f"[Drag] Canvas error: {e}", level="warn")
             return None
 
+    async def _canvas_pair_detection(self, page: Page, box: dict) -> List[Tuple]:
+        """Find ALL distinct colored objects and return every possible drag→target pair."""
+        try:
+            for sel in IFRAME_SELS:
+                f = page.frame_locator(sel)
+                raw = await f.first.screenshot()
+                if raw and len(raw) >= 500:
+                    break
+            else:
+                return []
+
+            img = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_COLOR)
+            if img is None:
+                return []
+            h, w = img.shape[:2]
+
+            denoised = cv2.bilateralFilter(img, 9, 75, 75)
+            hsv = cv2.cvtColor(denoised, cv2.COLOR_BGR2HSV)
+
+            # Find ALL colored regions
+            all_mask = cv2.inRange(hsv, np.array([0, 60, 60]), np.array([180, 255, 255]))
+            all_mask = cv2.morphologyEx(all_mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+
+            num, labels, stats, cents = cv2.connectedComponentsWithStats(all_mask, 8)
+            objects = []
+            for i in range(1, num):
+                area = stats[i, cv2.CC_STAT_AREA]
+                if 50 < area < 3000:
+                    objects.append({'cx': cents[i][0], 'cy': cents[i][1], 'area': area})
+
+            if len(objects) < 2:
+                return []
+
+            objects.sort(key=lambda o: o['cx'])
+            pairs = []
+            for i in range(len(objects)):
+                for j in range(i + 1, len(objects)):
+                    o1, o2 = objects[i], objects[j]
+                    dist = abs(o1['cx'] - o2['cx'])
+                    y_diff = abs(o1['cy'] - o2['cy'])
+                    if dist > 40 and y_diff < h * 0.6:
+                        # Both orderings: left→right and small→large
+                        for drag, target in [(o1, o2), (o2, o1)]:
+                            pairs.append((
+                                box['x'] + drag['cx'], box['y'] + drag['cy'],
+                                box['x'] + target['cx'], box['y'] + target['cy'],
+                            ))
+
+            self._log(f"[Drag] {len(pairs)} canvas pairs")
+            return pairs
+        except Exception as e:
+            self._log(f"[Drag] Pair error: {e}", level="warn")
+            return []
+
+    async def _try_muscle_memory(self, page: Page, iframe, box: dict, key: str) -> bool:
+        target_pos = await self._find_template_target(page, iframe, box, key)
+        if not target_pos:
+            return False
+
+        self._log(f"[Drag] Memory '{key}' at ({target_pos[0]:.0f},{target_pos[1]:.0f})")
+        cx = box['x'] + box['width'] / 2
+        if target_pos[0] > cx:
+            obj_x = box['x'] + box['width'] * 0.2 + random.uniform(-10, 10)
+        else:
+            obj_x = box['x'] + box['width'] * 0.8 + random.uniform(-10, 10)
+        obj_y = target_pos[1] + random.uniform(-20, 20)
+
+        if await self._try_drag(page, obj_x, obj_y, target_pos[0], target_pos[1], f"Memory '{key}'"):
+            return True
+
+        dx = target_pos[0] - cx
+        if await self._try_drag(page, cx - dx, target_pos[1], target_pos[0], target_pos[1], f"Memory '{key}' offset"):
+            return True
+        return False
+
+    async def _save_template_on_success(self, page, iframe, box, coords, template_key):
+        if not template_key or template_key == "target":
+            return
+        sx, sy, ex, ey = coords
+        direction = self._infer_direction(sx, sy, ex, ey)
+        await self._save_target_template(page, iframe, box, template_key, direction)
+
     @staticmethod
     def _infer_direction(sx, sy, ex, ey) -> str:
-        """Infer drag direction from start→end coordinates."""
         dx = ex - sx
         dy = ey - sy
         if abs(dx) > abs(dy):
@@ -702,46 +833,16 @@ class DragSolver:
                 return True
         return False
 
-    async def _moondream_direction(self, page: Page, iframe, text: str) -> Optional[str]:
-        """Ask Moondream which direction to drag.
-        Takes a small screenshot, asks LEFT→RIGHT, RIGHT→LEFT, TOP→BOTTOM, BOTTOM→TOP."""
-        ss = await _iframe_b64(iframe, max_dim=320)
-        if not ss:
-            self._log("[Drag] Moondream: screenshot failed")
-            return None
-
-        if not self.ollama:
-            self.ollama = OllamaClient(self.config, log=self._log)
-
-        obj, target = self._extract_drag_subjects(text)
-        self._log(f"[Drag] Moondream: looking for '{obj}'→'{target}'")
-
-        ans = await self.ollama.ask_retry(
-            f"hCaptcha: '{text}'. Which direction to drag the {obj} to the {target}? "
-            "Answer ONLY: left to right | right to left | top to bottom | bottom to top",
-            [ss], 30)
-
-        if not ans:
-            return None
-
-        dir_result = self._parse_direction(ans)
-
-        return dir_result
-
     async def _find_template_target(self, page: Page, iframe, box: dict, key: str) -> Optional[Tuple]:
-        """Use OpenCV template matching to find a saved target template in the captcha screenshot.
-        Multi-scale matching to handle different sizes.
-        Returns (x, y) page coordinates of the best match."""
         template_data = TEMPLATE_MEMORY.get(key)
         if not template_data:
             return None
 
-        template_img = template_data["img"]  # Grayscale numpy array
+        template_img = template_data["img"]
         th, tw = template_img.shape
         if th < 10 or tw < 10:
             return None
 
-        # Screenshot the captcha iframe
         raw = await iframe.screenshot()
         if not raw or len(raw) < 100:
             return None
@@ -749,56 +850,28 @@ class DragSolver:
         if frame_rgb is None or frame_rgb.shape[0] < th or frame_rgb.shape[1] < tw:
             return None
 
-        best_val = 0.5  # Minimum confidence threshold
+        best_val = 0.5
         best_pt = None
-
-        # Try multiple scales of the template
-        scales = [0.5, 0.75, 0.9, 1.0, 1.1, 1.25, 1.5]
-        for scale in scales:
-            scaled_w, scaled_h = int(tw * scale), int(th * scale)
-            if scaled_w > frame_rgb.shape[1] or scaled_h > frame_rgb.shape[0]:
+        for scale in [0.5, 0.75, 0.9, 1.0, 1.1, 1.25, 1.5]:
+            sw, sh = int(tw * scale), int(th * scale)
+            if sw > frame_rgb.shape[1] or sh > frame_rgb.shape[0]:
                 continue
-            scaled = cv2.resize(template_img, (scaled_w, scaled_h))
+            scaled = cv2.resize(template_img, (sw, sh))
             try:
                 result = cv2.matchTemplate(frame_rgb, scaled, cv2.TM_CCOEFF_NORMED)
                 _, max_val, _, max_loc = cv2.minMaxLoc(result)
                 if max_val > best_val:
                     best_val = max_val
-                    best_pt = (max_loc[0] + scaled_w // 2, max_loc[1] + scaled_h // 2)
+                    best_pt = (max_loc[0] + sw // 2, max_loc[1] + sh // 2)
             except:
                 continue
 
         if best_pt:
-            self._log(f"[Drag] Template '{key}' matched! confidence={best_val:.2f} at {best_pt}")
-            # Convert iframe-relative to page coordinates
-            px = box['x'] + best_pt[0]
-            py = box['y'] + best_pt[1]
-            return (px, py)
-
-        self._log(f"[Drag] Template '{key}' not found (best={best_val:.2f})")
+            self._log(f"[Drag] Template '{key}' = {best_val:.2f} at {best_pt}")
+            return (box['x'] + best_pt[0], box['y'] + best_pt[1])
         return None
 
-    async def _find_draggable_by_edge(self, page: Page, iframe, box: dict, target_pos: Tuple) -> Optional[Tuple]:
-        """Find the draggable object by looking for unique edge elements.
-        The draggable is usually on the opposite side of the target.
-        Returns (x, y) page coordinates."""
-        cx = box['x'] + box['width'] / 2
-        # Target is on the right? Draggable is on the left, and vice versa
-        if target_pos[0] > cx:
-            # Target right, look for elements on left side
-            test_x = box['x'] + box['width'] * 0.25
-        else:
-            # Target left, look for elements on right side
-            test_x = box['x'] + box['width'] * 0.75
-
-        cy = target_pos[1]  # Same vertical position is likely
-        return (test_x, cy)
-
-    async def _save_target_template(self, page: Page, iframe, box: dict, key: str, direction: Optional[str] = None):
-        """After a successful solve, save just the TARGET side of the iframe as a template.
-        Crops to the half where the target should be based on drag direction.
-        E.g., for 'left_to_right', saves the RIGHT half (where the star is).
-        This makes template matching possible since the target appearance is consistent."""
+    async def _save_target_template(self, page, iframe, box, key, direction=None):
         if not key or key == "target":
             return
         try:
@@ -807,181 +880,68 @@ class DragSolver:
                 return
             img = Image.open(io.BytesIO(raw))
             w, h = img.size
-
-            # Crop to the TARGET side based on direction
             if direction == "left_to_right":
-                # Target is on the RIGHT side → save right 40%
                 crop = img.crop((int(w * 0.6), 0, w, h))
             elif direction == "right_to_left":
-                # Target is on the LEFT side → save left 40%
                 crop = img.crop((0, 0, int(w * 0.4), h))
             elif direction == "top_to_bottom":
-                # Target is at the BOTTOM → save bottom 40%
                 crop = img.crop((0, int(h * 0.6), w, h))
             elif direction == "bottom_to_top":
-                # Target is at the TOP → save top 40%
                 crop = img.crop((0, 0, w, int(h * 0.4)))
             else:
-                # Fallback: use top-right quadrant
                 crop = img.crop((int(w * 0.5), 0, w, int(h * 0.5)))
-
-            # Resize to a reasonable size for fast matching
             crop = _resize(crop, 200)
             _save_template(key, crop)
-            self._log(f"[Drag] ✓ Saved '{key}' template ({crop.size[0]}x{crop.size[1]}) side={direction}")
+            self._log(f"[Drag] ✓ Saved '{key}' template")
         except Exception as e:
             self._log(f"[Drag] Error saving template: {e}", level="warn")
 
     @staticmethod
-    def _parse_direction(ans: str) -> Optional[str]:
-        if not ans:
-            return None
-        ans_lower = ans.strip().lower()
-        if 'left to right' in ans_lower or 'left→right' in ans_lower:
-            return "left_to_right"
-        if 'right to left' in ans_lower or 'right→left' in ans_lower:
-            return "right_to_left"
-        if 'top to bottom' in ans_lower or 'top→bottom' in ans_lower:
-            return "top_to_bottom"
-        if 'bottom to top' in ans_lower or 'bottom→top' in ans_lower:
-            return "bottom_to_top"
-        if 'left' in ans_lower and 'right' in ans_lower:
-            return "left_to_right"
-        if 'right' in ans_lower and 'left' in ans_lower:
-            return "right_to_left"
-        if 'up' in ans_lower or 'top' in ans_lower:
-            return "bottom_to_top"
-        if 'down' in ans_lower or 'bottom' in ans_lower:
-            return "top_to_bottom"
-        return None
-
-    @staticmethod
     def _extract_drag_subjects(text: str) -> Tuple[str, str]:
-        """Extract draggable object and target from challenge text.
-        E.g. 'Please drag the spaceship to the star' → ('spaceship', 'star')
-             'Move the fish to the water' → ('fish', 'water')
-        """
         obj, target = "object", "target"
         if not text:
             return obj, target
         t = text.lower().strip()
-
-        # Remove leading polite words like "please", "now", "kindly"
         for polite in ['please ', 'kindly ', 'now ']:
             if t.startswith(polite):
                 t = t[len(polite):].strip()
-
-        # Helper: get next real word, skipping articles
-        def _next_word(words_list, idx):
-            if idx < len(words_list):
-                w = words_list[idx]
-                if w in ('the', 'a', 'an', 'your', 'this'):
-                    if idx + 1 < len(words_list):
-                        return words_list[idx + 1]
-                return w
-            return ""
-
-        # Pattern: "Drag/Move/Place [the] X [to/into/onto/in] [the] Y"
         for prefix in ['drag', 'move', 'slide', 'place']:
             if t.startswith(prefix):
                 rest = t[len(prefix):].strip()
-                # Strip leading articles
                 for art in ['the ', 'a ', 'an ', 'your ']:
                     if rest.startswith(art):
                         rest = rest[len(art):]
-                # Find separator
                 for sep in [' to ', ' into ', ' onto ', ' in ']:
                     if sep in rest:
                         parts = rest.split(sep, 1)
                         obj_part = parts[0].strip()
                         target_part = parts[1].strip()
-                        # Get first real word of each
                         for art in ['the ', 'a ', 'an ', 'your ']:
                             if target_part.startswith(art):
                                 target_part = target_part[len(art):]
                         obj = obj_part.split()[0] if obj_part else obj
                         target = target_part.split()[0] if target_part else target
                         return obj, target
-
-        # Fallback: search for "drag/move" + "to" anywhere in text
         words = t.split()
         for i, w in enumerate(words):
             if w in ('drag', 'move', 'slide', 'place') and i + 1 < len(words):
-                obj = _next_word(words, i + 1)
+                nw = words[i + 1]
+                if nw in ('the', 'a', 'an', 'your', 'this'):
+                    if i + 2 < len(words):
+                        obj = words[i + 2]
+                else:
+                    obj = nw
             if w == 'to' and i + 1 < len(words):
-                target = _next_word(words, i + 1)
-
+                nw = words[i + 1]
+                if nw in ('the', 'a', 'an', 'your', 'this'):
+                    if i + 2 < len(words):
+                        target = words[i + 2]
+                else:
+                    target = nw
         return obj, target
 
-    async def _extract_drag_coords(self, page: Page, iframe_box: dict) -> Optional[Tuple]:
-        for sel in IFRAME_SELS:
-            try:
-                f = page.frame_locator(sel)
-                data = await f.first.evaluate("""() => {
-    const all = document.querySelectorAll('*');
-    const positioned = [];
-    for (const el of all) {
-        const cls = el.className || '';
-        const id = el.id || '';
-        const tag = el.tagName || '';
-        if (tag === 'SCRIPT' || tag === 'STYLE') continue;
-        const rect = el.getBoundingClientRect();
-        if (rect.width < 20 || rect.height < 20) continue;
-        if (rect.width > 500 || rect.height > 500) continue;
-        const isDraggable = el.draggable ||
-            cls.toLowerCase().includes('drag') ||
-            cls.toLowerCase().includes('handle') ||
-            cls.toLowerCase().includes('target') ||
-            id.toLowerCase().includes('drag') ||
-            id.toLowerCase().includes('target');
-        positioned.push({
-            tag: tag,
-            x: rect.x, y: rect.y, w: rect.width, h: rect.height,
-            draggable: isDraggable,
-        });
-    }
-    positioned.sort((a, b) => a.w * a.h - b.w * b.h);
-    const candidates = positioned.filter(e => e.w * e.h < 15000);
-    if (candidates.length >= 2) {
-        return { source: candidates[0], target: candidates[1] };
-    }
-    return null;
-}""")
-                if data and 'source' in data and 'target' in data:
-                    src, tgt = data['source'], data['target']
-                    sx = iframe_box['x'] + src['x'] + src['w'] / 2
-                    sy = iframe_box['y'] + src['y'] + src['h'] / 2
-                    ex = iframe_box['x'] + tgt['x'] + tgt['w'] / 2
-                    ey = iframe_box['y'] + tgt['y'] + tgt['h'] / 2
-                    return (sx, sy, ex, ey)
-            except:
-                continue
-        return None
-
-    async def _scan_iframe_elements(self, page: Page) -> List[dict]:
-        for sel in IFRAME_SELS:
-            try:
-                f = page.frame_locator(sel)
-                data = await f.first.evaluate("""() => {
-    const results = [];
-    for (const el of document.querySelectorAll('*')) {
-        if (el.tagName === 'SCRIPT' || el.tagName === 'STYLE') continue;
-        const rect = el.getBoundingClientRect();
-        if (rect.width < 25 || rect.height < 25) continue;
-        if (rect.width > 400 || rect.height > 400) continue;
-        results.push({ x: rect.x, y: rect.y, w: rect.width, h: rect.height });
-    }
-    return results;
-}""")
-                if data:
-                    return data
-            except:
-                continue
-        return []
-
     async def close(self):
-        if self.ollama:
-            await self.ollama.close()
+        pass
 
 
 # ═══════════════════════════════════════════════════════════
@@ -1187,7 +1147,7 @@ async def main():
     solver = MasterSolver(config)
     print("=" * 50)
     print("  MasterSolver — all challenge types")
-    print("  Grid (Moondream tiles) | Drag (DOM+Moondream) | Slider (OpenCV)")
+    print("  Grid (Moondream tiles) | Drag (DOM+Canvas+Pairs+Fast) | Slider (OpenCV)")
     print("=" * 50)
     print(f"  Model: {config.ollama_model}")
 
