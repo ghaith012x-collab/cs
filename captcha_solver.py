@@ -237,10 +237,15 @@ class GridSolver:
         iframe = None
         for sel in iframe_selectors:
             try:
-                loc = page.frame_locator(sel)
-                if await loc.locator("body").count() > 0:
-                    iframe = page.locator(sel).first
-                    self._log(f"[GridSolver] Found iframe via: {sel}")
+                loc = page.locator(sel)
+                count = await loc.count()
+                for i in range(count):
+                    box = await loc.nth(i).bounding_box()
+                    if box and box['width'] > 80 and box['height'] > 80:
+                        iframe = loc.nth(i)
+                        self._log(f"[GridSolver] Found challenge iframe via: {sel} ({box['width']:.0f}x{box['height']:.0f})")
+                        break
+                if iframe:
                     break
             except:
                 continue
@@ -284,11 +289,12 @@ class GridSolver:
         b64 = base64.b64encode(screenshot_bytes).decode("utf-8")
         ollama = await self._get_ollama()
 
-        prompt = f"""This is an hCaptcha challenge grid.
-Challenge text: "{challenge_text or 'Click matching images'}"
-Tiles are numbered 0-indexed left-to-right, top-to-bottom.
-Which tile numbers should be clicked?
-Reply with ONLY a JSON array. Example: [0,3,5] or []"""
+        prompt = f"""hCaptcha grid challenge. Text: "{challenge_text or 'Select matching images'}"
+Tiles numbered 0-8, left-to-right top-to-bottom.
+Tell me which tile numbers to click.
+Reply with ONLY a plain JSON array. Example: [0,3,5] or []
+Do NOT include markdown, code blocks, or coordinates.
+Just the array."""
 
         self._log("[GridSolver] Querying Qwen...")
         answer = await ollama.query_with_retry(prompt, b64, max_tokens=100)
@@ -346,7 +352,7 @@ Reply with ONLY a JSON array. Example: [0,3,5] or []"""
         b64 = base64.b64encode(screenshot_bytes).decode("utf-8")
         ollama = await self._get_ollama()
         answer = await ollama.query_with_retry(
-            "Which numbered tiles to click in this hCaptcha grid? JSON array only.",
+            "hCaptcha grid. Tiles 0-8. Reply with only a plain JSON array like [0,3,5]. No markdown, no coordinates.",
             b64, max_tokens=100)
         self._log(f"[GridSolver] Fallback response: {answer[:200] if answer else 'EMPTY'}")
         tile_nums = self._parse_tiles(answer)
@@ -371,15 +377,44 @@ Reply with ONLY a JSON array. Example: [0,3,5] or []"""
         return await verifier.is_solved()
 
     def _parse_tiles(self, answer: str) -> List[int]:
+        """Parse Qwen response to extract tile indices.
+        Handles multiple formats:
+        - Simple array: [0, 3, 5]
+        - Named objects: [{"number": 1, "coordinate": [x, y]}, ...]
+        - Markdown-wrapped: ```json [...] ```
+        """
         if not answer:
             return []
+        # Remove markdown code block markers
+        answer = re.sub(r'```(?:json)?\s*|\s*```', '', answer).strip()
+        
+        # Find outermost brackets (greedy, handles nested arrays)
+        start = answer.find('[')
+        end = answer.rfind(']')
+        if start == -1 or end == -1 or end <= start:
+            return []
+        
         try:
-            m = re.search(r'\[[\s\S]*?\]', answer)
-            if m:
-                parsed = json.loads(m.group())
-                if isinstance(parsed, list):
-                    return [int(x) for x in parsed if isinstance(x, (int, float)) and 0 <= int(x) <= 50]
-        except:
+            parsed = json.loads(answer[start:end+1])
+            if not isinstance(parsed, list):
+                return []
+            
+            # Format 1: simple array of ints [0, 3, 5]
+            if all(isinstance(x, (int, float)) for x in parsed):
+                return [int(x) for x in parsed if 0 <= int(x) <= 50]
+            
+            # Format 2: array of objects {"number": X} or {"tile": X} or {"index": X}
+            nums = []
+            for item in parsed:
+                if isinstance(item, dict):
+                    for key in ['number', 'tile', 'index', 'id']:
+                        val = item.get(key)
+                        if isinstance(val, (int, float)) and 0 <= int(val) <= 50:
+                            nums.append(int(val))
+                            break
+            if nums:
+                return nums
+        except json.JSONDecodeError:
             pass
         return []
 
