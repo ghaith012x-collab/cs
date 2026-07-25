@@ -20,13 +20,12 @@ for i in $(seq 1 60); do
 done
 
 # Ensure the model is available (pull if missing)
-MODEL="${OLLAMA_MODEL:-qwen2.5vl:3b}"
+MODEL="${OLLAMA_MODEL:-moondream}"
 echo "Checking model: $MODEL"
 if ! ollama list 2>/dev/null | grep -q "$MODEL"; then
     echo "Pulling $MODEL..."
     if ! ollama pull "$MODEL" 2>&1; then
         echo "ERROR: Failed to pull model $MODEL"
-        echo "Try one of: qwen2.5vl:3b, qwen2.5vl:7b"
         exit 1
     fi
     echo "Model $MODEL pulled successfully"

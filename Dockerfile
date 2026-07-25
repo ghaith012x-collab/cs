@@ -24,13 +24,13 @@ RUN pip install --no-cache-dir \
 
 RUN python -m playwright install chromium
 
-# Pre-pull the Qwen2.5-VL model during build (~1.8GB download)
-# This makes it ready at runtime — no first-request delay
-# Note: use 'qwen2.5vl:7b' if you have 8GB+ RAM
+# Pre-pull Moondream model during build (~1GB download)
+# Moondream is the smallest vision model on Ollama (1.6B params)
+# Much faster on CPU than Qwen 3B
 RUN ollama serve & \
     OLLAMA_PID=$! && \
     sleep 5 && \
-    if ! ollama pull qwen2.5vl:3b 2>&1; then \
+    if ! ollama pull moondream 2>&1; then \
         echo "WARNING: Model pull failed, will retry at runtime"; \
     fi && \
     kill $OLLAMA_PID 2>/dev/null || true
@@ -46,8 +46,8 @@ EXPOSE 8080
 ENV PYTHONUNBUFFERED=1
 ENV PORT=8080
 ENV OLLAMA_HOST=0.0.0.0
-# Use smaller model by default — fits Railway CPU instances
-# Change to 'qwen2.5-vl:7b-instruct-q4_K_M' if you have 8GB+ RAM
-ENV OLLAMA_MODEL=qwen2.5vl:3b
+# Moondream — smallest vision model on Ollama (1.6B, ~1GB)
+# Fast on CPU, designed for edge devices
+ENV OLLAMA_MODEL=moondream
 
 CMD ["./start.sh"]

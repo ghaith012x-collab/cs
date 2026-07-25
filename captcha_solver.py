@@ -1,10 +1,10 @@
 """
 hCaptcha Master Solver — supports ALL challenge types:
-- GRID: click matching image tiles (Qwen batch tile analysis)
-- DRAG: drag object to target (Qwen coordinate detection + human drag)
-- SLIDER: puzzle slider (OpenCV template matching + Qwen fallback)
+- GRID: click matching image tiles (Moondream tile-by-tile YES/NO)
+- DRAG: drag object to target (DOM extraction + Moondream vision + heuristics)
+- SLIDER: puzzle slider (OpenCV template matching)
 
-All queries use small images (max 224px) for fast CPU inference.
+All queries use small images (max 224px) for fast CPU inference on Moondream.
 """
 
 import asyncio
@@ -29,9 +29,9 @@ import aiohttp
 class SolverConfig:
     ollama_base_url: str = "http://localhost:11434"
     ollama_model: str = field(default_factory=lambda: os.environ.get(
-        "OLLAMA_MODEL", "qwen2.5vl:3b"
+        "OLLAMA_MODEL", "moondream"
     ))
-    ollama_timeout: int = 120
+    ollama_timeout: int = 30
     ollama_num_ctx: int = 2048
     ollama_temperature: float = 0.0
     max_rounds: int = 2
@@ -54,15 +54,13 @@ def _b64(img: Image.Image) -> str:
 
 
 async def _iframe_b64(iframe, max_dim: int = 320) -> Optional[str]:
-    """Screenshot an iframe element directly, resize, return base64.
-    Element-level screenshot is more reliable than page.clip() for iframes."""
     try:
         raw = await iframe.screenshot()
         if not raw or len(raw) < 100:
             return None
         img = Image.open(io.BytesIO(raw))
         return _b64(_resize(img, max_dim))
-    except Exception as e:
+    except Exception:
         return None
 
 
@@ -126,16 +124,6 @@ class OllamaClient:
 
 # ── Human Mouse ───────────────────────────────────────────
 
-STEALTH = """
-(()=>{
-Object.defineProperty(navigator,'webdriver',{get:()=>false});
-Object.defineProperty(navigator,'hardwareConcurrency',{get:()=>8});
-Object.defineProperty(navigator,'deviceMemory',{get:()=>8});
-Object.defineProperty(navigator,'languages',{get:()=>Object.freeze(['en-US','en'])});
-})();
-"""
-
-
 class Mouse:
     @staticmethod
     def _jerk(t): return 10*t**3 - 15*t**4 + 6*t**5
@@ -162,15 +150,12 @@ class Mouse:
 
     @staticmethod
     async def drag(page, sx, sy, ex, ey):
-        """Human-like drag from (sx,sy) to (ex,ey)."""
-        # Move to start
         for x, y in Mouse._path(sx + random.uniform(-20, 20), sy + random.uniform(-20, 20), sx, sy):
             await page.mouse.move(x, y)
             await asyncio.sleep(random.uniform(0.003, 0.006))
         await asyncio.sleep(0.05)
         await page.mouse.down()
         await asyncio.sleep(0.03)
-        # Drag to end
         path = Mouse._path(sx, sy, ex, ey)
         for x, y in path:
             await page.mouse.move(x, y)
@@ -201,24 +186,6 @@ class Verifier:
         return False
 
 
-# ── Drag patterns (offsets from iframe center) ───────────
-
-DRAG_PATTERNS = [
-    (100, 0, -120, 0),     # right→left 220px
-    (80, 0, -150, 0),      # right→left 230px
-    (120, 0, -80, 0),      # right→left 200px
-    (-100, 0, 100, 0),     # left→right 200px
-    (0, 80, 0, -80),       # bottom→top 160px
-    (0, -80, 0, 80),       # top→bottom 160px
-    (140, 30, -100, -30),  # diagonal down-right→up-left
-    (-140, -30, 100, 30),  # diagonal up-left→down-right
-    (0, 0, -180, 0),       # from center left 180px
-    (0, 0, 180, 0),        # from center right 180px
-    (0, 0, 0, -120),       # from center up 120px
-    (0, 0, 0, 120),        # from center down 120px
-]
-
-
 # ── Iframe helpers ────────────────────────────────────────
 
 IFRAME_SELS = [
@@ -229,7 +196,6 @@ IFRAME_SELS = [
 
 
 async def _find_iframe(page: Page, min_size: int = 80):
-    """Find the largest captcha iframe (not the checkbox)."""
     best = None
     best_area = 0
     for sel in IFRAME_SELS:
@@ -267,9 +233,6 @@ async def _challenge_text(page: Page) -> str:
 
 
 async def _click_verify(page: Page):
-    """Click the verify/submit button inside the captcha iframe only.
-    NEVER searches the main page (was clicking Skip buttons on Discord).
-    Uses exact hCaptcha button selectors only."""
     await asyncio.sleep(0.5)
     btn_sels = [
         "button.verifybtn", "button.verify-btn", ".button-submit", "button.submit",
@@ -313,24 +276,9 @@ class GridSolver:
         text = await _challenge_text(page)
         self._log(f"[Grid] Challenge: '{text[:60]}' | area {box['width']:.0f}x{box['height']:.0f}")
 
-        # Take screenshot of challenge area via element-level screenshot
-        ss = await _iframe_b64(iframe, max_dim=400)
-        if not ss:
-            self._log("[Grid] Iframe screenshot failed, retrying via page clip...", level="warn")
-            try:
-                raw = await page.screenshot(clip={"x": box['x'], "y": box['y'], "width": box['width'], "height": box['height']})
-                if raw and len(raw) > 100:
-                    ss = _b64(_resize(Image.open(io.BytesIO(raw)), 400))
-            except:
-                pass
-        if not ss:
-            self._log("[Grid] Screenshot failed", level="error")
-            return False
-
-        # Try to get individual tile images
+        # Get smaller tile images (DOM if possible, otherwise split screenshot)
         tiles_b64 = await self._get_tile_b64s(page, box)
         if not tiles_b64:
-            # Split full screenshot into 3x3 grid
             self._log("[Grid] Splitting screenshot into tiles")
             raw = await page.screenshot(clip={"x": box['x'], "y": box['y'], "width": box['width'], "height": box['height']})
             tiles_pil = self._split_grid(raw, 3)
@@ -341,17 +289,36 @@ class GridSolver:
         if not self.ollama:
             self.ollama = OllamaClient(self.config, log=self._log)
 
-        # Query: send ALL tiles as separate images
-        p = (f"hCaptcha grid: \"{text or 'Select matching images'}\"\n"
-             f"Tiles 0-{len(tiles_b64)-1}. Which tiles match? Reply JSON array only. Example: [0,3,5] or []")
-        ans = await self.ollama.ask_retry(p, tiles_b64, 100)
-        nums = self._parse_nums(ans)
+        # Extract target object from challenge text
+        subject = self._extract_subject(text)
+        self._log(f"[Grid] Looking for: '{subject}'")
 
+        # Query ONE tile at a time — tiny images, simple YES/NO
+        nums = []
+        for i, tile_b64 in enumerate(tiles_b64):
+            ans = await self.ollama.ask_retry(
+                f"Does this tile contain a {subject}? Answer YES or NO only.",
+                [tile_b64], 50)
+            ans_lower = ans.strip().lower()[:10]
+            if 'yes' in ans_lower:
+                nums.append(i)
+                self._log(f"[Grid] Tile {i}: YES")
+            else:
+                self._log(f"[Grid] Tile {i}: no")
+            await asyncio.sleep(0.05)
+
+        # Fallback: ask about whole image
         if not nums:
-            self._log("[Grid] Qwen gave empty, trying single-image fallback")
-            ans2 = await self.ollama.ask_retry(
-                "Which numbered tiles to click? JSON array only.", [ss], 100)
-            nums = self._parse_nums(ans2)
+            self._log("[Grid] No tiles matched, trying single-image fallback...")
+            ss = await _iframe_b64(iframe, max_dim=400) or tiles_b64[0]
+            ans = await self.ollama.ask_retry(
+                f"hCaptcha: \"{text}\". Which numbered tiles have {subject}? Reply numbers with spaces: 0 3 5",
+                [ss], 50)
+            if ans:
+                found = re.findall(r'\\d+', ans)
+                nums = [int(n) for n in found if 0 <= int(n) <= 50][:9]
+                if nums:
+                    self._log(f"[Grid] Fallback tiles: {nums}")
 
         if not nums:
             self._log("[Grid] No tiles identified", level="error")
@@ -374,30 +341,33 @@ class GridSolver:
         self._log(f"[Grid] {'✓' if ok else '✗'}")
         return ok
 
-    def _parse_nums(self, ans: str) -> List[int]:
-        if not ans:
-            return []
-        ans = re.sub(r'```(?:json)?\s*|\s*```', '', ans).strip()
-        s, e = ans.find('['), ans.rfind(']')
-        if s == -1 or e == -1:
-            return []
-        try:
-            p = json.loads(ans[s:e + 1])
-            if not isinstance(p, list):
-                return []
-            if all(isinstance(x, (int, float)) for x in p):
-                return [int(x) for x in p if 0 <= int(x) <= 50]
-            nums = []
-            for item in p:
-                if isinstance(item, dict):
-                    for k in ['number', 'tile', 'index', 'id']:
-                        v = item.get(k)
-                        if isinstance(v, (int, float)) and 0 <= int(v) <= 50:
-                            nums.append(int(v))
-                            break
-            return nums
-        except:
-            return []
+    @staticmethod
+    def _extract_subject(text: str) -> str:
+        if not text:
+            return "the object"
+        t = text.lower()
+        for p in ['select all images containing', 'click all images with',
+                  'select all squares with', 'click all squares containing',
+                  'choose all images with', 'select all matching',
+                  'click all', 'select all', 'choose all']:
+            if p in t:
+                idx = t.index(p) + len(p)
+                subj = t[idx:].strip().strip('.!?,:;').strip()
+                for art in ['a ', 'an ', 'the ']:
+                    if subj.startswith(art):
+                        subj = subj[len(art):]
+                if subj:
+                    return subj.split()[0]
+        for kw in ['containing', 'with', 'matching', 'showing']:
+            if kw in t:
+                idx = t.index(kw) + len(kw)
+                subj = t[idx:].strip().strip('.!?,:;').strip()
+                for art in ['a ', 'an ', 'the ']:
+                    if subj.startswith(art):
+                        subj = subj[len(art):]
+                if subj:
+                    return subj.split()[0]
+        return "the object"
 
     async def _get_tile_b64s(self, page: Page, box: dict) -> Optional[List[str]]:
         for sel in IFRAME_SELS:
@@ -467,13 +437,10 @@ class GridSolver:
 # ═══════════════════════════════════════════════════════════
 
 class DragSolver:
-    """Solves drag-to-target captchas by reading element positions
-    directly from the hCaptcha iframe DOM via JavaScript.
-    No AI needed — exact positions extracted instantly."""
-
     def __init__(self, config: SolverConfig, log: Optional[Callable] = None):
         self.config = config
         self._log = log or (lambda *a: None)
+        self.ollama: Optional[OllamaClient] = None
 
     async def solve(self, page: Page) -> bool:
         self._log("[Drag] Starting...")
@@ -486,74 +453,164 @@ class DragSolver:
         text = await _challenge_text(page)
         self._log(f"[Drag] Challenge: '{text[:80]}'")
 
-        # Method 1: EXTRACT exact element positions from DOM via JavaScript
+        # Method 1: DOM extraction (works for non-canvas hCaptcha)
         coords = await self._extract_drag_coords(page, box)
         if coords:
-            sx, sy, ex, ey = coords
-            self._log(f"[Drag] DOM extracted: ({sx:.0f},{sy:.0f})→({ex:.0f},{ey:.0f})")
-            await Mouse.drag(page, sx, sy, ex, ey)
-            await asyncio.sleep(1)
-            if await Verifier(page).solved():
-                await _click_verify(page)
-                await asyncio.sleep(0.5)
-                if await Verifier(page).solved():
-                    self._log("[Drag] ✓ Solved via DOM extraction")
+            if await self._try_drag(page, coords[0], coords[1], coords[2], coords[3], "DOM extraction"):
+                return True
+
+        # Method 2: Moondream vision — ask where the object and target are
+        self._log("[Drag] DOM failed, trying Moondream vision...")
+        direction = await self._moondream_direction(page, iframe, text)
+        if direction:
+            cx, cy = box['x'] + box['width'] / 2, box['y'] + box['height'] / 2
+            bw, bh = box['width'], box['height']
+            dist = min(bw, bh) * 0.35  # 35% of iframe size
+
+            if direction == "left_to_right":
+                if await self._try_drag(page, cx - dist, cy, cx + dist, cy, f"Moondream L→R {dist:.0f}px"):
+                    return True
+            elif direction == "right_to_left":
+                if await self._try_drag(page, cx + dist, cy, cx - dist, cy, f"Moondream R→L {dist:.0f}px"):
+                    return True
+            elif direction == "top_to_bottom":
+                if await self._try_drag(page, cx, cy - dist, cx, cy + dist, f"Moondream T→B {dist:.0f}px"):
+                    return True
+            elif direction == "bottom_to_top":
+                if await self._try_drag(page, cx, cy + dist, cx, cy - dist, f"Moondream B→T {dist:.0f}px"):
                     return True
 
-        # Method 2: Scan all large elements, find pairs that look like drag→target
+        # Method 3: Element pair scanning (DOM-based big elements)
         elems = await self._scan_iframe_elements(page)
         if elems:
-            self._log(f"[Drag] Scanning {len(elems)} elements for drag patterns...")
-            # Find pairs of elements with similar sizes (draggable ≈ target)
+            self._log(f"[Drag] Scanning {len(elems)} elements...")
             for i in range(len(elems)):
                 for j in range(len(elems)):
                     if i == j:
                         continue
                     e1, e2 = elems[i], elems[j]
-                    # Elements with similar area are likely a pair
                     a1, a2 = e1['w'] * e1['h'], e2['w'] * e2['h']
-                    if 0.5 < a1 / a2 < 2.0:  # Similar sizes
-                        sx, sy = e1['x'] + e1['w']/2 + box['x'], e1['y'] + e1['h']/2 + box['y']
-                        ex, ey = e2['x'] + e2['w']/2 + box['x'], e2['y'] + e2['h']/2 + box['y']
+                    if 0.5 < a1 / a2 < 2.0:
+                        sx = e1['x'] + e1['w']/2 + box['x']
+                        sy = e1['y'] + e1['h']/2 + box['y']
+                        ex = e2['x'] + e2['w']/2 + box['x']
+                        ey = e2['y'] + e2['h']/2 + box['y']
                         dist = math.hypot(ex - sx, ey - sy)
-                        if 30 < dist < 400:  # Reasonable drag distance
-                            self._log(f"[Drag] Pair {i}→{j}: ({sx:.0f},{sy:.0f})→({ex:.0f},{ey:.0f}) dist={dist:.0f}")
-                            await Mouse.drag(page, sx, sy, ex, ey)
-                            await asyncio.sleep(0.8)
-                            if await Verifier(page).solved():
-                                await _click_verify(page)
-                                await asyncio.sleep(0.4)
-                                if await Verifier(page).solved():
-                                    self._log("[Drag] ✓ Solved via element scanning")
-                                    return True
+                        if 30 < dist < 400:
+                            if await self._try_drag(page, sx, sy, ex, ey, f"elem {i}→{j}"):
+                                return True
 
-        # Method 3: iframe center → edge drags (heuristic)
-        self._log("[Drag] Trying heuristic edge patterns...")
+        # Method 4: Multiple heuristic patterns with varying distances
+        self._log("[Drag] Trying heuristic patterns...")
         cx, cy = box['x'] + box['width'] / 2, box['y'] + box['height'] / 2
-        for dx, dy in [(-180, 0), (180, 0), (0, -120), (0, 120),
-                       (-150, -50), (150, 50), (-120, 40), (120, -40)]:
-            await Mouse.drag(page, cx + dx, cy + dy, cx - dx, cy - dy)
-            await asyncio.sleep(0.6)
-            if await Verifier(page).solved():
-                await _click_verify(page)
-                await asyncio.sleep(0.4)
-                if await Verifier(page).solved():
-                    self._log("[Drag] ✓ Solved via edge pattern")
+        bw, bh = box['width'], box['height']
+        for frac in [0.25, 0.35, 0.45, 0.55, 0.65]:
+            d = min(bw, bh) * frac
+            for dx, dy in [(-d, 0), (d, 0), (0, -d), (0, d),
+                           (-d*0.7, -d*0.3), (d*0.7, d*0.3), (d*0.3, -d*0.5), (-d*0.3, d*0.5)]:
+                if await self._try_drag(page, cx + dx, cy + dy, cx - dx, cy - dy,
+                                        f"heuristic {frac:.2f} {dx:.0f},{dy:.0f}"):
                     return True
 
         self._log("[Drag] ✗ Failed", level="error")
         return False
 
+    async def _try_drag(self, page, sx, sy, ex, ey, label: str) -> bool:
+        self._log(f"[Drag] Trying {label}: ({sx:.0f},{sy:.0f})→({ex:.0f},{ey:.0f})")
+        await Mouse.drag(page, sx, sy, ex, ey)
+        await asyncio.sleep(1)
+        if await Verifier(page).solved():
+            await _click_verify(page)
+            await asyncio.sleep(0.5)
+            if await Verifier(page).solved():
+                self._log(f"[Drag] ✓ ({label})")
+                return True
+        return False
+
+    async def _moondream_direction(self, page: Page, iframe, text: str) -> Optional[str]:
+        """Ask Moondream which direction to drag.
+        Takes a small screenshot, asks LEFT→RIGHT, RIGHT→LEFT, TOP→BOTTOM, BOTTOM→TOP."""
+        ss = await _iframe_b64(iframe, max_dim=320)
+        if not ss:
+            self._log("[Drag] Moondream: screenshot failed")
+            return None
+
+        if not self.ollama:
+            self.ollama = OllamaClient(self.config, log=self._log)
+
+        # Determine the object and target from challenge text
+        obj, target = self._extract_drag_subjects(text)
+        self._log(f"[Drag] Moondream: looking for '{obj}'→'{target}'")
+
+        ans = await self.ollama.ask_retry(
+            f"hCaptcha: '{text}'. Which direction to drag the {obj} to the {target}? "
+            "Answer ONLY: left to right | right to left | top to bottom | bottom to top",
+            [ss], 30)
+
+        if not ans:
+            return None
+
+        ans_lower = ans.strip().lower()
+        if 'left to right' in ans_lower or 'left→right' in ans_lower:
+            return "left_to_right"
+        if 'right to left' in ans_lower or 'right→left' in ans_lower:
+            return "right_to_left"
+        if 'top to bottom' in ans_lower or 'top→bottom' in ans_lower:
+            return "top_to_bottom"
+        if 'bottom to top' in ans_lower or 'bottom→top' in ans_lower:
+            return "bottom_to_top"
+
+        # Fallback: look for keywords
+        if 'left' in ans_lower and 'right' in ans_lower:
+            return "left_to_right"
+        if 'right' in ans_lower and 'left' in ans_lower:
+            return "right_to_left"
+        if 'up' in ans_lower or 'top' in ans_lower:
+            return "bottom_to_top"
+        if 'down' in ans_lower or 'bottom' in ans_lower:
+            return "top_to_bottom"
+
+        return None
+
+    @staticmethod
+    def _extract_drag_subjects(text: str) -> Tuple[str, str]:
+        """Extract draggable object and target from challenge text.
+        E.g. 'Drag the spaceship to the star' → ('spaceship', 'star')
+             'Move the fish to the water' → ('fish', 'water')
+        """
+        obj, target = "object", "target"
+        if not text:
+            return obj, target
+        t = text.lower().strip()
+
+        # Pattern: "Drag/Move/Place [the] X [to/into/onto/in] [the] Y"
+        for prefix in ['drag', 'move', 'slide', 'place']:
+            if t.startswith(prefix):
+                rest = t[len(prefix):].strip().lstrip("the ").strip()
+                # Find "to", "into", "onto", "in" separator
+                for sep in [' to ', ' into ', ' onto ', ' in ']:
+                    if sep in rest:
+                        parts = rest.split(sep, 1)
+                        obj = parts[0].strip().strip('the ').strip().split()[0] if parts[0].strip() else obj
+                        target_raw = parts[1].strip().strip('the ').strip()
+                        target = target_raw.split()[0] if target_raw else target
+                        return obj, target
+
+        # Broader fallback: find subject after "drag/move" and object after "to"
+        words = t.split()
+        for i, w in enumerate(words):
+            if w in ('drag', 'move', 'slide', 'place') and i + 1 < len(words):
+                obj = words[i + 1].lstrip('the').strip()
+            if w == 'to' and i + 1 < len(words):
+                target = words[i + 1].lstrip('the').strip()
+
+        return obj, target
+
     async def _extract_drag_coords(self, page: Page, iframe_box: dict) -> Optional[Tuple]:
-        """Extract draggable object and target positions from the hCaptcha iframe DOM.
-        Uses JavaScript to read CSS transform/left/top properties or drag-related attributes."""
         for sel in IFRAME_SELS:
             try:
                 f = page.frame_locator(sel)
-                # Execute JS inside iframe to find all positioned elements
                 data = await f.first.evaluate("""() => {
-    const results = {};
-    // 1. Look for elements with 'drag' or 'target' in classes/id
     const all = document.querySelectorAll('*');
     const positioned = [];
     for (const el of all) {
@@ -564,72 +621,37 @@ class DragSolver:
         const rect = el.getBoundingClientRect();
         if (rect.width < 20 || rect.height < 20) continue;
         if (rect.width > 500 || rect.height > 500) continue;
-        const style = window.getComputedStyle(el);
-        const transform = style.transform || '';
-        const left = style.left || '';
-        const top = style.top || '';
-        const position = style.position || '';
-        const isDraggable = el.draggable || 
-            cls.toLowerCase().includes('drag') || 
+        const isDraggable = el.draggable ||
+            cls.toLowerCase().includes('drag') ||
             cls.toLowerCase().includes('handle') ||
-            cls.toLowerCase().includes('object') ||
-            cls.toLowerCase().includes('piece') ||
             cls.toLowerCase().includes('target') ||
-            cls.toLowerCase().includes('drop') ||
             id.toLowerCase().includes('drag') ||
             id.toLowerCase().includes('target');
         positioned.push({
             tag: tag,
-            cls: cls.slice(0, 100),
-            id: id.slice(0, 50),
             x: rect.x, y: rect.y, w: rect.width, h: rect.height,
-            transform: transform.slice(0, 50),
-            left: left, top: top,
-            position: position,
             draggable: isDraggable,
-            zIndex: style.zIndex,
         });
     }
-    // 2. Find likely drag source (smaller, at edge) and target (center area)
     positioned.sort((a, b) => a.w * a.h - b.w * b.h);
-    // Candidate for draggable: smaller elements not at center
     const candidates = positioned.filter(e => e.w * e.h < 15000);
     if (candidates.length >= 2) {
-        // First two smallest positioned elements are likely draggable + target
-        return {
-            source: candidates[0],
-            target: candidates[1],
-            all: positioned.slice(0, 20),
-        };
+        return { source: candidates[0], target: candidates[1] };
     }
-    return { all: positioned.slice(0, 20) };
+    return null;
 }""")
-                if not data:
-                    continue
-                
-                # Log what we found for debugging
-                all_elems = data.get('all', [])
-                self._log(f"[Drag] Found {len(all_elems)} candidate elements in iframe")
-                for e in all_elems[:5]:
-                    self._log(f"[Drag]   {e.get('tag','')} x={e.get('x',0):.0f} y={e.get('y',0):.0f} "
-                              f"{e.get('w',0):.0f}x{e.get('h',0):.0f} cls={e.get('cls','')[:40]}")
-                
-                src = data.get('source')
-                tgt = data.get('target')
-                if src and tgt:
-                    # Convert iframe-relative to page coordinates
+                if data and 'source' in data and 'target' in data:
+                    src, tgt = data['source'], data['target']
                     sx = iframe_box['x'] + src['x'] + src['w'] / 2
                     sy = iframe_box['y'] + src['y'] + src['h'] / 2
                     ex = iframe_box['x'] + tgt['x'] + tgt['w'] / 2
                     ey = iframe_box['y'] + tgt['y'] + tgt['h'] / 2
                     return (sx, sy, ex, ey)
-            except Exception as e:
-                self._log(f"[Drag] DOM extraction error: {e}")
+            except:
                 continue
         return None
 
     async def _scan_iframe_elements(self, page: Page) -> List[dict]:
-        """Get all sizable visible elements from the iframe."""
         for sel in IFRAME_SELS:
             try:
                 f = page.frame_locator(sel)
@@ -651,11 +673,12 @@ class DragSolver:
         return []
 
     async def close(self):
-        pass
+        if self.ollama:
+            await self.ollama.close()
 
 
 # ═══════════════════════════════════════════════════════════
-# 3. SLIDER SOLVER — puzzle slider (improved OpenCV)
+# 3. SLIDER SOLVER — puzzle slider (OpenCV)
 # ═══════════════════════════════════════════════════════════
 
 class SliderSolver:
@@ -665,52 +688,40 @@ class SliderSolver:
 
     async def solve(self, page: Page) -> bool:
         self._log("[Slider] Starting...")
-
-        # Find slider handle (try multiple approaches)
         handle = await self._find_slider(page)
         if not handle:
-            self._log("[Slider] No slider handle found", level="warn")
+            self._log("[Slider] No slider handle", level="warn")
             return False
 
         hb = await handle.bounding_box()
         if not hb:
             return False
 
-        self._log(f"[Slider] Handle at ({hb['x']:.0f},{hb['y']:.0f}) size {hb['width']:.0f}x{hb['height']:.0f}")
+        self._log(f"[Slider] Handle at ({hb['x']:.0f},{hb['y']:.0f}) {hb['width']:.0f}x{hb['height']:.0f}")
 
-        # Determine track bounds and full drag distance
         track_box = await self._find_track(page, hb)
-        if track_box:
-            max_travel = track_box['width'] - hb['width']
-        else:
-            max_travel = 250  # default guess
+        max_travel = (track_box['width'] - hb['width']) if track_box else 250
 
         sx = hb['x'] + hb['width'] / 2
         sy = hb['y'] + hb['height'] / 2
 
-        # Try OpenCV template matching for exact offset
         offsets = await self._get_offsets_opencv(page, hb)
-
-        # If OpenCV failed, try multiple offsets
         if not offsets:
             offsets = [int(max_travel * f) for f in [0.3, 0.45, 0.55, 0.65, 0.75, 0.85, 0.4, 0.6, 0.5, 0.7, 0.35, 0.8]]
 
         for i, offset in enumerate(offsets):
             offset = max(10, min(offset, int(max_travel)))
             tx = sx + offset + random.randint(-3, 3)
-            self._log(f"[Slider] Attempt {i + 1}/{len(offsets)}: drag {offset}px")
+            self._log(f"[Slider] Attempt {i + 1}/{len(offsets)}: {offset}px")
             await Mouse.drag(page, sx, sy, tx, sy)
             await asyncio.sleep(0.6)
-
             if await Verifier(page).solved():
-                self._log("[Slider] ✓ Solved")
+                self._log("[Slider] ✓")
                 return True
-
-            # Reset slider position for next attempt
             await Mouse.drag(page, tx, sy, sx, sy)
             await asyncio.sleep(0.4)
 
-        self._log("[Slider] ✗ Failed", level="error")
+        self._log("[Slider] ✗", level="error")
         return False
 
     async def _find_slider(self, page: Page):
@@ -722,7 +733,6 @@ class SliderSolver:
                     return page.locator(sel).first
             except:
                 continue
-        # Check inside iframe
         for isel in IFRAME_SELS:
             for sel in sels:
                 try:
@@ -753,48 +763,37 @@ class SliderSolver:
         return hb
 
     async def _get_offsets_opencv(self, page: Page, hb: dict) -> Optional[List[int]]:
-        """Use OpenCV template matching to find puzzle piece offset."""
         try:
-            # Screenshot the slider area
             area = {
                 'x': hb['x'] - 50, 'y': hb['y'] - 20,
                 'width': 350, 'height': hb['height'] + 40
             }
             raw = await page.screenshot(clip=area)
             img = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_GRAYSCALE)
-            h, w = img.shape
-
-            # Try to find the puzzle gap using edge detection + contour analysis
             edges = cv2.Canny(img, 50, 150)
-            lines = cv2.HoughLinesP(edges, 1, np.pi / 180, 50,
-                                     minLineLength=20, maxLineGap=10)
+            lines = cv2.HoughLinesP(edges, 1, np.pi / 180, 50, minLineLength=20, maxLineGap=10)
             if lines is not None:
-                # Find vertical lines that might indicate puzzle gap edges
                 vert_lines = []
                 for line in lines:
                     x1, y1, x2, y2 = line[0]
-                    if abs(x2 - x1) < 5:  # near-vertical line
+                    if abs(x2 - x1) < 5:
                         vert_lines.append((x1 + x2) // 2 + area['x'])
                 if vert_lines:
-                    # The gap is usually between two vertical lines
                     vert_lines.sort()
                     gaps = []
                     for i in range(len(vert_lines) - 1):
                         gap = vert_lines[i + 1] - vert_lines[i]
-                        if 30 < gap < 80:  # puzzle piece width range
+                        if 30 < gap < 80:
                             gaps.append((vert_lines[i] + vert_lines[i + 1]) // 2)
                     if gaps:
                         return [g - hb['x'] for g in gaps]
 
-            # Also try template matching with the handle itself
             handle_img = await page.screenshot(clip={
                 'x': hb['x'], 'y': hb['y'], 'width': hb['width'], 'height': hb['height']
             })
             handle_gray = cv2.imdecode(np.frombuffer(handle_img, np.uint8), cv2.IMREAD_GRAYSCALE)
             if handle_gray.shape[0] > 0 and handle_gray.shape[1] > 0:
                 res = cv2.matchTemplate(img, handle_gray, cv2.TM_CCOEFF_NORMED)
-                _, _, _, max_loc = cv2.minMaxLoc(res)
-                # The handle's best match position other than its current location
                 all_locs = np.where(res > 0.6)
                 if len(all_locs[0]) > 1:
                     for i in range(1, min(5, len(all_locs[0]))):
@@ -838,8 +837,6 @@ class MasterSolver:
         return ok
 
     async def _detect(self, page: Page) -> str:
-        """Detect challenge type: slider, drag, or grid."""
-        # Check for slider signals
         slider_sigs = ['[role="slider"]', '.slider-handle', '.slide-btn', '.handler']
         for sel in slider_sigs:
             try:
@@ -856,26 +853,20 @@ class MasterSolver:
                 except:
                     continue
 
-        # Check challenge text for drag keywords
         text = await _challenge_text(page)
         text_lower = text.lower()
-        drag_words = ['drag', 'move', 'slide to', 'place', 'put']
-        if any(w in text_lower for w in drag_words):
-            # Check for draggable elements
+        if any(w in text_lower for w in ['drag', 'move', 'slide to', 'place', 'put']):
             for isel in IFRAME_SELS:
                 try:
                     f = page.frame_locator(isel)
-                    drag_sels = ['[class*="drag"]', '[class*="handle"]', '[class*="object"]',
-                                 '[draggable]', '[class*="piece"]']
-                    for ds in drag_sels:
+                    for ds in ['[class*="drag"]', '[class*="handle"]', '[class*="object"]',
+                               '[draggable]', '[class*="piece"]']:
                         if await f.locator(ds).count() > 0:
                             return "drag"
                 except:
                     continue
-            # Even without DOM confirmation, assume drag if text says drag
             return "drag"
 
-        # Default: grid
         return "grid"
 
     async def close(self):
@@ -889,7 +880,7 @@ async def main():
     solver = MasterSolver(config)
     print("=" * 50)
     print("  MasterSolver — all challenge types")
-    print("  Grid | Drag | Slider")
+    print("  Grid (Moondream tiles) | Drag (DOM+Moondream) | Slider (OpenCV)")
     print("=" * 50)
     print(f"  Model: {config.ollama_model}")
 
