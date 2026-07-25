@@ -563,17 +563,27 @@ class FarmSession:
             frame_info = await _find_iframe(self._page)
             if frame_info:
                 iframe, box = frame_info
+                iframe_raw = None
                 try:
-                    raw = await iframe.screenshot()
-                    rec.screenshot_b64 = base64.b64encode(raw).decode()
-                except:
-                    pass
+                    iframe_raw = await iframe.screenshot()
+                    if iframe_raw:
+                        rec.screenshot_b64 = base64.b64encode(iframe_raw).decode()
+                except Exception as e:
+                    self._log(f"  Iframe screenshot error: {e}", level="warn")
 
                 # Get individual tile images
                 if self._grid_solver:
+                    # First try DOM-based tile extraction
                     tiles_pil, tile_boxes = await self._grid_solver._get_tiles_dom(self._page, box)
+                    
+                    # If DOM fails, use the iframe screenshot directly (much cleaner than page clip)
+                    if not tiles_pil and iframe_raw:
+                        self._log(f"  Splitting iframe screenshot ({len(iframe_raw)} bytes) into tiles...")
+                        tiles_pil = self._grid_solver._split_grid(iframe_raw)
+                    
+                    # Last resort: page screenshot clipped to iframe (may include background)
                     if not tiles_pil:
-                        self._log("  No tiles found in DOM, splitting screenshot")
+                        self._log("  Fallback: clipping page screenshot to iframe bounds")
                         raw = await self._page.screenshot(clip={
                             "x": box["x"], "y": box["y"],
                             "width": box["width"], "height": box["height"]
