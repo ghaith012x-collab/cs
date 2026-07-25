@@ -467,13 +467,13 @@ class GridSolver:
 # ═══════════════════════════════════════════════════════════
 
 class DragSolver:
-    """Uses Qwen vision to find source and target coordinates
-    in drag-to-target captchas, then performs a human-like drag."""
+    """Solves drag-to-target captchas by reading element positions
+    directly from the hCaptcha iframe DOM via JavaScript.
+    No AI needed — exact positions extracted instantly."""
 
     def __init__(self, config: SolverConfig, log: Optional[Callable] = None):
         self.config = config
         self._log = log or (lambda *a: None)
-        self.ollama: Optional[OllamaClient] = None
 
     async def solve(self, page: Page) -> bool:
         self._log("[Drag] Starting...")
@@ -486,99 +486,172 @@ class DragSolver:
         text = await _challenge_text(page)
         self._log(f"[Drag] Challenge: '{text[:80]}'")
 
-        # Method 1: Try to find draggable element and target from DOM
-        src_box, tgt_box = await self._find_drag_targets_dom(page)
-        if src_box and tgt_box:
-            self._log(f"[Drag] DOM targets: src=({src_box['x']:.0f},{src_box['y']:.0f}) "
-                      f"tgt=({tgt_box['x']:.0f},{tgt_box['y']:.0f})")
-            await self._do_drag(page, src_box, tgt_box)
+        # Method 1: EXTRACT exact element positions from DOM via JavaScript
+        coords = await self._extract_drag_coords(page, box)
+        if coords:
+            sx, sy, ex, ey = coords
+            self._log(f"[Drag] DOM extracted: ({sx:.0f},{sy:.0f})→({ex:.0f},{ey:.0f})")
+            await Mouse.drag(page, sx, sy, ex, ey)
             await asyncio.sleep(1)
-            if await Verifier(page).solved():
-                self._log("[Drag] ✓ Solved via DOM")
-                return True
-
-        # Method 2: Try heuristic drag patterns (Qwen CPU inference too slow — skip!)
-        self._log(f"[Drag] Trying {len(DRAG_PATTERNS)} heuristic patterns...")
-        for pi, (sx, sy, ex, ey) in enumerate(DRAG_PATTERNS):
-            # Offset patterns from iframe center for each attempt
-            cx, cy = box['x'] + box['width'] / 2, box['y'] + box['height'] / 2
-            px, py = cx + sx, cy + sy
-            qx, qy = cx + ex, cy + ey
-            self._log(f"[Drag] Pattern {pi + 1}/{len(DRAG_PATTERNS)}: ({px:.0f},{py:.0f})→({qx:.0f},{qy:.0f})")
-            await Mouse.drag(page, px, py, qx, qy)
-            await asyncio.sleep(0.8)
             if await Verifier(page).solved():
                 await _click_verify(page)
                 await asyncio.sleep(0.5)
                 if await Verifier(page).solved():
-                    self._log("[Drag] ✓ Solved via heuristic")
+                    self._log("[Drag] ✓ Solved via DOM extraction")
                     return True
-        
-        # Method 3: broader range with varying distances
-        self._log("[Drag] Trying broader range...")
-        for dist in [60, 90, 120, 150, 180, 210, 250]:
-            for dx, dy in [(-dist, 0), (dist, 0), (0, -dist), (0, dist), (-dist, -dist//2)]:
-                px = box['x'] + box['width'] / 2 + dx
-                py = box['y'] + box['height'] / 2 + dy
-                qx = box['x'] + box['width'] / 2 - dx
-                qy = box['y'] + box['height'] / 2 - dy
-                await Mouse.drag(page, px, py, qx, qy)
-                await asyncio.sleep(0.6)
-                if await Verifier(page).solved():
-                    await _click_verify(page)
-                    await asyncio.sleep(0.4)
-                    if await Verifier(page).solved():
-                        self._log(f"[Drag] ✓ Solved at dist={dist}, dir=({dx},{dy})")
-                        return True
 
-        self._log("[Drag] ✗ All methods failed", level="error")
+        # Method 2: Scan all large elements, find pairs that look like drag→target
+        elems = await self._scan_iframe_elements(page)
+        if elems:
+            self._log(f"[Drag] Scanning {len(elems)} elements for drag patterns...")
+            # Find pairs of elements with similar sizes (draggable ≈ target)
+            for i in range(len(elems)):
+                for j in range(len(elems)):
+                    if i == j:
+                        continue
+                    e1, e2 = elems[i], elems[j]
+                    # Elements with similar area are likely a pair
+                    a1, a2 = e1['w'] * e1['h'], e2['w'] * e2['h']
+                    if 0.5 < a1 / a2 < 2.0:  # Similar sizes
+                        sx, sy = e1['x'] + e1['w']/2 + box['x'], e1['y'] + e1['h']/2 + box['y']
+                        ex, ey = e2['x'] + e2['w']/2 + box['x'], e2['y'] + e2['h']/2 + box['y']
+                        dist = math.hypot(ex - sx, ey - sy)
+                        if 30 < dist < 400:  # Reasonable drag distance
+                            self._log(f"[Drag] Pair {i}→{j}: ({sx:.0f},{sy:.0f})→({ex:.0f},{ey:.0f}) dist={dist:.0f}")
+                            await Mouse.drag(page, sx, sy, ex, ey)
+                            await asyncio.sleep(0.8)
+                            if await Verifier(page).solved():
+                                await _click_verify(page)
+                                await asyncio.sleep(0.4)
+                                if await Verifier(page).solved():
+                                    self._log("[Drag] ✓ Solved via element scanning")
+                                    return True
+
+        # Method 3: iframe center → edge drags (heuristic)
+        self._log("[Drag] Trying heuristic edge patterns...")
+        cx, cy = box['x'] + box['width'] / 2, box['y'] + box['height'] / 2
+        for dx, dy in [(-180, 0), (180, 0), (0, -120), (0, 120),
+                       (-150, -50), (150, 50), (-120, 40), (120, -40)]:
+            await Mouse.drag(page, cx + dx, cy + dy, cx - dx, cy - dy)
+            await asyncio.sleep(0.6)
+            if await Verifier(page).solved():
+                await _click_verify(page)
+                await asyncio.sleep(0.4)
+                if await Verifier(page).solved():
+                    self._log("[Drag] ✓ Solved via edge pattern")
+                    return True
+
+        self._log("[Drag] ✗ Failed", level="error")
         return False
 
-    async def _find_drag_targets_dom(self, page: Page) -> Tuple[Optional[dict], Optional[dict]]:
-        """Try to find draggable and target elements from hCaptcha DOM."""
+    async def _extract_drag_coords(self, page: Page, iframe_box: dict) -> Optional[Tuple]:
+        """Extract draggable object and target positions from the hCaptcha iframe DOM.
+        Uses JavaScript to read CSS transform/left/top properties or drag-related attributes."""
         for sel in IFRAME_SELS:
             try:
                 f = page.frame_locator(sel)
-                # Look for draggable elements
-                drag_els = f.locator('[class*="drag"], [class*="handle"], [class*="object"], [class*="piece"]')
-                n = await drag_els.count()
-                if n > 0:
-                    src = await drag_els.nth(0).bounding_box()
-                    tgt = await drag_els.nth(min(1, n - 1)).bounding_box() if n > 1 else None
-                    if src and tgt:
-                        return src, tgt
-            except:
+                # Execute JS inside iframe to find all positioned elements
+                data = await f.first.evaluate("""() => {
+    const results = {};
+    // 1. Look for elements with 'drag' or 'target' in classes/id
+    const all = document.querySelectorAll('*');
+    const positioned = [];
+    for (const el of all) {
+        const cls = el.className || '';
+        const id = el.id || '';
+        const tag = el.tagName || '';
+        if (tag === 'SCRIPT' || tag === 'STYLE') continue;
+        const rect = el.getBoundingClientRect();
+        if (rect.width < 20 || rect.height < 20) continue;
+        if (rect.width > 500 || rect.height > 500) continue;
+        const style = window.getComputedStyle(el);
+        const transform = style.transform || '';
+        const left = style.left || '';
+        const top = style.top || '';
+        const position = style.position || '';
+        const isDraggable = el.draggable || 
+            cls.toLowerCase().includes('drag') || 
+            cls.toLowerCase().includes('handle') ||
+            cls.toLowerCase().includes('object') ||
+            cls.toLowerCase().includes('piece') ||
+            cls.toLowerCase().includes('target') ||
+            cls.toLowerCase().includes('drop') ||
+            id.toLowerCase().includes('drag') ||
+            id.toLowerCase().includes('target');
+        positioned.push({
+            tag: tag,
+            cls: cls.slice(0, 100),
+            id: id.slice(0, 50),
+            x: rect.x, y: rect.y, w: rect.width, h: rect.height,
+            transform: transform.slice(0, 50),
+            left: left, top: top,
+            position: position,
+            draggable: isDraggable,
+            zIndex: style.zIndex,
+        });
+    }
+    // 2. Find likely drag source (smaller, at edge) and target (center area)
+    positioned.sort((a, b) => a.w * a.h - b.w * b.h);
+    // Candidate for draggable: smaller elements not at center
+    const candidates = positioned.filter(e => e.w * e.h < 15000);
+    if (candidates.length >= 2) {
+        // First two smallest positioned elements are likely draggable + target
+        return {
+            source: candidates[0],
+            target: candidates[1],
+            all: positioned.slice(0, 20),
+        };
+    }
+    return { all: positioned.slice(0, 20) };
+}""")
+                if not data:
+                    continue
+                
+                # Log what we found for debugging
+                all_elems = data.get('all', [])
+                self._log(f"[Drag] Found {len(all_elems)} candidate elements in iframe")
+                for e in all_elems[:5]:
+                    self._log(f"[Drag]   {e.get('tag','')} x={e.get('x',0):.0f} y={e.get('y',0):.0f} "
+                              f"{e.get('w',0):.0f}x{e.get('h',0):.0f} cls={e.get('cls','')[:40]}")
+                
+                src = data.get('source')
+                tgt = data.get('target')
+                if src and tgt:
+                    # Convert iframe-relative to page coordinates
+                    sx = iframe_box['x'] + src['x'] + src['w'] / 2
+                    sy = iframe_box['y'] + src['y'] + src['h'] / 2
+                    ex = iframe_box['x'] + tgt['x'] + tgt['w'] / 2
+                    ey = iframe_box['y'] + tgt['y'] + tgt['h'] / 2
+                    return (sx, sy, ex, ey)
+            except Exception as e:
+                self._log(f"[Drag] DOM extraction error: {e}")
                 continue
-        return None, None
-
-    def _parse_coords(self, ans: str, iframe_box: dict) -> Optional[Tuple[float, float, float, float]]:
-        """Parse Qwen's JSON coordinate response."""
-        if not ans:
-            return None
-        try:
-            ans = re.sub(r'```(?:json)?\s*|\s*```', '', ans).strip()
-            data = json.loads(ans)
-            src = data.get('source') or data.get('from') or data.get('start')
-            tgt = data.get('target') or data.get('to') or data.get('end')
-            if src and tgt and len(src) == 2 and len(tgt) == 2:
-                # Convert image-local coords to page coords
-                sx = iframe_box['x'] + float(src[0])
-                sy = iframe_box['y'] + float(src[1])
-                ex = iframe_box['x'] + float(tgt[0])
-                ey = iframe_box['y'] + float(tgt[1])
-                return sx, sy, ex, ey
-        except:
-            pass
         return None
 
-    async def _do_drag(self, page: Page, src: dict, tgt: dict):
-        sx, sy = src['x'] + src['width'] / 2, src['y'] + src['height'] / 2
-        ex, ey = tgt['x'] + tgt['width'] / 2, tgt['y'] + tgt['height'] / 2
-        await Mouse.drag(page, sx, sy, ex, ey)
+    async def _scan_iframe_elements(self, page: Page) -> List[dict]:
+        """Get all sizable visible elements from the iframe."""
+        for sel in IFRAME_SELS:
+            try:
+                f = page.frame_locator(sel)
+                data = await f.first.evaluate("""() => {
+    const results = [];
+    for (const el of document.querySelectorAll('*')) {
+        if (el.tagName === 'SCRIPT' || el.tagName === 'STYLE') continue;
+        const rect = el.getBoundingClientRect();
+        if (rect.width < 25 || rect.height < 25) continue;
+        if (rect.width > 400 || rect.height > 400) continue;
+        results.push({ x: rect.x, y: rect.y, w: rect.width, h: rect.height });
+    }
+    return results;
+}""")
+                if data:
+                    return data
+            except:
+                continue
+        return []
 
     async def close(self):
-        if self.ollama:
-            await self.ollama.close()
+        pass
 
 
 # ═══════════════════════════════════════════════════════════
