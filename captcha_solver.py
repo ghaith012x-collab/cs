@@ -26,7 +26,7 @@ import aiohttp
 class SolverConfig:
     ollama_base_url: str = "http://localhost:11434"
     ollama_model: str = field(default_factory=lambda: os.environ.get(
-        "OLLAMA_MODEL", "qwen2.5-vl:3b"
+        "OLLAMA_MODEL", "qwen2.5vl:3b"
     ))
     ollama_timeout: int = 30
     ollama_num_ctx: int = 2048
