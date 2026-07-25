@@ -496,35 +496,32 @@ class DragSolver:
         text = await _challenge_text(page)
         self._log(f"[Drag] Challenge: '{text[:80]}'")
 
-        # Extract target keyword BEFORE any methods (for template memory lookup)
+        # Extract target keyword for template memory lookup
         _, template_key = self._extract_drag_subjects(text)
         _load_templates()  # Load any saved templates from disk
 
-        # Method 1: DOM extraction (works for non-canvas hCaptcha)
-        coords = await self._extract_drag_coords(page, box)
-        if coords:
-            if await self._try_drag(page, coords[0], coords[1], coords[2], coords[3], "DOM extraction"):
+        # Method 1: VISUAL MUSCLE MEMORY — ALWAYS first!
+        # Uses OpenCV template matching against saved templates (instant, no AI)
+        target_pos = await self._find_template_target(page, iframe, box, template_key)
+        if target_pos:
+            self._log(f"[Drag] Muscle memory found target for '{template_key}'!")
+            obj_pos = await self._find_draggable_by_edge(page, iframe, box, target_pos)
+            if obj_pos:
+                if await self._try_drag(page, obj_pos[0], obj_pos[1], target_pos[0], target_pos[1],
+                                        f"Memory '{template_key}'"):
+                    return True
+            # Fallback: drag from opposite direction of target
+            cx, cy = box['x'] + box['width'] / 2, box['y'] + box['height'] / 2
+            dx, dy = target_pos[0] - cx, target_pos[1] - cy
+            if await self._try_drag(page, cx - dx*1.5, cy - dy*1.5, target_pos[0], target_pos[1],
+                                    f"Memory '{template_key}' (heuristic)"):
                 return True
 
-        # Method 2: VISUAL MUSCLE MEMORY — OpenCV template matching
-        # If we've seen this target before, find it instantly (milliseconds)
-        if template_key != "target" and template_key in TEMPLATE_MEMORY:
-            self._log(f"[Drag] Template memory found for '{template_key}'! Trying match...")
-            target_pos = await self._find_template_target(page, iframe, box, template_key)
-            if target_pos:
-                # Found target! Now find the draggable object position
-                obj_pos = await self._find_draggable_by_edge(page, iframe, box, target_pos)
-                if obj_pos:
-                    if await self._try_drag(page, obj_pos[0], obj_pos[1], target_pos[0], target_pos[1],
-                                            f"Template '{template_key}'"):
-                        return True
-                # Try heuristic drag to template position anyway
-                cx, cy = box['x'] + box['width'] / 2, box['y'] + box['height'] / 2
-                dx, dy = target_pos[0] - cx, target_pos[1] - cy
-                # Try dragging from opposite direction to target
-                if await self._try_drag(page, cx - dx*1.5, cy - dy*1.5, target_pos[0], target_pos[1],
-                                        f"Template '{template_key}' (heuristic start)"):
-                    return True
+        # Method 2: DOM extraction (works for non-canvas hCaptcha)
+        coords = await self._extract_drag_coords(page, box)
+        if coords:
+            if await self._try_drag(page, coords[0], coords[1], coords[2], coords[3], "DOM"):
+                return True
 
         # Method 3: Moondream vision — ask which direction to drag
         self._log("[Drag] Trying Moondream vision...")
