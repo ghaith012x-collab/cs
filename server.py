@@ -226,7 +226,7 @@ class DiscordAutomation:
             await self.initialize()
         
         try:
-            form_filled_successfully = await asyncio.wait_for(self._fill_registration_form(), timeout=60)
+            form_filled_successfully = await asyncio.wait_for(self._fill_registration_form(), timeout=90)
             if form_filled_successfully:
                 self._log("Registration form filled, checking for captcha...")
                 success = await self._solve_hcaptcha_if_present()
@@ -659,8 +659,8 @@ class DiscordAutomation:
     async def _fill_registration_form(self) -> bool:
         try:
             self._log("Navigating to Discord registration page...")
-            await self._page.goto('https://discord.com/register', wait_until='networkidle')
-            await asyncio.sleep(3)
+            await self._page.goto('https://discord.com/register', wait_until='domcontentloaded', timeout=20000)
+            await asyncio.sleep(5)  # Wait for JS to render the form
             
             self._log(f"Filling email: {self._email}")
             await self._page.wait_for_selector('input[name="email"]', timeout=15000)
