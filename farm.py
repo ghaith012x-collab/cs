@@ -244,11 +244,17 @@ class FarmSession:
     # ── Demo Mode Farming ─────────────────────────────────
 
     async def _demo_farming_loop(self):
-        """Farming loop for hCaptcha demo page."""
+        """Farming loop for hCaptcha demo page.
+        
+        Waits 60 seconds between rounds to give Moondream time to
+        fully analyze each captcha before refreshing.
+        """
+        ROUND_DELAY = 60  # seconds to wait between captcha refreshes
+        
         try:
             self._log("Navigating to hCaptcha demo...")
             await self._page.goto(self.DEMO_URL, wait_until='domcontentloaded', timeout=60000)
-            await asyncio.sleep(4)
+            await asyncio.sleep(5)
 
             await self._fill_first_input()
             await asyncio.sleep(0.5)
@@ -263,11 +269,21 @@ class FarmSession:
                 if captured:
                     self.captchas_captured += 1
 
+                # Wait 60 seconds before refreshing — let the user see what was captured
                 if self.running:
+                    self._log(f"⏳ Waiting {ROUND_DELAY}s before next round...")
+                    for _ in range(ROUND_DELAY):
+                        if not self.running:
+                            break
+                        await asyncio.sleep(1)
+                    
+                    if not self.running:
+                        break
+                        
                     self._log("Refreshing page for next captcha...")
                     try:
                         await self._page.goto(self.DEMO_URL, wait_until='domcontentloaded', timeout=30000)
-                        await asyncio.sleep(3)
+                        await asyncio.sleep(4)
                         await self._fill_first_input()
                         await asyncio.sleep(0.5)
                         await self._click_hcaptcha()
@@ -513,9 +529,10 @@ class FarmSession:
         rec = Recognition(timestamp=start, source=source)
 
         try:
-            # Wait for captcha (up to 20s)
+            # Wait for captcha (up to 30s — give more time for iframe to load)
             captcha_text = ""
-            for _ in range(40):
+            self._log("  Waiting for challenge text to appear...")
+            for _ in range(60):
                 if not self.running:
                     return False
                 text = await _challenge_text(self._page)
