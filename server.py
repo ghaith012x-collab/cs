@@ -345,7 +345,7 @@ class DiscordAutomation:
                     # Check if page navigated away (success!)
                     try:
                         current_url = self._page.url
-                        if any(kw in current_url for kw in ['verify', 'confirm', 'welcome', 'home', 'dashboard', 'app']):
+                        if any(kw in current_url for kw in ['/channels', '/verify-email', '/welcome', '/dashboard', '/confirm']):
                             self._log(f"Page navigated to: {current_url} - signup successful!")
                             await master_solver.close()
                             return True
@@ -401,9 +401,28 @@ class DiscordAutomation:
                     await asyncio.sleep(1.5)  # Poll every 1.5s
                 
                 if not new_captcha:
-                    self._log(f"No captcha appeared after {scan_duration}s scan - proceeding!")
-                    await master_solver.close()
-                    return True
+                    # Verify the solve token is actually present before declaring success.
+                    # The captcha might have just disappeared/expired without actually being solved.
+                    token_present = await self._page.evaluate("""
+                        () => {
+                            const textarea = document.querySelector('textarea[name="h-captcha-response"]');
+                            return textarea && textarea.value && textarea.value.length > 0;
+                        }
+                    """)
+                    if token_present:
+                        self._log(f"No captcha appeared after {scan_duration}s scan AND token confirmed - proceeding!")
+                        await master_solver.close()
+                        return True
+                    else:
+                        # Also check if page navigated (registration actually succeeded)
+                        current_url = self._page.url
+                        if any(kw in current_url for kw in ['channels', 'verify-email', 'new-user']):
+                            self._log(f"Page navigated to {current_url} - registration succeeded!")
+                            await master_solver.close()
+                            return True
+                        self._log(f"No captcha appeared but NO TOKEN found - solve was false positive! Retrying...")
+                        # Don't return True - fall through to retry or fail
+                        break
                 
                 self._log(f"Re-solving captcha (loop {captcha_attempt + 1})...")
                 await asyncio.sleep(0.5)
