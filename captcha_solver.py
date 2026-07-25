@@ -548,10 +548,10 @@ class DragSolver:
                 if await self._try_drag(page, cx, cy + dist, cx, cy - dist, f"Moondream B→T {dist:.0f}px"):
                     moondream_solved = True
 
-            # If Moondream solved it, SAVE the target as a template for next time!
+            # If Moondream solved it, SAVE the target side as a template for next time!
             if moondream_solved and template_key:
                 self._log(f"[Drag] Saving '{template_key}' template for future muscle memory!")
-                await self._save_target_template(page, iframe, box, template_key)
+                await self._save_target_template(page, iframe, box, template_key, direction)
                 return True
 
         if moondream_solved:
@@ -575,6 +575,9 @@ class DragSolver:
                         dist = math.hypot(ex - sx, ey - sy)
                         if 30 < dist < 400:
                             if await self._try_drag(page, sx, sy, ex, ey, f"elem {i}→{j}"):
+                                # Save template too
+                                if template_key:
+                                    await self._save_target_template(page, iframe, box, template_key)
                                 return True
 
         # Method 5: Multiple heuristic patterns
@@ -583,14 +586,30 @@ class DragSolver:
         bw, bh = box['width'], box['height']
         for frac in [0.25, 0.35, 0.45, 0.55, 0.65]:
             d = min(bw, bh) * frac
-            for dx, dy in [(-d, 0), (d, 0), (0, -d), (0, d),
-                           (-d*0.7, -d*0.3), (d*0.7, d*0.3), (d*0.3, -d*0.5), (-d*0.3, d*0.5)]:
+            for dx, dy, label in [(-d, 0, 'L'), (d, 0, 'R'), (0, -d, 'U'), (0, d, 'D'),
+                                  (-d*0.7, -d*0.3, 'UL'), (d*0.7, d*0.3, 'DR'),
+                                  (d*0.3, -d*0.5, 'UR'), (-d*0.3, d*0.5, 'DL')]:
                 if await self._try_drag(page, cx + dx, cy + dy, cx - dx, cy - dy,
-                                        f"heuristic {frac:.2f} {dx:.0f},{dy:.0f}"):
+                                        f"heuristic {frac:.2f} {label}"):
+                    # Save template on ANY successful solve for muscle memory!
+                    if template_key:
+                        # Infer direction from drag coords
+                        inf_dir = self._infer_direction(dx, dy, -dx, -dy)
+                        await self._save_target_template(page, iframe, box, template_key, inf_dir)
                     return True
 
         self._log("[Drag] ✗ Failed", level="error")
         return False
+
+    @staticmethod
+    def _infer_direction(sx, sy, ex, ey) -> str:
+        """Infer drag direction from start→end coordinates."""
+        dx = ex - sx
+        dy = ey - sy
+        if abs(dx) > abs(dy):
+            return "left_to_right" if dx > 0 else "right_to_left"
+        else:
+            return "top_to_bottom" if dy > 0 else "bottom_to_top"
 
     async def _try_drag(self, page, sx, sy, ex, ey, label: str) -> bool:
         self._log(f"[Drag] Trying {label}: ({sx:.0f},{sy:.0f})→({ex:.0f},{ey:.0f})")
@@ -696,20 +715,41 @@ class DragSolver:
         cy = target_pos[1]  # Same vertical position is likely
         return (test_x, cy)
 
-    async def _save_target_template(self, page: Page, iframe, box: dict, key: str):
-        """After a successful solve, save the target area as a template for future muscle memory.
-        We take a screenshot and use the drag direction to infer where the target was."""
+    async def _save_target_template(self, page: Page, iframe, box: dict, key: str, direction: Optional[str] = None):
+        """After a successful solve, save just the TARGET side of the iframe as a template.
+        Crops to the half where the target should be based on drag direction.
+        E.g., for 'left_to_right', saves the RIGHT half (where the star is).
+        This makes template matching possible since the target appearance is consistent."""
         if not key or key == "target":
             return
         try:
             raw = await iframe.screenshot()
             if not raw or len(raw) < 100:
                 return
-            # Save the full iframe as-is — user can crop later
-            # The template matcher will find the target from the full image
-            img = Image.open(io.BytesIO(raw)).convert("RGB")
-            _save_template(key, img)
-            self._log(f"[Drag] ✓ Saved '{key}' template ({img.size[0]}x{img.size[1]})")
+            img = Image.open(io.BytesIO(raw))
+            w, h = img.size
+
+            # Crop to the TARGET side based on direction
+            if direction == "left_to_right":
+                # Target is on the RIGHT side → save right 40%
+                crop = img.crop((int(w * 0.6), 0, w, h))
+            elif direction == "right_to_left":
+                # Target is on the LEFT side → save left 40%
+                crop = img.crop((0, 0, int(w * 0.4), h))
+            elif direction == "top_to_bottom":
+                # Target is at the BOTTOM → save bottom 40%
+                crop = img.crop((0, int(h * 0.6), w, h))
+            elif direction == "bottom_to_top":
+                # Target is at the TOP → save top 40%
+                crop = img.crop((0, 0, w, int(h * 0.4)))
+            else:
+                # Fallback: use top-right quadrant
+                crop = img.crop((int(w * 0.5), 0, w, int(h * 0.5)))
+
+            # Resize to a reasonable size for fast matching
+            crop = _resize(crop, 200)
+            _save_template(key, crop)
+            self._log(f"[Drag] ✓ Saved '{key}' template ({crop.size[0]}x{crop.size[1]}) side={direction}")
         except Exception as e:
             self._log(f"[Drag] Error saving template: {e}", level="warn")
 
