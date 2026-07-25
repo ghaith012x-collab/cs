@@ -288,11 +288,11 @@ class DiscordAutomation:
             config = captcha_solver.SolverConfig(
                 ollama_base_url="http://localhost:11434",
                 max_rounds=2,
-                timeout=20,
+                ollama_timeout=120,  # CPU inference is slow
             )
             
             max_captcha_loops = 5  # Handle up to 5 consecutive captchas
-            master_solver = captcha_solver.MasterSolver(config)
+            master_solver = captcha_solver.MasterSolver(config, log=self._log)
             
             for captcha_attempt in range(1, max_captcha_loops + 1):
                 self._log(f"Captcha attempt {captcha_attempt}/{max_captcha_loops} - Attempting MasterSolver...")

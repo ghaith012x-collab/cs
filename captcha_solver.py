@@ -1,7 +1,8 @@
-"""Discord hCaptcha Solver - Qwen2.5-VL powered.
-Replaces CLIP + Moondream with Qwen2.5-VL via Ollama.
-No PyTorch, no torchvision, no CLIP (saves ~2GB).
-Zero artificial delays. Max 2 rounds.
+"""
+Discord hCaptcha Solver - Qwen2.5-VL powered via Ollama.
+Accepts an optional log callback so debug output shows in the activity log.
+Resizes images before sending (saves ~90% bandwidth).
+Timeout increased to 120s for CPU inference.
 """
 
 import asyncio
@@ -13,7 +14,7 @@ import os
 import random
 import re
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -28,11 +29,10 @@ class SolverConfig:
     ollama_model: str = field(default_factory=lambda: os.environ.get(
         "OLLAMA_MODEL", "qwen2.5vl:3b"
     ))
-    ollama_timeout: int = 30
+    ollama_timeout: int = 120  # CPU inference is slow, needs 2min
     ollama_num_ctx: int = 2048
     ollama_temperature: float = 0.0
     max_rounds: int = 2
-    timeout: int = 30
 
 
 class OllamaVisionClient:
@@ -41,18 +41,13 @@ class OllamaVisionClient:
     _instance = None
     _session: Optional[aiohttp.ClientSession] = None
 
-    @classmethod
-    async def get_instance(cls, config: SolverConfig):
-        if cls._instance is None:
-            cls._instance = cls(config)
-        return cls._instance
-
-    def __init__(self, config: SolverConfig):
+    def __init__(self, config: SolverConfig, log: Optional[Callable] = None):
         self.base_url = config.ollama_base_url
         self.model = config.ollama_model
         self.timeout = config.ollama_timeout
         self.num_ctx = config.ollama_num_ctx
         self.temperature = config.ollama_temperature
+        self._log = log or (lambda msg, level="info": None)
 
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
@@ -73,18 +68,26 @@ class OllamaVisionClient:
                 "num_predict": max_tokens,
             }
         }
+        img_size_kb = len(image_b64) // 1024
+        self._log(f"[Ollama] Querying {self.model} (image: ~{img_size_kb}KB, timeout: {self.timeout}s)")
         try:
             async with session.post(f"{self.base_url}/api/generate", json=payload) as resp:
                 if resp.status == 200:
                     data = await resp.json()
-                    return data.get("response", "").strip()
-                print(f"Ollama error ({resp.status}): {await resp.text()}")
+                    response = data.get("response", "").strip()
+                    if response:
+                        self._log(f"[Ollama] Response: {response[:200]}")
+                    else:
+                        self._log("[Ollama] Empty response", level="warn")
+                    return response
+                err_text = await resp.text()
+                self._log(f"[Ollama] HTTP {resp.status}: {err_text[:200]}", level="error")
                 return ""
         except asyncio.TimeoutError:
-            print("Ollama request timed out")
+            self._log(f"[Ollama] TIMEOUT after {self.timeout}s — model too slow on this CPU", level="error")
             return ""
         except Exception as e:
-            print(f"Ollama request failed: {e}")
+            self._log(f"[Ollama] Error: {e}", level="error")
             return ""
 
     async def query_with_retry(self, prompt: str, image_b64: str, max_tokens: int = 300, retries: int = 1) -> str:
@@ -93,7 +96,7 @@ class OllamaVisionClient:
             if result:
                 return result
             if attempt < retries:
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(1)
         return ""
 
     async def close(self):
@@ -196,20 +199,35 @@ class Verifier:
         return False
 
 
+def _resize_b64(image_bytes: bytes, max_dim: int = 800) -> bytes:
+    """Resize image so longest side <= max_dim, return PNG bytes."""
+    img = Image.open(io.BytesIO(image_bytes))
+    w, h = img.size
+    if max(w, h) <= max_dim:
+        return image_bytes
+    scale = max_dim / max(w, h)
+    new_w, new_h = int(w * scale), int(h * scale)
+    img = img.resize((new_w, new_h), Image.LANCZOS)
+    buf = io.BytesIO()
+    img.save(buf, format="PNG", optimize=True)
+    return buf.getvalue()
+
+
 class GridSolver:
     """Solves grid captchas using Qwen2.5-VL vision."""
 
-    def __init__(self, config: SolverConfig):
+    def __init__(self, config: SolverConfig, log: Optional[Callable] = None):
         self.config = config
+        self._log = log or (lambda msg, level="info": None)
         self.ollama: Optional[OllamaVisionClient] = None
 
     async def _get_ollama(self):
         if self.ollama is None:
-            self.ollama = await OllamaVisionClient.get_instance(self.config)
+            self.ollama = OllamaVisionClient(self.config, log=self._log)
         return self.ollama
 
     async def solve(self, page: Page) -> bool:
-        print("GridSolver: Starting with Qwen2.5-VL...")
+        self._log("[GridSolver] Starting with Qwen2.5-VL...")
 
         iframe_selectors = [
             "iframe[src*='newassets.hcaptcha.com/captcha']",
@@ -222,12 +240,13 @@ class GridSolver:
                 loc = page.frame_locator(sel)
                 if await loc.locator("body").count() > 0:
                     iframe = page.locator(sel).first
+                    self._log(f"[GridSolver] Found iframe via: {sel}")
                     break
             except:
                 continue
 
         if not iframe:
-            print("GridSolver: No iframe found, using page screenshot")
+            self._log("[GridSolver] No iframe found, using page screenshot", level="warn")
             return await self._solve_page(page)
 
         challenge_text = ""
@@ -239,6 +258,7 @@ class GridSolver:
                     if await el.count() > 0:
                         challenge_text = (await el.first.text_content() or "").strip()
                         if challenge_text:
+                            self._log(f"[GridSolver] Challenge text: '{challenge_text}'")
                             break
                 except:
                     continue
@@ -248,14 +268,17 @@ class GridSolver:
         try:
             box = await iframe.bounding_box()
             if not box or box['width'] < 100:
+                self._log("[GridSolver] Iframe too small, using page screenshot", level="warn")
                 return await self._solve_page(page)
-            print(f"GridSolver: Iframe {box['width']:.0f}x{box['height']:.0f}")
+            self._log(f"[GridSolver] Iframe: {box['width']:.0f}x{box['height']:.0f} at ({box['x']:.0f},{box['y']:.0f})")
             screenshot_bytes = await page.screenshot(clip={
                 "x": box['x'], "y": box['y'],
                 "width": box['width'], "height": box['height']
             })
+            # Resize to save bandwidth and speed up inference
+            screenshot_bytes = _resize_b64(screenshot_bytes, max_dim=640)
         except Exception as e:
-            print(f"GridSolver: Screenshot failed: {e}")
+            self._log(f"[GridSolver] Screenshot failed: {e}", level="error")
             return await self._solve_page(page)
 
         b64 = base64.b64encode(screenshot_bytes).decode("utf-8")
@@ -267,25 +290,39 @@ Tiles are numbered 0-indexed left-to-right, top-to-bottom.
 Which tile numbers should be clicked?
 Reply with ONLY a JSON array. Example: [0,3,5] or []"""
 
-        print("GridSolver: Querying Qwen...")
+        self._log("[GridSolver] Querying Qwen...")
         answer = await ollama.query_with_retry(prompt, b64, max_tokens=100)
-        print(f"GridSolver: Qwen: {answer}")
+        self._log(f"[GridSolver] Qwen response: {answer[:200] if answer else 'EMPTY'}")
 
         tile_nums = self._parse_tiles(answer)
         if not tile_nums:
+            self._log("[GridSolver] Retrying with simpler prompt...")
             answer2 = await ollama.query_with_retry(
                 "Which numbered tiles to click? JSON array only.", b64, max_tokens=100)
-            print(f"GridSolver: Qwen retry: {answer2}")
+            if answer2:
+                self._log(f"[GridSolver] Retry response: {answer2[:200]}")
             tile_nums = self._parse_tiles(answer2)
 
         if not tile_nums:
-            print("GridSolver: No tiles identified")
+            self._log("[GridSolver] No tiles identified — Qwen couldn't parse the image", level="error")
             return False
 
-        print(f"GridSolver: Clicking tiles {tile_nums}")
-        tiles = await self._get_tiles(page, box)
+        self._log(f"[GridSolver] Clicking tiles: {tile_nums}")
+
+        try:
+            # Try to get individual tile positions from iframe
+            tiles = await self._get_tiles(page, box)
+        except:
+            tiles = []
+
         if not tiles:
-            return False
+            # Fall back to estimating grid positions
+            self._log("[GridSolver] Using estimated grid positions")
+            bx, by, bw, bh = box['x'], box['y'], box['width'], box['height']
+            tiles = []
+            for r in range(3):
+                for c in range(3):
+                    tiles.append((bx + c * bw // 3, by + r * bh // 3, bw // 3, bh // 3))
 
         for idx in tile_nums:
             if idx < len(tiles):
@@ -298,17 +335,23 @@ Reply with ONLY a JSON array. Example: [0,3,5] or []"""
         await self._click_verify(page)
         verifier = Verifier(page)
         await asyncio.sleep(1.0)
-        return await verifier.is_solved()
+        solved = await verifier.is_solved()
+        self._log(f"[GridSolver] {'SOLVED!' if solved else 'Still not solved'}")
+        return solved
 
     async def _solve_page(self, page: Page) -> bool:
+        self._log("[GridSolver] Using full-page screenshot fallback")
         screenshot_bytes = await page.screenshot()
+        screenshot_bytes = _resize_b64(screenshot_bytes, max_dim=640)
         b64 = base64.b64encode(screenshot_bytes).decode("utf-8")
         ollama = await self._get_ollama()
         answer = await ollama.query_with_retry(
             "Which numbered tiles to click in this hCaptcha grid? JSON array only.",
             b64, max_tokens=100)
+        self._log(f"[GridSolver] Fallback response: {answer[:200] if answer else 'EMPTY'}")
         tile_nums = self._parse_tiles(answer)
         if not tile_nums:
+            self._log("[GridSolver] Fallback failed — no tiles identified", level="error")
             return False
         img = Image.open(io.BytesIO(screenshot_bytes))
         w, h = img.size
@@ -357,12 +400,7 @@ Reply with ONLY a JSON array. Example: [0,3,5] or []"""
                             return positions
             except:
                 continue
-        bx, by, bw, bh = iframe_box['x'], iframe_box['y'], iframe_box['width'], iframe_box['height']
-        result = []
-        for r in range(3):
-            for c in range(3):
-                result.append((bx + c * bw // 3, by + r * bh // 3, bw // 3, bh // 3))
-        return result
+        return []
 
     async def _click_verify(self, page: Page):
         for sel in ["iframe[src*='newassets.hcaptcha.com/captcha']", "iframe[src*='hcaptcha.com/captcha']"]:
@@ -386,11 +424,12 @@ Reply with ONLY a JSON array. Example: [0,3,5] or []"""
 class SliderSolver:
     """Solves slider/puzzle captchas with OpenCV template matching."""
 
-    def __init__(self, config: SolverConfig):
+    def __init__(self, config: SolverConfig, log: Optional[Callable] = None):
         self.config = config
+        self._log = log or (lambda msg, level="info": None)
 
     async def solve(self, page: Page) -> bool:
-        print("SliderSolver: Solving with OpenCV...")
+        self._log("[SliderSolver] Solving with OpenCV...")
 
         handle_sel = track_sel = piece_sel = bg_sel = None
         groups = [
@@ -420,11 +459,11 @@ class SliderSolver:
                     break
 
         if not handle_sel:
-            print("SliderSolver: No slider found")
+            self._log("[SliderSolver] No slider found", level="warn")
             return False
 
         for attempt in range(2):
-            print(f"SliderSolver: Attempt {attempt + 1}/2")
+            self._log(f"[SliderSolver] Attempt {attempt + 1}/2")
             try:
                 await page.wait_for_selector(handle_sel, timeout=5000)
             except:
@@ -451,16 +490,17 @@ class SliderSolver:
             offset += random.randint(-3, 3)
             tr = tb['x'] + tb['width']
             tx = max(tb['x'] + 5, min(sx + offset, tr - hb['width'] / 2))
-            print(f"SliderSolver: Dragging to {tx:.0f} (offset={offset})")
+            self._log(f"[SliderSolver] Dragging to {tx:.0f} (offset={offset})")
 
             await HumanMouse.human_drag(page, sx, sy, tx, sy)
             await asyncio.sleep(0.8)
 
             if await Verifier(page).is_solved():
-                print("SliderSolver: SOLVED!")
+                self._log("[SliderSolver] SOLVED!")
                 return True
 
             await asyncio.sleep(0.5)
+        self._log("[SliderSolver] Failed after 2 attempts", level="error")
         return False
 
     async def _bounds(self, page: Page, sel: str) -> Optional[dict]:
@@ -513,18 +553,19 @@ class SliderSolver:
 class MasterSolver:
     """Routes to GridSolver (Qwen) or SliderSolver (OpenCV)."""
 
-    def __init__(self, config: SolverConfig):
+    def __init__(self, config: SolverConfig, log: Optional[Callable] = None):
         self.config = config
-        self.grid = GridSolver(config)
-        self.slider = SliderSolver(config)
+        self._log = log or (lambda msg, level="info": None)
+        self.grid = GridSolver(config, log=self._log)
+        self.slider = SliderSolver(config, log=self._log)
 
     async def solve(self, page: Page) -> bool:
-        print("MasterSolver: Detecting challenge type...")
+        self._log("[MasterSolver] Detecting challenge type...")
         ctype = await self._detect(page)
-        print(f"MasterSolver: Detected = '{ctype}'")
+        self._log(f"[MasterSolver] Detected = '{ctype}'")
         solver = self.slider if ctype == "slider" else self.grid
         success = await solver.solve(page)
-        print(f"MasterSolver: {'SUCCESS' if success else 'FAILED'}")
+        self._log(f"[MasterSolver] {'SUCCESS' if success else 'FAILED'}")
         return success
 
     async def _detect(self, page: Page) -> str:
@@ -558,8 +599,7 @@ async def main():
     print("=" * 60)
     print(f"  Ollama: {config.ollama_base_url}")
     print(f"  Model:  {config.ollama_model}")
-    print("  Solvers: GridSolver (Qwen) | SliderSolver (OpenCV)")
-    print("=" * 60)
+    print("= " * 30)
 
 
 if __name__ == "__main__":
