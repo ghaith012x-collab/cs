@@ -28,6 +28,9 @@ import aiohttp
 # YOLO AI Vision (loaded lazily on first use)
 import vision_ai
 
+# Knowledge Database (auto-learning)
+from database import KnowledgeDB
+
 
 @dataclass
 class SolverConfig:
@@ -49,6 +52,91 @@ def _resize(img: Image.Image, max_dim: int = 224) -> Image.Image:
         return img
     s = max_dim / max(w, h)
     return img.resize((int(w * s), int(h * s)), Image.LANCZOS)
+
+
+def _smart_crop(img: Image.Image, padding: float = 0.15) -> Image.Image:
+    """Smart-crop an image to focus on the main content/symbol.
+    
+    Uses OpenCV contour detection + edge detection to find the bounding
+    box of non-background content, then crops with padding so the symbol
+    is clearly visible but unnecessary whitespace is removed.
+    
+    Args:
+        img: PIL Image to crop
+        padding: Fraction of the content box to add as border (0.0-0.5)
+    
+    Returns:
+        Cropped PIL Image (or original if cropping fails)
+    """
+    try:
+        # Convert PIL to numpy array
+        arr = np.array(img)
+        
+        # Handle grayscale vs color
+        if len(arr.shape) == 2:
+            gray = arr
+        else:
+            gray = cv2.cvtColor(arr, cv2.COLOR_RGB2GRAY)
+        
+        h, w = gray.shape
+        if h < 20 or w < 20:
+            return img
+        
+        # Multiple detection strategies combined
+        # Strategy 1: Adaptive threshold
+        thresh = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                                        cv2.THRESH_BINARY_INV, 11, 2)
+        
+        # Strategy 2: Canny edges
+        edges = cv2.Canny(gray, 30, 100)
+        
+        # Strategy 3: Standard threshold (mean-based)
+        _, otsu = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+        
+        # Combine strategies
+        combined = cv2.bitwise_or(thresh, edges)
+        combined = cv2.bitwise_or(combined, otsu)
+        
+        # Morphological close to connect nearby regions
+        kernel = np.ones((5, 5), np.uint8)
+        combined = cv2.morphologyEx(combined, cv2.MORPH_CLOSE, kernel)
+        
+        # Find contours
+        contours, _ = cv2.findContours(combined, cv2.RETR_EXTERNAL,
+                                        cv2.CHAIN_APPROX_SIMPLE)
+        
+        if not contours:
+            return img
+        
+        # Find the largest contour by area
+        largest = max(contours, key=cv2.contourArea)
+        x, y, cw, ch = cv2.boundingRect(largest)
+        
+        # Reject tiny crops (noise)
+        if cw < 10 or ch < 10 or cw * ch < 200:
+            return img
+        
+        # Reject crops that are nearly the full image (already well-framed)
+        if cw > w * 0.9 and ch > h * 0.9:
+            return img
+        
+        # Add padding around the content
+        pad_x = int(cw * padding)
+        pad_y = int(ch * padding)
+        
+        x1 = max(0, x - pad_x)
+        y1 = max(0, y - pad_y)
+        x2 = min(w, x + cw + pad_x)
+        y2 = min(h, y + ch + pad_y)
+        
+        # Ensure minimum size
+        if x2 - x1 < 20 or y2 - y1 < 20:
+            return img
+        
+        cropped = img.crop((x1, y1, x2, y2))
+        return cropped
+    except Exception:
+        return img
 
 
 def _b64(img: Image.Image) -> str:
@@ -309,10 +397,12 @@ async def _click_verify(page: Page):
 # ═══════════════════════════════════════════════════════════
 
 class GridSolver:
-    def __init__(self, config: SolverConfig, log: Optional[Callable] = None):
+    def __init__(self, config: SolverConfig, log: Optional[Callable] = None,
+                 db: Optional[KnowledgeDB] = None):
         self.config = config
         self._log = log or (lambda *a: None)
         self.ollama: Optional[OllamaClient] = None
+        self.db = db or KnowledgeDB()
 
     async def solve(self, page: Page) -> bool:
         self._log("[Grid] Starting...")
@@ -380,6 +470,30 @@ class GridSolver:
         await asyncio.sleep(1.5)
         ok = await Verifier(page).solved()
         self._log(f"[Grid] {'✓' if ok else '✗'}")
+        
+        # Save tiles to knowledge database
+        if not self.db._noop and tiles_pil:
+            class_name = self._extract_subject(text) if text else 'unknown'
+            tile_records = []
+            for idx in nums:
+                if idx < len(tiles_pil):
+                    import io
+                    # Crop the tile to focus on the symbol, with padding
+                    cropped = _smart_crop(tiles_pil[idx], padding=0.15)
+                    buf = io.BytesIO()
+                    cropped.save(buf, format='PNG', optimize=True)
+                    b64 = base64.b64encode(buf.getvalue()).decode()
+                    tile_records.append({
+                        'class_name': class_name,
+                        'image_b64': b64,
+                        'challenge': text[:100] if text else '',
+                        'confidence': 1.0,
+                        'success': ok,
+                    })
+            if tile_records:
+                asyncio.ensure_future(self.db.save_tiles_batch(tile_records))
+                self._log(f"[Grid] Saved {len(tile_records)} tiles to DB [{class_name}]")
+        
         return ok
 
     async def _solve_yolo(self, page: Page, iframe_screenshot: Optional[bytes] = None) -> Optional[List[int]]:
@@ -606,9 +720,11 @@ class DragSolver:
     3. Systematic grid heuristics — sweeps full iframe with L→R drags at all positions
     """
 
-    def __init__(self, config: SolverConfig, log: Optional[Callable] = None):
+    def __init__(self, config: SolverConfig, log: Optional[Callable] = None,
+                 db: Optional[KnowledgeDB] = None):
         self.config = config
         self._log = log or (lambda *a: None)
+        self.db = db or KnowledgeDB()
 
     async def solve(self, page: Page) -> bool:
         self._log("[Drag] Starting...")
@@ -635,6 +751,7 @@ class DragSolver:
             if await self._try_drag(page, *js_coords, 'JS', fast=True):
                 await self._save_template_on_success(page, iframe, box,
                                                      (js_coords[0], js_coords[1], js_coords[2], js_coords[3]), template_key)
+                await self._save_to_db(iframe, box, text, True, 'js', *js_coords)
                 return True
 
         # ── Method 1: YOLO AI OBJECT DETECTION ──
@@ -644,9 +761,10 @@ class DragSolver:
         if yolo_result:
             sx, sy, ex, ey, cls_src, cls_tgt, conf_src, conf_tgt = yolo_result
             self._log(f'[Drag] YOLO: {cls_src}({conf_src}%)→{cls_tgt}({conf_tgt}%) at ({sx:.0f},{sy:.0f})→({ex:.0f},{ey:.0f})')
-            if await self._try_drag(page, sx, sy, ex, ey, 'YOLO', fast=True):
+            if await self._try_drag(page, sx, sy, ex, ey, "YOLO", fast=True):
                 await self._save_template_on_success(page, iframe, box,
                                                      (sx, sy, ex, ey), template_key)
+                await self._save_to_db(iframe, box, text, True, 'yolo', sx, sy, ex, ey)
                 return True
 
         # ── Method 1: OPENCV CANVAS OBJECT DETECTION ──
@@ -657,11 +775,13 @@ class DragSolver:
                 if await self._try_drag(page, sx, sy, ex, ey, f'CV{i}', fast=True):
                     await self._save_template_on_success(page, iframe, box,
                                                          (sx, sy, ex, ey), template_key)
+                    await self._save_to_db(iframe, box, text, True, f'opencv_{i}', sx, sy, ex, ey)
                     return True
 
         # ── Method 2: VISUAL MUSCLE MEMORY ──
         if template_key and template_key != 'target':
             if await self._try_muscle_memory(page, iframe, box, template_key):
+                await self._save_to_db(iframe, box, text, True, 'muscle_memory')
                 return True
 
         # ── Method 3: HUMAN-LIKE Y-SWEEP ──
@@ -692,6 +812,7 @@ class DragSolver:
             
             if await self._try_drag(page, sx, sy, ex, ey, f'Y-{idx}', fast=True):
                 await self._save_template_on_success(page, iframe, box, (sx, sy, ex, ey), template_key)
+                await self._save_to_db(iframe, box, text, True, f'sweep_{idx}', sx, sy, ex, ey)
                 return True
         
         # Pass 2: Offset positions (different start/end X + varied Y)
@@ -708,10 +829,52 @@ class DragSolver:
             
             if await self._try_drag(page, sx, sy, ex, ey, f'Y2-{idx}', fast=True):
                 await self._save_template_on_success(page, iframe, box, (sx, sy, ex, ey), template_key)
+                await self._save_to_db(iframe, box, text, True, f'sweep2_{idx}', sx, sy, ex, ey)
                 return True
         
+        # Save failure to DB too (so we know what didn't work)
+        await self._save_to_db(iframe, box, text, False, 'failed')
         self._log('[Drag] ✗ Y-sweep failed', level='error')
         return False
+
+    async def _save_to_db(self, iframe, box: dict, text: str, success: bool,
+                           solved_by: str, sx: float = 0, sy: float = 0,
+                           ex: float = 0, ey: float = 0):
+        """Save drag challenge to knowledge database."""
+        if self.db._noop:
+            return
+        try:
+            raw = await iframe.screenshot() if iframe else None
+            if raw and len(raw) > 100:
+                # Smart-crop the iframe screenshot to focus on drag objects
+                try:
+                    from PIL import Image
+                    import io
+                    drag_img = Image.open(io.BytesIO(raw))
+                    cropped = _smart_crop(drag_img, padding=0.1)
+                    buf = io.BytesIO()
+                    cropped.save(buf, format='PNG', optimize=True)
+                    iframe_b64 = base64.b64encode(buf.getvalue()).decode()
+                except Exception:
+                    iframe_b64 = base64.b64encode(raw).decode()
+            else:
+                iframe_b64 = ''
+            
+            obj_class, tgt_class = self._extract_drag_subjects(text)
+            
+            await self.db.save_drag(
+                class_name=obj_class,
+                target_class=tgt_class,
+                iframe_b64=iframe_b64,
+                object_x=sx, object_y=sy,
+                target_x=ex, target_y=ey,
+                challenge_text=text[:200] if text else '',
+                success=success,
+                solved_by=solved_by,
+            )
+            self._log(f"[Drag] Saved {obj_class}→{tgt_class} to DB ({'✓' if success else '✗'})")
+        except Exception as e:
+            self._log(f"[Drag] DB save error: {e}", level='warn')
 
     async def _js_find_drag_elements(self, page: Page, iframe, box: dict) -> Optional[Tuple]:
         """Find drag object + target by injecting JS into the hCaptcha iframe.
@@ -1203,9 +1366,11 @@ class DragSolver:
 # ═══════════════════════════════════════════════════════════
 
 class SliderSolver:
-    def __init__(self, config: SolverConfig, log: Optional[Callable] = None):
+    def __init__(self, config: SolverConfig, log: Optional[Callable] = None,
+                 db: Optional[KnowledgeDB] = None):
         self.config = config
         self._log = log or (lambda *a: None)
+        self.db = db or KnowledgeDB()
 
     async def solve(self, page: Page) -> bool:
         self._log("[Slider] Starting...")
@@ -1238,10 +1403,26 @@ class SliderSolver:
             await asyncio.sleep(0.6)
             if await Verifier(page).solved():
                 self._log("[Slider] ✓")
+                # Save to DB
+                if not self.db._noop:
+                    try:
+                        raw = await page.screenshot(clip={
+                            'x': hb['x'] - 20, 'y': hb['y'] - 20,
+                            'width': 300, 'height': hb['height'] + 40
+                        }) if hb else None
+                        b64 = base64.b64encode(raw).decode() if raw else ''
+                        asyncio.ensure_future(self.db.save_slider(
+                            screenshot_b64=b64, offset_px=offset,
+                            success=True))
+                    except Exception as e:
+                        self._log(f"[Slider] DB save error: {e}", level='warn')
                 return True
             await Mouse.drag(page, tx, sy, sx, sy)
             await asyncio.sleep(0.4)
 
+        # Save failure
+        if not self.db._noop:
+            asyncio.ensure_future(self.db.save_slider(success=False))
         self._log("[Slider] ✗", level="error")
         return False
 
@@ -1335,13 +1516,14 @@ class SliderSolver:
 # ═══════════════════════════════════════════════════════════
 
 class MasterSolver:
-    def __init__(self, config: SolverConfig, log: Optional[Callable] = None):
+    def __init__(self, config: SolverConfig, log: Optional[Callable] = None,
+                 db: Optional[KnowledgeDB] = None):
         self.config = config
         self._log = log or (lambda *a: None)
-        self.grid = GridSolver(config, log=self._log)
-        self.drag = DragSolver(config, log=self._log)
-        self.slider = SliderSolver(config, log=self._log)
-
+        self.db = db or KnowledgeDB()
+        self.grid = GridSolver(config, log=self._log, db=self.db)
+        self.drag = DragSolver(config, log=self._log, db=self.db)
+        self.slider = SliderSolver(config, log=self._log, db=self.db)
     async def solve(self, page: Page) -> bool:
         self._log("[Master] Detecting challenge type...")
         ctype = await self._detect(page)

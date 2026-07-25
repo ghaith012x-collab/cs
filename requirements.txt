@@ -7,3 +7,4 @@ opencv-python-headless>=4.9.0
 onnxruntime>=1.17.0
 onnx>=1.16.0
 protobuf>=3.20.0
+asyncpg>=0.29.0
