@@ -2,8 +2,8 @@
 Farm Module — automated hCaptcha demo farming for recognition training.
 
 Navigates to https://accounts.hcaptcha.com/demo, fills the field, clicks
-the checkbox, then solves every captcha that appears — saving every tile,
-symbol, and detection to the Knowledge Database.
+the checkbox, then captures every captcha that appears — saving every tile,
+symbol, and detection to the Knowledge Database (no solving).
 
 The farm page shows:
   - Live screenshot feed (cam)
@@ -81,10 +81,13 @@ class FarmSession:
     def __init__(self, db: Optional[KnowledgeDB] = None,
                  log: Optional[Callable] = None):
         self.db = db or KnowledgeDB()
-        self._log = log or (lambda msg, level="info": None)
+        if log:
+            self._external_log = log
+        else:
+            self._external_log = None
 
         self.running = False
-        self.mode = "demo"  # 'demo' or 'discord'
+        self.mode = "demo"
         self.captchas_captured = 0
         self.tiles_saved_total = 0
         self.recognitions: list[Recognition] = []
@@ -101,14 +104,17 @@ class FarmSession:
         # Solver (only used for Moondream tile analysis, NOT for actual solving)
         self._solver_config = SolverConfig()
         self._grid_solver: Optional[GridSolver] = None
-        self._ollama = None
         self._screenshot_task: Optional[asyncio.Task] = None
         self._farm_task: Optional[asyncio.Task] = None
         self._latest_screenshot_b64 = ""
 
     def _log(self, msg: str, level: str = "info"):
         """Log a farm message (stored + printed)."""
-        print(f"[Farm][{level.upper()}] {msg}", flush=True)
+        line = f"[Farm][{level.upper()}] {msg}"
+        print(line, flush=True)
+        if self._external_log:
+            try: self._external_log(msg, level)
+            except: pass
         self._farm_logs.append({"time": time.strftime("%H:%M:%S"), "msg": msg, "level": level})
         if len(self._farm_logs) > self._max_logs:
             self._farm_logs = self._farm_logs[-self._max_logs:]
@@ -229,11 +235,12 @@ class FarmSession:
     async def _demo_farming_loop(self):
         """Farming loop for hCaptcha demo page."""
         try:
-            self._log(f"Navigating to hCaptcha demo...")
-            await self._page.goto(self.DEMO_URL, wait_until='domcontentloaded', timeout=30000)
-            await asyncio.sleep(3)
+            self._log("Navigating to hCaptcha demo...")
+            await self._page.goto(self.DEMO_URL, wait_until='domcontentloaded', timeout=60000)
+            await asyncio.sleep(4)
 
             await self._fill_first_input()
+            await asyncio.sleep(0.5)
             await self._click_hcaptcha()
 
             rounds = 0
@@ -245,13 +252,13 @@ class FarmSession:
                 if captured:
                     self.captchas_captured += 1
 
-                # Refresh page for next captcha
                 if self.running:
                     self._log("Refreshing page for next captcha...")
                     try:
-                        await self._page.goto(self.DEMO_URL, wait_until='domcontentloaded', timeout=20000)
-                        await asyncio.sleep(2)
+                        await self._page.goto(self.DEMO_URL, wait_until='domcontentloaded', timeout=30000)
+                        await asyncio.sleep(3)
                         await self._fill_first_input()
+                        await asyncio.sleep(0.5)
                         await self._click_hcaptcha()
                     except Exception as e:
                         self._log(f"Refresh error: {e}", level="warn")
@@ -269,10 +276,7 @@ class FarmSession:
     # ── Discord Mode Farming ──────────────────────────────
 
     async def _discord_farming_loop(self):
-        """Farming loop for Discord register page.
-        
-        Fills random info, triggers captcha, captures tiles, refreshes.
-        """
+        """Farming loop for Discord register page."""
         try:
             rounds = 0
             while self.running and rounds < 500:
@@ -280,18 +284,14 @@ class FarmSession:
                 self._log(f"Discord round {rounds}...")
 
                 try:
-                    # Navigate to Discord register
-                    await self._page.goto(self.DISCORD_URL, wait_until='domcontentloaded', timeout=30000)
-                    await asyncio.sleep(4)
+                    await self._page.goto(self.DISCORD_URL, wait_until='domcontentloaded', timeout=60000)
+                    await asyncio.sleep(5)
 
-                    # Fill random form
                     await self._fill_discord_form()
                     await asyncio.sleep(1)
 
-                    # Click Create Account to trigger captcha
                     await self._click_create_account()
 
-                    # Wait and capture captcha
                     captured = await self._capture_captcha("discord")
                     if captured:
                         self.captchas_captured += 1
@@ -314,11 +314,9 @@ class FarmSession:
         try:
             self._log("Filling Discord form with random info...")
 
-            # Random email
             rand_str = ''.join(random.choices('abcdefghijklmnopqrstuvwxyz', k=10))
             email = f"{rand_str}@gmail.com"
 
-            # Random display name (8-12 chars)
             consonants = 'bcdfghjklmnpqrstvwxyz'
             vowels = 'aeiou'
             name_len = random.randint(8, 12)
@@ -326,16 +324,13 @@ class FarmSession:
             for i in range(name_len):
                 name += random.choice(consonants) if random.random() < 0.65 else random.choice(vowels)
 
-            # Random username (same as display name)
             username = name
 
-            # Random strong password
             specials = '!@#$%&*'
             password = random.choice('ABCDEFGHJKLMNPQRSTUVWXYZ') + \
                        ''.join(random.choices(consonants, k=8)) + \
                        random.choice(specials) + str(random.randint(10, 99))
 
-            # DOB under 2000 (18+)
             month = random.randint(1, 12)
             day = random.randint(1, 28)
             year = random.randint(1980, 1999)
@@ -346,13 +341,11 @@ class FarmSession:
             self._log(f"Random email: {email}")
             self._log(f"Random DOB: {month_name} {day}, {year}")
 
-            # Fill email
             email_input = await self._page.query_selector('input[name="email"]')
             if email_input:
                 await email_input.fill(email)
                 await asyncio.sleep(0.3)
 
-            # Fill display name
             display_input = await self._page.query_selector('input[name="global_name"]')
             if not display_input:
                 display_input = await self._page.query_selector('input[name="username"]')
@@ -360,19 +353,16 @@ class FarmSession:
                 await display_input.fill(name)
                 await asyncio.sleep(0.3)
 
-            # Fill username if separate field
             user_input = await self._page.query_selector('input[name="username"]')
             if user_input and user_input != display_input:
                 await user_input.fill(username)
                 await asyncio.sleep(0.3)
 
-            # Fill password
             pass_input = await self._page.query_selector('input[name="password"]')
             if pass_input:
                 await pass_input.fill(password)
                 await asyncio.sleep(0.3)
 
-            # DOB - try clicking each dropdown
             await self._select_dob("Month", month_name)
             await self._select_dob("Day", str(day))
             await self._select_dob("Year", str(year))
@@ -383,7 +373,6 @@ class FarmSession:
             self._log(f"Discord form error: {e}", level="warn")
 
     async def _select_dob(self, label: str, value: str):
-        """Click a DOB dropdown and select a value."""
         try:
             placeholder = self._page.get_by_text(label, exact=True)
             if await placeholder.count() > 0:
@@ -397,7 +386,6 @@ class FarmSession:
             pass
 
     async def _click_create_account(self):
-        """Click the Create Account button to trigger captcha."""
         try:
             self._log("Clicking Create Account...")
             btn = await self._page.query_selector('button[type="submit"]')
@@ -406,7 +394,6 @@ class FarmSession:
                 self._log("Create Account clicked")
                 await asyncio.sleep(3)
             else:
-                # Try by text
                 btn2 = self._page.locator('button:has-text("Create Account")')
                 if await btn2.count() > 0:
                     await btn2.first.click()
@@ -531,14 +518,12 @@ class FarmSession:
                 if not frame_info:
                     self._log("No captcha found", level="warn")
                     return False
-                # Iframe exists but no text yet — wait a bit more
                 await asyncio.sleep(3)
                 captcha_text = await _challenge_text(self._page) or "unknown"
 
             self._log(f"🎯 Captcha detected: '{captcha_text[:80]}'")
             rec.challenge_text = captcha_text
 
-            # Detect type + extract objects from challenge text
             ctype = await self._detect_farm_challenge(self._page)
             rec.challenge_type = ctype
             objects = self._extract_objects(captcha_text, ctype)
@@ -557,40 +542,40 @@ class FarmSession:
                     pass
 
                 # Get individual tile images
-                tiles_pil, tile_boxes = await self._grid_solver._get_tiles_dom(self._page, box)
-                if not tiles_pil:
-                    self._log("  No tiles found in DOM, splitting screenshot")
-                    raw = await self._page.screenshot(clip={
-                        "x": box["x"], "y": box["y"],
-                        "width": box["width"], "height": box["height"]
-                    })
-                    tiles_pil = self._grid_solver._split_grid(raw)
-
-                rec.tiles_captured = len(tiles_pil)
-                self._log(f"  Tiles captured: {len(tiles_pil)}")
-
-                # Save tiles to database with class name from challenge text
-                if tiles_pil and not self.db._noop:
-                    class_name = objects[0] if objects else "unknown"
-                    tile_records = []
-                    for i, tile in enumerate(tiles_pil):
-                        cropped = _smart_crop(tile, padding=0.15)
-                        buf = io.BytesIO()
-                        cropped.save(buf, format='PNG', optimize=True)
-                        b64 = base64.b64encode(buf.getvalue()).decode()
-                        tile_records.append({
-                            'class_name': class_name,
-                            'image_b64': b64,
-                            'challenge': captcha_text[:100],
-                            'confidence': 0.9,
-                            'success': True,
+                if self._grid_solver:
+                    tiles_pil, tile_boxes = await self._grid_solver._get_tiles_dom(self._page, box)
+                    if not tiles_pil:
+                        self._log("  No tiles found in DOM, splitting screenshot")
+                        raw = await self._page.screenshot(clip={
+                            "x": box["x"], "y": box["y"],
+                            "width": box["width"], "height": box["height"]
                         })
-                    saved = await self.db.save_tiles_batch(tile_records)
-                    rec.tiles_saved = saved
-                    self.tiles_saved_total += saved
-                    self._log(f"  💾 Saved {saved} tiles to DB [{class_name}]")
+                        tiles_pil = self._grid_solver._split_grid(raw)
 
-            # Record recognition
+                    rec.tiles_captured = len(tiles_pil) if tiles_pil else 0
+                    self._log(f"  Tiles captured: {rec.tiles_captured}")
+
+                    # Save tiles to database
+                    if tiles_pil and not self.db._noop:
+                        class_name = objects[0] if objects else "unknown"
+                        tile_records = []
+                        for tile in tiles_pil:
+                            cropped = _smart_crop(tile, padding=0.15)
+                            buf = io.BytesIO()
+                            cropped.save(buf, format='PNG', optimize=True)
+                            b64 = base64.b64encode(buf.getvalue()).decode()
+                            tile_records.append({
+                                'class_name': class_name,
+                                'image_b64': b64,
+                                'challenge': captcha_text[:100],
+                                'confidence': 0.9,
+                                'success': True,
+                            })
+                        saved = await self.db.save_tiles_batch(tile_records)
+                        rec.tiles_saved = saved
+                        self.tiles_saved_total += saved
+                        self._log(f"  💾 Saved {saved} tiles to DB [{class_name}]")
+
             rec.time_taken = time.time() - start
             self.recognitions.append(rec)
             if len(self.recognitions) > self._max_recognitions:
@@ -617,33 +602,9 @@ class FarmSession:
         tl = text.lower()
         if any(w in tl for w in ['drag', 'move', 'slide to', 'place', 'put']):
             return "drag"
-        if any(w in tl for w in ['odd', 'different', 'does not belong', 'dissapearing']):
+        if any(w in tl for w in ['odd', 'different', 'does not belong', 'dissapearing', 'disappearing']):
             return "odd_one_out"
         return "grid"
-
-    # ── Status ────────────────────────────────────────────
-
-    def get_status(self) -> dict:
-        return {
-            "running": self.running,
-            "mode": self.mode,
-            "captchas_captured": self.captchas_captured,
-            "tiles_saved_total": self.tiles_saved_total,
-            "recognitions_count": len(self.recognitions),
-            "latest_recognition": self.recognitions[-1].to_dict() if self.recognitions else None,
-        }
-
-    def get_recent_recognitions(self, count: int = 30) -> list:
-        recent = self.recognitions[-count:] if self.recognitions else []
-        return [r.to_dict() for r in reversed(recent)]
-
-    def get_logs(self, count: int = 50) -> list:
-        return self._farm_logs[-count:]
-
-    async def close(self):
-        await self.stop()
-
-    # ── Object extraction (reused from captcha_solver) ────
 
     @staticmethod
     def _extract_objects(text: str, ctype: str = "grid") -> list:
@@ -655,23 +616,23 @@ class FarmSession:
 
         if any(w in t for w in ['odd', 'different', 'does not belong',
                                  'disappearing', 'dissapearing']):
-            animals = ['lion', 'tiger', 'bear', 'elephant', 'gorilla', 'monkey',
-                       'zebra', 'giraffe', 'hippo', 'rhino', 'camel', 'deer',
-                       'fox', 'wolf', 'rabbit', 'squirrel', 'mouse', 'rat',
-                       'bat', 'whale', 'dolphin', 'seal', 'penguin', 'owl',
-                       'eagle', 'hawk', 'parrot', 'crow', 'raven', 'swan',
-                       'duck', 'goose', 'chicken', 'rooster', 'hen', 'turkey',
-                       'peacock', 'ostrich', 'flamingo', 'pigeon', 'sparrow',
-                       'robin', 'blue jay', 'butterfly', 'dragonfly', 'bee', 'ant',
-                       'spider', 'scorpion', 'crab', 'lobster', 'snail', 'snake',
-                       'lizard', 'turtle', 'frog', 'toad', 'crocodile', 'alligator',
-                       'star', 'moon', 'sun', 'cloud', 'rainbow', 'lightning',
-                       'snowflake', 'heart', 'diamond', 'circle', 'square',
-                       'triangle', 'rectangle', 'pentagon', 'hexagon', 'octagon',
-                       'rocket', 'spaceship', 'rocketship', 'ufo', 'alien',
-                       'robot', 'car', 'bus', 'truck', 'train', 'bicycle',
-                       'motorcycle', 'airplane', 'helicopter', 'boat', 'ship']
-            for a in animals:
+            known = ['lion', 'tiger', 'bear', 'elephant', 'gorilla', 'monkey',
+                     'zebra', 'giraffe', 'hippo', 'rhino', 'camel', 'deer',
+                     'fox', 'wolf', 'rabbit', 'squirrel', 'mouse', 'rat',
+                     'bat', 'whale', 'dolphin', 'seal', 'penguin', 'owl',
+                     'eagle', 'hawk', 'parrot', 'crow', 'raven', 'swan',
+                     'duck', 'goose', 'chicken', 'rooster', 'hen', 'turkey',
+                     'peacock', 'ostrich', 'flamingo', 'pigeon', 'sparrow',
+                     'robin', 'blue jay', 'butterfly', 'dragonfly', 'bee', 'ant',
+                     'spider', 'scorpion', 'crab', 'lobster', 'snail', 'snake',
+                     'lizard', 'turtle', 'frog', 'toad', 'crocodile', 'alligator',
+                     'star', 'moon', 'sun', 'cloud', 'rainbow', 'lightning',
+                     'snowflake', 'heart', 'diamond', 'circle', 'square',
+                     'triangle', 'rectangle', 'pentagon', 'hexagon', 'octagon',
+                     'rocket', 'spaceship', 'rocketship', 'ufo', 'alien',
+                     'robot', 'car', 'bus', 'truck', 'train', 'bicycle',
+                     'motorcycle', 'airplane', 'helicopter', 'boat', 'ship']
+            for a in known:
                 if a in t:
                     objects.append(a)
             if not objects:
@@ -715,280 +676,24 @@ class FarmSession:
             objects.append("unknown")
         return objects
 
-    async def _fill_demo_form(self):
-        """Fill the email field in the hCaptcha demo with 1 character."""
-        try:
-            self._log("[Farm] Filling email field with 1 character...")
-            # hCaptcha demo uses an input with name="email" or id="email"
-            email_input = await self._page.query_selector(
-                'input[name="email"], input[type="email"], #email, '
-                'input[placeholder*="email"], input[placeholder*="Email"]'
-            )
-            if email_input:
-                char = random.choice('abcdefghijklmnopqrstuvwxyz')
-                await email_input.fill(char)
-                self._log(f"[Farm] Filled email with '{char}'")
-                await asyncio.sleep(0.5)
-            else:
-                self._log("[Farm] Email field not found, trying generic input...")
-                inputs = await self._page.query_selector_all('input')
-                if inputs:
-                    char = random.choice('abcdefghijklmnopqrstuvwxyz')
-                    await inputs[0].fill(char)
-                    await asyncio.sleep(0.5)
-        except Exception as e:
-            self._log(f"[Farm] Fill form error: {e}", level="warn")
-
-    async def _click_checkbox(self):
-        """Click the hCaptcha checkbox to trigger a challenge."""
-        try:
-            self._log("[Farm] Clicking hCaptcha checkbox...")
-
-            # Look for the hCaptcha iframe and its checkbox
-            checkbox_selectors = [
-                'iframe[src*="hcaptcha.com"][title*="checkbox"]',
-                'iframe[src*="hcaptcha.com"][aria-label*="checkbox"]',
-                'iframe[title*="checkbox"]',
-                'iframe[src*="hcaptcha.com"]',
-            ]
-
-            clicked = False
-            for sel in checkbox_selectors:
-                try:
-                    frame_el = await self._page.query_selector(sel)
-                    if frame_el:
-                        frame = await frame_el.content_frame()
-                        if frame:
-                            cb = await frame.query_selector('#checkbox')
-                            if cb:
-                                await cb.click()
-                                clicked = True
-                                self._log("[Farm] Checkbox clicked via iframe")
-                                break
-                except:
-                    continue
-
-            # Fallback: try to click the center of any hCaptcha iframe
-            if not clicked:
-                for sel in ['iframe[src*="hcaptcha.com"]']:
-                    try:
-                        boxes = await self._page.locator(sel).bounding_box()
-                        if boxes:
-                            x = boxes['x'] + boxes['width'] / 2
-                            y = boxes['y'] + boxes['height'] / 2
-                            await self._page.mouse.click(x, y)
-                            clicked = True
-                            self._log("[Farm] Checkbox clicked via coordinates")
-                            break
-                    except:
-                        continue
-
-            if not clicked:
-                self._log("[Farm] Could not find hCaptcha checkbox", level="warn")
-
-            await asyncio.sleep(2)
-
-        except Exception as e:
-            self._log(f"[Farm] Click checkbox error: {e}", level="warn")
-
-    async def _wait_and_solve(self) -> bool:
-        """Wait for a captcha challenge to appear and solve it.
-        
-        Returns True if solved successfully.
-        Records recognition data for the dashboard.
-        """
-        start_time = time.time()
-        rec = Recognition(timestamp=start_time)
-
-        try:
-            # Wait for captcha to appear (up to 15s)
-            self._log("[Farm] Waiting for captcha challenge...")
-            captcha_appeared = False
-            for _ in range(30):  # 30 * 0.5s = 15s
-                if not self.running:
-                    return False
-                text = await _challenge_text(self._page)
-                if text:
-                    captcha_appeared = True
-                    rec.challenge_text = text
-                    self._log(f"[Farm] Captcha detected: '{text[:60]}'")
-                    break
-                await asyncio.sleep(0.5)
-
-            if not captcha_appeared:
-                # Check if there's an hCaptcha iframe at all
-                frame_info = await _find_iframe(self._page)
-                if not frame_info:
-                    self._log("[Farm] No captcha iframe found", level="warn")
-                return False
-
-            # Determine challenge type
-            ctype = await self._detect_farm_challenge(self._page)
-            rec.challenge_type = ctype
-            self._log(f"[Farm] Challenge type: {ctype}")
-
-            # Extract objects from the challenge text
-            objects = self._extract_objects(rec.challenge_text, ctype)
-            rec.objects_found = objects
-            rec.objects_count = len(objects)
-            self._log(f"[Farm] Objects: {objects}")
-
-            # Use the MasterSolver to solve it
-            if self._solver:
-                solution_start = time.time()
-                ok = await self._solver.solve(self._page)
-                solve_time = time.time() - solution_start
-                rec.time_taken = solve_time
-                rec.success = ok
-
-                if ok:
-                    self._log(f"[Farm] ✓ Solved! ({solve_time:.1f}s)")
-                    # Save a screenshot of the solved captcha
-                    if self._page and not self._page.is_closed():
-                        try:
-                            raw = await self._page.screenshot(full_page=False)
-                            rec.screenshot_b64 = base64.b64encode(raw).decode()
-                        except:
-                            pass
-                else:
-                    self._log(f"[Farm] ✗ Failed ({solve_time:.1f}s)")
-
-            # Record recognition
-            rec.timestamp = time.time()
-            self.recognitions.append(rec)
-            if len(self.recognitions) > self._max_recognitions:
-                self.recognitions = self.recognitions[-self._max_recognitions:]
-
-            return rec.success
-
-        except Exception as e:
-            self._log(f"[Farm] Solve error: {e}", level="error")
-            rec.success = False
-            rec.timestamp = time.time()
-            self.recognitions.append(rec)
-            return False
-
-    async def _detect_farm_challenge(self, page: Page) -> str:
-        """Detect the challenge type (same as MasterSolver._detect)."""
-        slider_sigs = ['[role="slider"]', '.slider-handle', '.slide-btn']
-        for sel in slider_sigs:
-            try:
-                if await page.locator(sel).count() > 0:
-                    return "slider"
-            except:
-                continue
-
-        text = await _challenge_text(page)
-        text_lower = text.lower()
-        if any(w in text_lower for w in ['drag', 'move', 'slide to', 'place', 'put']):
-            return "drag"
-        if any(w in text_lower for w in ['odd', 'different', 'does not belong',
-                                          'dissapearing', 'disappearing']):
-            return "odd_one_out"
-
-        return "grid"
-
-    @staticmethod
-    def _extract_objects(text: str, ctype: str = "grid") -> list:
-        """Extract object names from challenge text.
-        
-        'click all images containing a star' → ['star']
-        'select the odd one out' → ['?']
-        'drag the rocketship to the star' → ['rocketship', 'star']
-        """
-        if not text:
-            return ["unknown"]
-
-        t = text.lower().strip()
-        objects = []
-
-        # Odd one out / which is different
-        if any(w in t for w in ['odd', 'different', 'does not belong',
-                                 'disappearing', 'dissapearing']):
-            # Try to extract all mentioned animals/objects
-            animals = ['lion', 'tiger', 'bear', 'elephant', 'gorilla', 'monkey',
-                       'zebra', 'giraffe', 'hippo', 'rhino', 'camel', 'deer',
-                       'fox', 'wolf', 'rabbit', 'squirrel', 'mouse', 'rat',
-                       'bat', 'whale', 'dolphin', 'seal', 'penguin', 'owl',
-                       'eagle', 'hawk', 'parrot', 'crow', 'raven', 'swan',
-                       'duck', 'goose', 'chicken', 'rooster', 'hen', 'turkey',
-                       'peacock', 'ostrich', 'flamingo', 'pigeon', 'sparrow',
-                       'robin', 'blue jay', 'cardinal', 'woodpecker', 'hummingbird',
-                       'butterfly', 'dragonfly', 'bee', 'ant', 'spider', 'scorpion',
-                       'crab', 'lobster', 'shrimp', 'snail', 'worm', 'snake',
-                       'lizard', 'turtle', 'frog', 'toad', 'salamander', 'newt',
-                       'crocodile', 'alligator', 'dinosaur', 't-rex', 'triceratops',
-                       'stegosaurus', 'pterodactyl', 'brontosaurus', 'velociraptor',
-                       'star', 'moon', 'sun', 'cloud', 'rainbow', 'lightning',
-                       'snowflake', 'heart', 'diamond', 'circle', 'square',
-                       'triangle', 'rectangle', 'pentagon', 'hexagon', 'octagon',
-                       'rocket', 'spaceship', 'rocketship', 'ufo', 'alien',
-                       'robot', 'car', 'bus', 'truck', 'train', 'bicycle',
-                       'motorcycle', 'airplane', 'helicopter', 'boat', 'ship',
-                       'submarine', 'hot air balloon', 'parachute']
-            for animal in animals:
-                if animal in t:
-                    objects.append(animal)
-            if not objects:
-                objects.append("odd_one_out")
-            return objects
-
-        # Extract from phrases
-        phrases = ['select all images containing ', 'click all images with ',
-                   'select all squares with ', 'click all squares containing ',
-                   'choose all images with ', 'select all matching ',
-                   'click all ', 'select all ', 'choose all ',
-                   'containing ', 'with ', 'matching ', 'showing ']
-
-        for phrase in phrases:
-            if phrase in t:
-                subj = t.split(phrase, 1)[1].strip().strip('.!?,:;')
-                for art in ['a ', 'an ', 'the ']:
-                    if subj.startswith(art):
-                        subj = subj[len(art):]
-                words = subj.split()
-                if words:
-                    objects.append(words[0])
-                break
-
-        # Check for drag patterns
-        if any(w in t for w in ['drag', 'move', 'slide', 'place']):
-            for sep in [' to ', ' into ', ' onto ', ' in ']:
-                if sep in t:
-                    parts = t.split(sep, 1)
-                    for part in parts:
-                        cleaned = part.strip().strip('.!?,:;')
-                        for prefix in ['drag ', 'move ', 'slide ', 'place ',
-                                       'the ', 'a ', 'an ', 'your ']:
-                            if cleaned.startswith(prefix):
-                                cleaned = cleaned[len(prefix):]
-                        words = cleaned.split()
-                        if words:
-                            obj = words[0].strip('.,!?:;')
-                            if obj and obj not in objects:
-                                objects.append(obj)
-                    break
-
-        if not objects:
-            objects.append("unknown")
-
-        return objects
-
     # ── Status ────────────────────────────────────────────
 
     def get_status(self) -> dict:
         return {
             "running": self.running,
-            "captchas_solved": self.captchas_solved,
-            "captchas_failed": self.captchas_failed,
-            "total_captchas": self.captchas_solved + self.captchas_failed,
+            "mode": self.mode,
+            "captchas_captured": self.captchas_captured,
+            "tiles_saved_total": self.tiles_saved_total,
             "recognitions_count": len(self.recognitions),
             "latest_recognition": self.recognitions[-1].to_dict() if self.recognitions else None,
         }
 
-    def get_recent_recognitions(self, count: int = 20) -> list:
+    def get_recent_recognitions(self, count: int = 50) -> list:
         recent = self.recognitions[-count:] if self.recognitions else []
         return [r.to_dict() for r in reversed(recent)]
+
+    def get_logs(self, count: int = 50) -> list:
+        return self._farm_logs[-count:]
 
     async def close(self):
         await self.stop()
@@ -1005,8 +710,8 @@ async def main():
     await asyncio.sleep(30)
     await farm.stop()
 
-    print(f"\nResults: {farm.captchas_solved} solved, {farm.captchas_failed} failed")
-    print(f"Recognitions stored: {len(farm.recognitions)}")
+    print(f"\nResults: {farm.captchas_captured} captured")
+    print(f"Tiles saved: {farm.tiles_saved_total}")
 
     await db.close()
 

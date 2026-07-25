@@ -546,6 +546,9 @@ body{font-family:system-ui;background:#0a0f1e;color:#f1f5f9;min-height:100vh;dis
 .log-error{color:#fca5a5}
 .badge-demo{background:#6366f1;color:white;padding:2px 8px;border-radius:4px;font-size:10px;font-weight:700}
 .badge-discord{background:#5865f2;color:white;padding:2px 8px;border-radius:4px;font-size:10px;font-weight:700}
+.mode-btn{background:#1e2a45;color:#94a3b8;padding:8px 14px;border-radius:8px;border:0;font-size:12px;font-weight:600;cursor:pointer;transition:all .15s}
+.mode-btn:hover{background:#2a3a5a;color:#f1f5f9}
+.mode-btn.active{background:#375;color:white}
 </style></head><body>
 <div class="top-bar">
   <a href="/" class="back-btn">← Back</a>
