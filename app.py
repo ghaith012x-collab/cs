@@ -529,6 +529,7 @@ body{font-family:system-ui;background:#0a0f1e;color:#f1f5f9;min-height:100vh;dis
 .recog-item .text{color:#e2e8f0;margin-top:1px}
 .recog-item .objects{display:flex;gap:3px;flex-wrap:wrap;margin-top:3px}
 .recog-item .obj-tag{background:#1e2a45;color:#fbbf24;padding:1px 6px;border-radius:3px;font-size:10px;font-weight:600}
+.recog-thumb{width:64px;height:64px;border-radius:6px;border:1px solid #2a3a5a;object-fit:cover;background:#0d1326}
 .recog-empty{color:#475569;font-size:12px;text-align:center;padding:30px 0}
 .knowledge-list{max-height:180px;overflow-y:auto}
 .knowledge-item{display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid #1a2440;font-size:12px}
@@ -694,11 +695,18 @@ async function pollStatus(){
         let objects=(r.objects_found||[]).join(', ');
         let time=new Date(r.timestamp*1000).toLocaleTimeString();
         let src=r.source||'demo';
+        let thumbHtml='';
+        if(r.tile_thumb_b64){
+          thumbHtml='<img class=\"recog-thumb\" src=\"data:image/png;base64,'+r.tile_thumb_b64+'\" alt=\"tile\">';
+        }
         html+='<div class=\"recog-item\">';
+        html+='<div style=\"display:flex;align-items:flex-start;gap:8px\">';
+        if(thumbHtml)html+='<div style=\"flex-shrink:0\">'+thumbHtml+'</div>';
+        html+='<div style=\"flex:1\">';
         html+='<div><span class=\"time\">'+time+'</span> <span class=\"type\">'+src.toUpperCase()+'/'+type+'</span> '+icon+'</div>';
         html+='<div class=\"text\">'+(r.challenge_text||'')+'</div>';
         if(objects)html+='<div class=\"objects\">'+objects.split(',').map(o=>'<span class=\"obj-tag\">'+o.trim()+'</span>').join('')+'</div>';
-        html+='</div>';
+        html+='</div></div></div>';
       }
       rl.innerHTML=html;
     }
