@@ -535,17 +535,49 @@ class DragSolver:
                 if await self._try_drag(page, *coords, "Pair"):
                     return True
 
-        # ── Method 5: FAST HEURISTICS ──
-        # Just 8 targeted attempts — fast enough to hit before captcha expiry
-        self._log("[Drag] Fast heuristics (8 attempts)...")
+        # ── Method 5: FULL HEURISTICS ──
+        # Try from multiple start positions (left edge, right edge, center)
+        # in multiple directions (left→right, right→left, top→bottom, bottom→top)
+        self._log("[Drag] Full heuristics (30 attempts)...")
         cx, cy = box['x'] + box['width'] / 2, box['y'] + box['height'] / 2
-        max_d = min(box['width'], box['height']) * 0.45
-        for dist in [max_d * 0.4, max_d * 0.6, max_d * 0.8, max_d * 1.0]:
+        bw, bh = box['width'], box['height']
+        max_d = min(bw, bh) * 0.5
+
+        # 1. Center-based horizontal drags (8 attempts)
+        for dist in [max_d * 0.3, max_d * 0.5, max_d * 0.7, max_d * 0.9]:
             for dx in [-dist, dist]:
-                sx, sy = cx + dx * 0.6, cy + random.uniform(-15, 15)
-                ex, ey = cx - dx * 0.6, cy + random.uniform(-15, 15)
+                sx, sy = cx + dx, cy + random.uniform(-15, 15)
+                ex, ey = cx - dx, cy + random.uniform(-15, 15)
                 if await self._try_drag(page, sx, sy, ex, ey,
-                                        f"Fast {dist:.0f}px {'L→R' if dx>0 else 'R→L'}"):
+                                        f"H{dx:+.0f}"):
+                    return True
+
+        # 2. Edge-based horizontal (drag from left edge to center, right edge to center)
+        # 8 attempts
+        for edge_x, direction, label in [(box['x'] + 30, bw*0.6, 'Ledge'),
+                                          (box['x'] + bw - 30, -bw*0.6, 'Redge')]:
+            for dist_f in [0.4, 0.6, 0.8, 1.0]:
+                sx, sy = edge_x, cy + random.uniform(-15, 15)
+                ex = sx + direction * dist_f
+                ey = cy + random.uniform(-15, 15)
+                if await self._try_drag(page, sx, sy, ex, ey, f"{label}{dist_f:.0f}"):
+                    return True
+
+        # 3. Vertical drags (8 attempts)
+        for dist in [max_d * 0.3, max_d * 0.5, max_d * 0.7, max_d * 0.9]:
+            for dy in [-dist, dist]:
+                sx, sy = cx + random.uniform(-15, 15), cy + dy
+                ex, ey = cx + random.uniform(-15, 15), cy - dy
+                if await self._try_drag(page, sx, sy, ex, ey,
+                                        f"V{dy:+.0f}"):
+                    return True
+
+        # 4. Diagonal drags (6 attempts)
+        for dist in [max_d * 0.5, max_d * 0.8]:
+            for dx, dy in [(dist, dist), (-dist, -dist), (dist, -dist), (-dist, dist)]:
+                sx, sy = cx + dx, cy + dy
+                ex, ey = cx - dx, cy - dy
+                if await self._try_drag(page, sx, sy, ex, ey, f"D{dx:+.0f},{dy:+.0f}"):
                     return True
 
         self._log("[Drag] ✗ Failed", level="error")
@@ -628,151 +660,149 @@ class DragSolver:
         return None
 
     async def _canvas_color_cluster(self, iframe, box: dict) -> Optional[Tuple]:
-        """Find drag objects by HSV color clustering on iframe screenshot.
-        Uses color ranges for common drag objects (red rocketship, star, etc.)."""
+        """Find drag objects by EDGE DETECTION + contour analysis.
+        Finds objects by SHAPE (not color) — robust against any color scheme.
+        Splits iframe into left/right half, finds best object in each."""
         try:
             raw = await iframe.screenshot()
             if not raw or len(raw) < 500:
                 return None
 
-            img = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_COLOR)
-            if img is None:
+            gray = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_GRAYSCALE)
+            if gray is None:
                 return None
-            h, w = img.shape[:2]
+            h, w = gray.shape[:2]
             if h < 50 or w < 50:
                 return None
 
-            # Denoise + convert to HSV
-            denoised = cv2.bilateralFilter(img, 9, 75, 75)
-            hsv = cv2.cvtColor(denoised, cv2.COLOR_BGR2HSV)
+            # 1. Blur to reduce noise
+            blurred = cv2.GaussianBlur(gray, (5, 5), 0)
 
-            # Try multiple color ranges to find bright objects
-            ranges = [
-                (np.array([0, 80, 80]), np.array([15, 255, 255])),    # Red
-                (np.array([160, 80, 80]), np.array([180, 255, 255])), # Red (wrapped)
-                (np.array([90, 60, 60]), np.array([130, 255, 255])),  # Blue
-                (np.array([15, 80, 80]), np.array([35, 255, 255])),   # Orange/Yellow
-                (np.array([40, 60, 60]), np.array([80, 255, 255])),   # Green
-                (np.array([0, 100, 80]), np.array([180, 255, 255])),  # Any bright
-            ]
+            # 2. Edge detection — finds ALL shapes regardless of color
+            edges = cv2.Canny(blurred, 30, 100)
+
+            # 3. Dilate to close gaps in edges
+            kernel = np.ones((3, 3), np.uint8)
+            dilated = cv2.dilate(edges, kernel, iterations=2)
+
+            # 4. Find contours (distinct shapes)
+            contours, _ = cv2.findContours(dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
             objects = []
-            for lower, upper in ranges:
-                mask = cv2.inRange(hsv, lower, upper)
-                mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
-                mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
-                num, labels, stats, cents = cv2.connectedComponentsWithStats(mask, 8)
-                for i in range(1, num):
-                    area = stats[i, cv2.CC_STAT_AREA]
-                    if 50 < area < 3000:
-                        objects.append({
-                            'cx': cents[i][0], 'cy': cents[i][1], 'area': area,
-                            'left': stats[i, cv2.CC_STAT_LEFT],
-                            'top': stats[i, cv2.CC_STAT_TOP],
-                            'right': stats[i, cv2.CC_STAT_LEFT] + stats[i, cv2.CC_STAT_WIDTH],
-                            'bottom': stats[i, cv2.CC_STAT_TOP] + stats[i, cv2.CC_STAT_HEIGHT],
-                        })
+            for cnt in contours:
+                area = cv2.contourArea(cnt)
+                if 200 < area < 5000:  # Object size range
+                    x, y, cw, ch = cv2.boundingRect(cnt)
+                    cx = x + cw / 2
+                    cy = y + ch / 2
+                    objects.append({
+                        'cx': cx, 'cy': cy, 'area': area,
+                        'w': cw, 'h': ch, 'left': x, 'top': y,
+                    })
 
             if not objects:
-                self._log("[Drag] Canvas: no colored objects")
+                self._log("[Drag] Edge: no objects found")
                 return None
 
-            # Merge overlapping objects (same object detected in multiple color ranges)
-            merged = []
-            for obj in sorted(objects, key=lambda o: o['area'], reverse=True):
-                overlap = False
-                for m in merged:
-                    ix = max(0, min(obj['right'], m['right']) - max(obj['left'], m['left']))
-                    iy = max(0, min(obj['bottom'], m['bottom']) - max(obj['top'], m['top']))
-                    if ix > 0 and iy > 0:
-                        if obj['area'] > m['area']:
-                            m.update(obj)
-                        overlap = True
-                        break
-                if not overlap:
-                    merged.append(obj)
+            # 5. Filter: keep only reasonably-sized objects (not too wide/tall)
+            objects = [o for o in objects if o['w'] < w * 0.6 and o['h'] < h * 0.6]
 
-            objects = merged
-            self._log(f"[Drag] Canvas: {len(objects)} object(s)")
+            # 6. Split into LEFT and RIGHT halves
+            mid_x = w / 2
+            left_objs = [o for o in objects if o['cx'] < mid_x - 20]  # Clearly on left
+            right_objs = [o for o in objects if o['cx'] > mid_x + 20]  # Clearly on right
 
-            if len(objects) >= 2:
-                objects.sort(key=lambda o: o['cx'])
-                for i in range(len(objects)):
-                    for j in range(i + 1, len(objects)):
-                        o1, o2 = objects[i], objects[j]
-                        dist = abs(o1['cx'] - o2['cx'])
-                        y_diff = abs(o1['cy'] - o2['cy'])
-                        if dist > 50 and y_diff < h * 0.5:
-                            # Left object = draggable, right = target (or vice versa by size)
-                            if o1['area'] > o2['area']:
-                                drag, tgt = o2, o1
-                            else:
-                                drag, tgt = o1, o2
-                            page_sx = box['x'] + drag['cx']
-                            page_sy = box['y'] + drag['cy']
-                            page_ex = box['x'] + tgt['cx']
-                            page_ey = box['y'] + tgt['cy']
-                            self._log(f"[Drag] Canvas: ({drag['cx']:.0f},{drag['cy']:.0f})→({tgt['cx']:.0f},{tgt['cy']:.0f})")
-                            return (page_sx, page_sy, page_ex, page_ey)
+            self._log(f"[Drag] Edge: L={len(left_objs)} R={len(right_objs)} objects")
 
-            # Single object: mirror to opposite side (common fallback)
-            if len(objects) == 1:
-                o = objects[0]
-                self._log(f"[Drag] Canvas single: ({o['cx']:.0f},{o['cy']:.0f})→mirrored")
-                return (box['x'] + o['cx'], box['y'] + o['cy'],
-                        box['x'] + w - o['cx'], box['y'] + o['cy'])
+            # 7. Pick best object from each side
+            # Best = largest area in the middle vertical range
+            def _best_group(objs, h):
+                if not objs:
+                    return None
+                mid_y = h / 2
+                # Prefer objects near the vertical center
+                scored = [(abs(o['cy'] - mid_y), o) for o in objs]
+                scored.sort()
+                return scored[0][1]  # Most vertically centered
 
-            return None
+            left_best = _best_group(left_objs, h)
+            right_best = _best_group(right_objs, h)
+
+            if left_best and right_best:
+                # Drag from left to right (most common)
+                drag = left_best if left_best['area'] < right_best['area'] else right_best
+                tgt = right_best if drag == left_best else left_best
+            elif left_best:
+                drag, tgt = left_best, None
+            elif right_best:
+                drag, tgt = right_best, None
+            else:
+                return None
+
+            # If only one side has objects, mirror to other side
+            if tgt is None:
+                tgt = {'cx': w - drag['cx'], 'cy': drag['cy'], 'area': drag['area']}
+
+            self._log(f"[Drag] Edge: ({drag['cx']:.0f},{drag['cy']:.0f})→({tgt['cx']:.0f},{tgt['cy']:.0f})")
+
+            page_sx = box['x'] + drag['cx']
+            page_sy = box['y'] + drag['cy']
+            page_ex = box['x'] + tgt['cx']
+            page_ey = box['y'] + tgt['cy']
+
+            return (page_sx, page_sy, page_ex, page_ey)
         except Exception as e:
-            self._log(f"[Drag] Canvas error: {e}", level="warn")
+            self._log(f"[Drag] Edge error: {e}", level="warn")
             return None
 
     async def _canvas_pair_detection(self, iframe, box: dict) -> List[Tuple]:
-        """Find ALL distinct colored objects and return every possible drag→target pair."""
+        """Find ALL distinct objects via edge detection and try all L→R pair combos."""
         try:
             raw = await iframe.screenshot()
             if not raw or len(raw) < 500:
                 return []
 
-            img = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_COLOR)
-            if img is None:
+            gray = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_GRAYSCALE)
+            if gray is None:
                 return []
-            h, w = img.shape[:2]
+            h, w = gray.shape[:2]
 
-            denoised = cv2.bilateralFilter(img, 9, 75, 75)
-            hsv = cv2.cvtColor(denoised, cv2.COLOR_BGR2HSV)
+            blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+            edges = cv2.Canny(blurred, 30, 100)
+            dilated = cv2.dilate(edges, np.ones((3, 3), np.uint8), iterations=2)
+            contours, _ = cv2.findContours(dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-            # Find ALL colored regions
-            all_mask = cv2.inRange(hsv, np.array([0, 60, 60]), np.array([180, 255, 255]))
-            all_mask = cv2.morphologyEx(all_mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
-
-            num, labels, stats, cents = cv2.connectedComponentsWithStats(all_mask, 8)
             objects = []
-            for i in range(1, num):
-                area = stats[i, cv2.CC_STAT_AREA]
-                if 50 < area < 3000:
-                    objects.append({'cx': cents[i][0], 'cy': cents[i][1], 'area': area})
+            for cnt in contours:
+                area = cv2.contourArea(cnt)
+                if 200 < area < 5000:
+                    x, y, cw, ch = cv2.boundingRect(cnt)
+                    objects.append({'cx': x + cw/2, 'cy': y + ch/2, 'area': area})
+
+            objects = [o for o in objects if o['cx'] > 20 and o['cx'] < w - 20]  # Not at edges
 
             if len(objects) < 2:
                 return []
 
-            objects.sort(key=lambda o: o['cx'])
-            pairs = []
-            for i in range(len(objects)):
-                for j in range(i + 1, len(objects)):
-                    o1, o2 = objects[i], objects[j]
-                    dist = abs(o1['cx'] - o2['cx'])
-                    y_diff = abs(o1['cy'] - o2['cy'])
-                    if dist > 40 and y_diff < h * 0.6:
-                        # Both orderings: left→right and small→large
-                        for drag, target in [(o1, o2), (o2, o1)]:
-                            pairs.append((
-                                box['x'] + drag['cx'], box['y'] + drag['cy'],
-                                box['x'] + target['cx'], box['y'] + target['cy'],
-                            ))
+            # Try all left→right pair combinations
+            left_objs = [o for o in objects if o['cx'] < w / 2]
+            right_objs = [o for o in objects if o['cx'] >= w / 2]
 
-            self._log(f"[Drag] {len(pairs)} canvas pairs")
-            return pairs
+            pairs = []
+            for lo in left_objs:
+                for ro in right_objs:
+                    y_diff = abs(lo['cy'] - ro['cy'])
+                    if y_diff < h * 0.6:  # Similar vertical position
+                        pairs.append((
+                            box['x'] + lo['cx'], box['y'] + lo['cy'],
+                            box['x'] + ro['cx'], box['y'] + ro['cy'],
+                        ))
+
+            # Sort by vertical alignment (best match first)
+            pairs.sort(key=lambda p: abs(p[1] - p[3]))
+
+            self._log(f"[Drag] Edge: {len(pairs)} L→R pairs")
+            return pairs[:8]  # Try up to 8
         except Exception as e:
             self._log(f"[Drag] Pair error: {e}", level="warn")
             return []
