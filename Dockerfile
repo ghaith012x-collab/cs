@@ -21,9 +21,9 @@ RUN pip install --no-cache-dir \
     aiofiles==23.1.0 \
     aiohttp==3.9.1 \
     Pillow==10.2.0 \
-    onnxruntime==1.17.1 \
-    onnx==1.16.0 \
-    protobuf==3.20.3
+    onnxruntime>=1.18.0 \
+    onnx>=1.16.0 \
+    protobuf>=3.20.3
 
 RUN python -m playwright install chromium
 
