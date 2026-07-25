@@ -500,30 +500,43 @@ class DragSolver:
         _, template_key = self._extract_drag_subjects(text)
         _load_templates()  # Load any saved templates from disk
 
-        # Method 1: VISUAL MUSCLE MEMORY — ALWAYS first!
-        # Uses OpenCV template matching against saved templates (instant, no AI)
-        target_pos = await self._find_template_target(page, iframe, box, template_key)
-        if target_pos:
-            self._log(f"[Drag] Muscle memory found target for '{template_key}'!")
-            obj_pos = await self._find_draggable_by_edge(page, iframe, box, target_pos)
-            if obj_pos:
-                if await self._try_drag(page, obj_pos[0], obj_pos[1], target_pos[0], target_pos[1],
-                                        f"Memory '{template_key}'"):
-                    return True
-            # Fallback: drag from opposite direction of target
-            cx, cy = box['x'] + box['width'] / 2, box['y'] + box['height'] / 2
-            dx, dy = target_pos[0] - cx, target_pos[1] - cy
-            if await self._try_drag(page, cx - dx*1.5, cy - dy*1.5, target_pos[0], target_pos[1],
-                                    f"Memory '{template_key}' (heuristic)"):
+        # Method 1: CANVAS DRAG SOLVER — reads pixel data from the hCaptcha canvas
+        # Uses OpenCV to find the draggable object and target by color/shape analysis.
+        # Works FIRST time, no AI needed, no templates needed.
+        self._log("[Drag] Scanning canvas for drag objects...")
+        drag_coords = await self._solve_canvas_drag(page, iframe, box)
+        if drag_coords:
+            sx, sy, ex, ey = drag_coords
+            if await self._try_drag(page, sx, sy, ex, ey, "Canvas"):
+                # Save template for future muscle memory!
+                if template_key:
+                    inf_dir = self._infer_direction(sx, sy, ex, ey)
+                    await self._save_target_template(page, iframe, box, template_key, inf_dir)
                 return True
 
-        # Method 2: DOM extraction (works for non-canvas hCaptcha)
+        # Method 2: VISUAL MUSCLE MEMORY — OpenCV template matching (if we've seen this target)
+        if template_key != "target":
+            target_pos = await self._find_template_target(page, iframe, box, template_key)
+            if target_pos:
+                self._log(f"[Drag] Muscle memory found target for '{template_key}'!")
+                obj_pos = await self._find_draggable_by_edge(page, iframe, box, target_pos)
+                if obj_pos:
+                    if await self._try_drag(page, obj_pos[0], obj_pos[1], target_pos[0], target_pos[1],
+                                            f"Memory '{template_key}'"):
+                        return True
+                cx, cy = box['x'] + box['width'] / 2, box['y'] + box['height'] / 2
+                dx, dy = target_pos[0] - cx, target_pos[1] - cy
+                if await self._try_drag(page, cx - dx*1.5, cy - dy*1.5, target_pos[0], target_pos[1],
+                                        f"Memory '{template_key}' (fallback)"):
+                    return True
+
+        # Method 3: DOM extraction (works for non-canvas hCaptcha)
         coords = await self._extract_drag_coords(page, box)
         if coords:
             if await self._try_drag(page, coords[0], coords[1], coords[2], coords[3], "DOM"):
                 return True
 
-        # Method 3: Element pair scanning (DOM-based big elements)
+        # Method 4: Element pair scanning
         elems = await self._scan_iframe_elements(page)
         if elems:
             self._log(f"[Drag] Scanning {len(elems)} elements...")
@@ -541,12 +554,11 @@ class DragSolver:
                         dist = math.hypot(ex - sx, ey - sy)
                         if 30 < dist < 400:
                             if await self._try_drag(page, sx, sy, ex, ey, f"elem {i}→{j}"):
-                                # Save template too
                                 if template_key:
                                     await self._save_target_template(page, iframe, box, template_key)
                                 return True
 
-        # Method 5: Multiple heuristic patterns
+        # Method 5: Heuristic patterns
         self._log("[Drag] Trying heuristic patterns...")
         cx, cy = box['x'] + box['width'] / 2, box['y'] + box['height'] / 2
         bw, bh = box['width'], box['height']
@@ -557,15 +569,116 @@ class DragSolver:
                                   (d*0.3, -d*0.5, 'UR'), (-d*0.3, d*0.5, 'DL')]:
                 if await self._try_drag(page, cx + dx, cy + dy, cx - dx, cy - dy,
                                         f"heuristic {frac:.2f} {label}"):
-                    # Save template on ANY successful solve for muscle memory!
                     if template_key:
-                        # Infer direction from drag coords
                         inf_dir = self._infer_direction(dx, dy, -dx, -dy)
                         await self._save_target_template(page, iframe, box, template_key, inf_dir)
                     return True
 
         self._log("[Drag] ✗ Failed", level="error")
         return False
+
+    async def _solve_canvas_drag(self, page: Page, iframe, box: dict) -> Optional[Tuple]:
+        """Analyze the hCaptcha iframe canvas to find draggable object and target.
+        Uses OpenCV color/shape analysis to find:
+        - The draggable object (small, colorful, usually near edges)
+        - The target area (highlighted region, usually opposite side)
+        
+        Returns (start_x, start_y, end_x, end_y) in page coordinates, or None."""
+        try:
+            raw = await iframe.screenshot()
+            if not raw or len(raw) < 500:
+                return None
+
+            img = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_COLOR)
+            if img is None:
+                return None
+            h, w = img.shape[:2]
+            if h < 50 or w < 50:
+                return None
+
+            # Convert to HSV for color analysis
+            hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+
+            # Strategy 1: Find the most saturated region (draggable object)
+            # Drag objects are usually colorful against a muted background
+            saturation = hsv[:, :, 1].astype(np.float32)
+            # Blur to reduce noise
+            saturation = cv2.GaussianBlur(saturation, (5, 5), 0)
+            # Find the top 5% most saturated pixels
+            sat_thresh = np.percentile(saturation[saturation > 10], 95)
+            _, sat_mask = cv2.threshold(saturation, max(sat_thresh, 80), 255, cv2.THRESH_BINARY)
+            sat_mask = sat_mask.astype(np.uint8)
+
+            # Find connected components (blobs) of saturated pixels
+            num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(sat_mask, 8)
+            
+            draggable_candidates = []
+            for i in range(1, num_labels):  # Skip background
+                area = stats[i, cv2.CC_STAT_AREA]
+                cx_blob = centroids[i][0]
+                cy_blob = centroids[i][1]
+                # Draggable: area between 50-2000 px, not at center
+                if 50 < area < 2000:
+                    # Distance from center
+                    dist_from_center = math.hypot(cx_blob - w/2, cy_blob - h/2)
+                    draggable_candidates.append((dist_from_center, area, cx_blob, cy_blob))
+
+            if draggable_candidates:
+                # The draggable is usually FARTHEST from center (at edge)
+                draggable_candidates.sort(reverse=True)  # Farthest first
+                best_dist, best_area, drag_x, drag_y = draggable_candidates[0]
+                
+                # The target is usually on the OPPOSITE side from the draggable
+                # If draggable is on left, target is on right, etc.
+                target_x = w - drag_x
+                target_y = drag_y + random.uniform(-10, 10)  # Same vertical level
+                
+                # But also look for a second saturated blob on the opposite side
+                if len(draggable_candidates) >= 2:
+                    # Check if there's a saturated blob on the opposite side
+                    second_candidates = [c for c in draggable_candidates 
+                                        if abs(c[2] - target_x) < w * 0.3 and abs(c[3] - target_y) < h * 0.3]
+                    if second_candidates:
+                        second = second_candidates[0]
+                        target_x, target_y = second[2], second[3]
+
+                self._log(f"[Drag] Canvas found objects: drag=({drag_x:.0f},{drag_y:.0f}) → target=({target_x:.0f},{target_y:.0f})")
+                
+                # Convert iframe-relative to page coordinates
+                page_sx = box['x'] + drag_x
+                page_sy = box['y'] + drag_y
+                page_ex = box['x'] + target_x
+                page_ey = box['y'] + target_y
+                
+                return (page_sx, page_sy, page_ex, page_ey)
+
+            # Strategy 2: Look for distinct edges using Canny
+            edges = cv2.Canny(img, 50, 150)
+            # Find the object by looking at the region with highest edge density
+            # (The draggable object has more edges than the background)
+            cell_size = 30
+            best_edge_density = 0
+            best_edge_region = (w//4, h//2)
+            for y_cell in range(0, h - cell_size, cell_size):
+                for x_cell in range(0, w - cell_size, cell_size):
+                    region = edges[y_cell:y_cell+cell_size, x_cell:x_cell+cell_size]
+                    density = np.sum(region) / (cell_size * cell_size)
+                    if density > best_edge_density:
+                        best_edge_density = density
+                        best_edge_region = (x_cell + cell_size//2, y_cell + cell_size//2)
+            
+            if best_edge_density > 20:
+                drag_x, drag_y = best_edge_region
+                target_x = w - drag_x
+                target_y = drag_y
+                self._log(f"[Drag] Canvas edge detection: drag=({drag_x:.0f},{drag_y:.0f}) → target=({target_x:.0f},{target_y:.0f})")
+                return (box['x'] + drag_x, box['y'] + drag_y, box['x'] + target_x, box['y'] + target_y)
+
+            self._log("[Drag] Canvas: no objects found", level="warn")
+            return None
+        except Exception as e:
+            self._log(f"[Drag] Canvas error: {e}", level="warn")
+            return None
 
     @staticmethod
     def _infer_direction(sx, sy, ex, ey) -> str:
