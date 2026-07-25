@@ -675,51 +675,56 @@ class DragSolver:
             # Convert to HSV
             hsv = cv2.cvtColor(img_crop, cv2.COLOR_BGR2HSV)
             
-            # Define broad color ranges for common hCaptcha drag object colors
-            # These are the bright saturated colors hCaptcha uses
+            # Define color ranges for hCaptcha drag objects
+            # Saturated colors for draggable (spaceship, fish, etc.)
+            # PLUS white/pale colors for targets (star, etc.)
             color_ranges = [
-                # Red/Pink (spaceship, rocket, heart, fish)
+                # Red/Pink
                 (np.array([0, 60, 80]), np.array([15, 255, 255])),
                 (np.array([160, 60, 80]), np.array([180, 255, 255])),
-                # Orange/Yellow (star, sun, fish)
+                # Orange/Yellow
                 (np.array([15, 60, 80]), np.array([35, 255, 255])),
-                # Green (plant, tree, frog)
+                # Green
                 (np.array([40, 60, 80]), np.array([80, 255, 255])),
-                # Blue (fish, water, object)
+                # Blue
                 (np.array([90, 60, 80]), np.array([130, 255, 255])),
-                # Purple (object, shape)
+                # Purple
                 (np.array([130, 60, 80]), np.array([160, 255, 255])),
+                # WHITE / BRIGHT (star, moon, light objects)
+                (np.array([0, 0, 160]), np.array([180, 50, 255])),
+                # LIGHT YELLOW (star, sun)
+                (np.array([20, 30, 140]), np.array([40, 180, 255])),
             ]
-            
+
             # Combine all color masks
             combined_mask = np.zeros((crop_h, w), dtype=np.uint8)
             for lower, upper in color_ranges:
                 mask = cv2.inRange(hsv, lower, upper)
                 combined_mask = cv2.bitwise_or(combined_mask, mask)
-            
+
             # Clean up noise
             kernel = np.ones((3, 3), np.uint8)
             combined_mask = cv2.morphologyEx(combined_mask, cv2.MORPH_OPEN, kernel)
             combined_mask = cv2.morphologyEx(combined_mask, cv2.MORPH_CLOSE, kernel)
-            
+
             # Find contours
             contours, _ = cv2.findContours(combined_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            
+
             objects = []
             for cnt in contours:
                 area = cv2.contourArea(cnt)
-                if area < 200 or area > 15000:  # Filter too small/big
+                if area < 200 or area > 15000:
                     continue
                 x, y, cw, ch = cv2.boundingRect(cnt)
                 aspect = max(cw, ch) / max(min(cw, ch), 1)
-                if aspect > 5:  # Skip long skinny shapes (likely text/borders)
+                if aspect > 5:
                     continue
                 cx_obj = x + cw // 2
                 cy_obj = y + ch // 2
                 objects.append((cx_obj, cy_obj, cw, ch, area))
-            
+
             if len(objects) < 2:
-                # Also try edge detection as fallback
+                # Edge detection fallback
                 gray = cv2.cvtColor(img_crop, cv2.COLOR_BGR2GRAY)
                 edges = cv2.Canny(gray, 30, 100)
                 kernel2 = np.ones((5, 5), np.uint8)
@@ -733,50 +738,113 @@ class DragSolver:
                     aspect = max(cw, ch) / max(min(cw, ch), 1)
                     if aspect > 5:
                         continue
-                    cx_obj = x + cw // 2
-                    cy_obj = y + ch // 2
-                    # Check if this object has internal detail (not empty)
-                    roi = gray[y:y+ch, x:x+cw]
-                    if roi.size > 0 and np.std(roi) > 20:
+                    roi_gray = gray[y:y+ch, x:x+cw]
+                    if roi_gray.size > 0 and np.std(roi_gray) > 20:
+                        objects.append((x + cw//2, y + ch//2, cw, ch, area))
+
+            # If we still have < 2 objects, try ADAPTIVE THRESHOLDING on right half
+            # The star target is often white/pale — might not show in regular edge detection
+            if len(objects) < 2:
+                gray = cv2.cvtColor(img_crop, cv2.COLOR_BGR2GRAY)
+                # Divide image into left and right halves
+                mid_x = w // 2
+                left_half = gray[:, :mid_x]
+                right_half = gray[:, mid_x:]
+
+                # Try adaptive threshold on each half separately
+                for half_name, half_img, x_offset in [('L', left_half, 0), ('R', right_half, mid_x)]:
+                    adaptive = cv2.adaptiveThreshold(half_img, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                                                     cv2.THRESH_BINARY_INV, 15, 2)
+                    adaptive = cv2.morphologyEx(adaptive, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
+                    ctrs, _ = cv2.findContours(adaptive, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                    for cnt in ctrs:
+                        area = cv2.contourArea(cnt)
+                        if area < 200 or area > 15000:
+                            continue
+                        x, y, cw, ch = cv2.boundingRect(cnt)
+                        aspect = max(cw, ch) / max(min(cw, ch), 1)
+                        if aspect > 4:
+                            continue
+                        cx_obj = x_offset + x + cw // 2
+                        cy_obj = y + ch // 2
                         objects.append((cx_obj, cy_obj, cw, ch, area))
-            
+
             if len(objects) < 2:
                 self._log(f'[Drag] OpenCV: {len(objects)} object(s)')
                 return None
-            
+
+            # Merge overlapping detections (same object detected by multiple color ranges)
+            merged = []
+            objects_sorted = sorted(objects, key=lambda o: -o[4])  # Sort by area descending
+            used = [False] * len(objects_sorted)
+            for i, o1 in enumerate(objects_sorted):
+                if used[i]:
+                    continue
+                group = [o1]
+                used[i] = True
+                for j, o2 in enumerate(objects_sorted):
+                    if used[j]:
+                        continue
+                    dist = math.hypot(o1[0] - o2[0], o1[1] - o2[1])
+                    if dist < max(o1[2], o1[3]) * 0.7:
+                        group.append(o2)
+                        used[j] = True
+                # Take average position weighted by area
+                if len(group) > 1:
+                    total_area = sum(g[4] for g in group)
+                    avg_x = sum(g[0] * g[4] for g in group) / total_area
+                    avg_y = sum(g[1] * g[4] for g in group) / total_area
+                    avg_w = max(g[2] for g in group)
+                    avg_h = max(g[3] for g in group)
+                    merged.append((int(avg_x), int(avg_y), avg_w, avg_h, total_area))
+                else:
+                    merged.append(o1)
+
+            objects = merged if merged else objects
+
             # Midpoint of iframe
             mid_x = w // 2
             left = [o for o in objects if o[0] < mid_x - 30]
             right = [o for o in objects if o[0] > mid_x + 30]
-            
+
             self._log(f'[Drag] OpenCV: {len(objects)} object(s), L={len(left)} R={len(right)}')
-            
-            # If we have objects on both sides, pick the best pair
+
+            # Found objects on BOTH sides → pair them
             if left and right:
-                # Pick largest object on each side
                 left.sort(key=lambda o: -o[4])
                 right.sort(key=lambda o: -o[4])
                 src = left[0]
                 tgt = right[0]
-                # Convert iframe-relative to page coordinates
                 sx = box['x'] + src[0]
                 sy = box['y'] + src[1]
                 ex = box['x'] + tgt[0]
                 ey = box['y'] + tgt[1]
+                self._log(f'[Drag] OpenCV pair: L({src[0]},{src[1]})→R({tgt[0]},{tgt[1]})')
                 return (sx, sy, ex, ey)
-            
-            # If only one side has objects, try pair from that side
-            all_objs = sorted(objects, key=lambda o: o[0])  # Sort left to right
-            if len(all_objs) >= 2:
-                src = all_objs[0]
-                tgt = all_objs[-1]
+
+            # Only LEFT side objects → target is probably on right at same Y
+            if left:
+                src = max(left, key=lambda o: o[4])
+                # Guess target is on right at slightly different Y
+                tgt_x = mid_x + int(w * 0.35)
                 sx = box['x'] + src[0]
                 sy = box['y'] + src[1]
+                ex = box['x'] + tgt_x
+                ey = box['y'] + src[1] + random.randint(-15, 15)
+                self._log(f'[Drag] OpenCV L-only pair: ({src[0]},{src[1]})→({tgt_x},{src[1]})')
+                return (sx, sy, ex, ey)
+
+            # Only RIGHT side objects → draggable is on left
+            if right:
+                tgt = max(right, key=lambda o: o[4])
+                src_x = int(w * 0.15)
+                sx = box['x'] + src_x
+                sy = box['y'] + tgt[1]
                 ex = box['x'] + tgt[0]
                 ey = box['y'] + tgt[1]
-                if abs(ex - sx) > 50:
-                    return (sx, sy, ex, ey)
-            
+                self._log(f'[Drag] OpenCV R-only pair: ({src_x},{tgt[1]})→({tgt[0]},{tgt[1]})')
+                return (sx, sy, ex, ey)
+
             return None
             
         except Exception as e:
