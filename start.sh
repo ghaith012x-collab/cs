@@ -13,19 +13,24 @@ for i in $(seq 1 60); do
         break
     fi
     if [ "$i" -eq 60 ]; then
-        echo "Ollama failed to start within 60s"
+        echo "ERROR: Ollama failed to start within 60s"
         exit 1
     fi
     sleep 1
 done
 
 # Ensure the model is available (pull if missing)
-MODEL="${OLLAMA_MODEL:-qwen2.5-vl:3b-instruct-q4_K_M}"
+MODEL="${OLLAMA_MODEL:-qwen2.5-vl:3b}"
 echo "Checking model: $MODEL"
-ollama list 2>/dev/null | grep -q "$MODEL" || {
-    echo "Pulling $MODEL (first run only)..."
-    ollama pull "$MODEL"
-}
+if ! ollama list 2>/dev/null | grep -q "$MODEL"; then
+    echo "Pulling $MODEL..."
+    if ! ollama pull "$MODEL" 2>&1; then
+        echo "ERROR: Failed to pull model $MODEL"
+        echo "Try one of: qwen2.5-vl:3b, qwen2.5-vl:7b"
+        exit 1
+    fi
+    echo "Model $MODEL pulled successfully"
+fi
 
 # Start the Python app
 echo "Starting Discord Automation..."

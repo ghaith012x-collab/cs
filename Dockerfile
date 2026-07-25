@@ -26,12 +26,14 @@ RUN python -m playwright install chromium
 
 # Pre-pull the Qwen2.5-VL model during build (~1.8GB download)
 # This makes it ready at runtime — no first-request delay
+# Note: use 'qwen2.5-vl:7b' if you have 8GB+ RAM
 RUN ollama serve & \
     OLLAMA_PID=$! && \
     sleep 5 && \
-    ollama pull qwen2.5-vl:3b-instruct-q4_K_M && \
-    kill $OLLAMA_PID 2>/dev/null; \
-    echo "Qwen2.5-VL 3B model ready"
+    if ! ollama pull qwen2.5-vl:3b 2>&1; then \
+        echo "WARNING: Model pull failed, will retry at runtime"; \
+    fi && \
+    kill $OLLAMA_PID 2>/dev/null || true
 
 COPY app.py server.py captcha_solver.py config.json requirements.txt ./
 COPY test/ ./test/
@@ -46,6 +48,6 @@ ENV PORT=8080
 ENV OLLAMA_HOST=0.0.0.0
 # Use smaller model by default — fits Railway CPU instances
 # Change to 'qwen2.5-vl:7b-instruct-q4_K_M' if you have 8GB+ RAM
-ENV OLLAMA_MODEL=qwen2.5-vl:3b-instruct-q4_K_M
+ENV OLLAMA_MODEL=qwen2.5-vl:3b
 
 CMD ["./start.sh"]
