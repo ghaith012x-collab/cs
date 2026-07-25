@@ -267,17 +267,13 @@ async def _challenge_text(page: Page) -> str:
 
 
 async def _click_verify(page: Page):
-    """Click the verify/submit button after captcha solve.
-    Tries inside iframe first, then on main page, with many selector variations."""
-    await asyncio.sleep(0.5)  # Small wait for button to appear
-    
-    # First try inside the captcha iframe
+    """Click the verify/submit button inside the captcha iframe only.
+    NEVER searches the main page (was clicking Skip buttons on Discord).
+    Uses exact hCaptcha button selectors only."""
+    await asyncio.sleep(0.5)
     btn_sels = [
-        "button.verifybtn", "button.verify-btn", "button.submit", "button.Submit",
-        ".button-submit", "button[type='submit']", "button:has-text('Verify')",
-        "button:has-text('Submit')", "button:has-text('Done')", "button:has-text('Next')",
-        "button:has-text('verify')", "button:has-text('submit')", "button:has-text('done')",
-        "#verify", "[data-hcaptcha-submit]", '[class*="verify"]', '[class*="submit"]',
+        "button.verifybtn", "button.verify-btn", ".button-submit", "button.submit",
+        "button[type='submit']", "#verify", "[data-hcaptcha-submit]",
     ]
     for sel in IFRAME_SELS:
         try:
@@ -294,24 +290,6 @@ async def _click_verify(page: Page):
                     continue
         except:
             continue
-    
-    # If not found inside iframe, try on main page
-    for bs in btn_sels:
-        try:
-            b = page.locator(bs)
-            if await b.count() > 0 and await b.first.is_visible():
-                bx = await b.first.bounding_box()
-                if bx:
-                    await Mouse.click(page, bx['x'] + bx['width'] / 2, bx['y'] + bx['height'] / 2)
-                    return
-        except:
-            continue
-    
-    # Last resort: press Enter
-    try:
-        await page.keyboard.press("Enter")
-    except:
-        pass
 
 
 # ═══════════════════════════════════════════════════════════
@@ -528,12 +506,13 @@ class DragSolver:
             qx, qy = cx + ex, cy + ey
             self._log(f"[Drag] Pattern {pi + 1}/{len(DRAG_PATTERNS)}: ({px:.0f},{py:.0f})→({qx:.0f},{qy:.0f})")
             await Mouse.drag(page, px, py, qx, qy)
-            await asyncio.sleep(0.6)
-            await _click_verify(page)  # Click verify in case drag solved it
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(0.8)
             if await Verifier(page).solved():
-                self._log("[Drag] ✓ Solved via heuristic")
-                return True
+                await _click_verify(page)
+                await asyncio.sleep(0.5)
+                if await Verifier(page).solved():
+                    self._log("[Drag] ✓ Solved via heuristic")
+                    return True
         
         # Method 3: broader range with varying distances
         self._log("[Drag] Trying broader range...")
@@ -544,12 +523,13 @@ class DragSolver:
                 qx = box['x'] + box['width'] / 2 - dx
                 qy = box['y'] + box['height'] / 2 - dy
                 await Mouse.drag(page, px, py, qx, qy)
-                await asyncio.sleep(0.4)
-                await _click_verify(page)
-                await asyncio.sleep(0.3)
+                await asyncio.sleep(0.6)
                 if await Verifier(page).solved():
-                    self._log(f"[Drag] ✓ Solved at dist={dist}, dir=({dx},{dy})")
-                    return True
+                    await _click_verify(page)
+                    await asyncio.sleep(0.4)
+                    if await Verifier(page).solved():
+                        self._log(f"[Drag] ✓ Solved at dist={dist}, dir=({dx},{dy})")
+                        return True
 
         self._log("[Drag] ✗ All methods failed", level="error")
         return False
