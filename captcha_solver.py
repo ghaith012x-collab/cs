@@ -1,8 +1,8 @@
 """
 Discord hCaptcha Solver - Qwen2.5-VL powered via Ollama.
-Accepts an optional log callback so debug output shows in the activity log.
-Resizes images before sending (saves ~90% bandwidth).
-Timeout increased to 120s for CPU inference.
+KEY OPTIMIZATION: Splits captcha grid into individual tiles and sends them
+ALL in ONE query as separate small images. Each tile is ~9x smaller than
+the full grid, so inference is MUCH faster on CPU.
 """
 
 import asyncio
@@ -29,16 +29,32 @@ class SolverConfig:
     ollama_model: str = field(default_factory=lambda: os.environ.get(
         "OLLAMA_MODEL", "qwen2.5vl:3b"
     ))
-    ollama_timeout: int = 120  # CPU inference is slow, needs 2min
+    ollama_timeout: int = 120
     ollama_num_ctx: int = 2048
     ollama_temperature: float = 0.0
     max_rounds: int = 2
 
 
-class OllamaVisionClient:
-    """Ollama client for Qwen2.5-VL vision inference."""
+def _resize_image(img: Image.Image, max_dim: int = 256) -> Image.Image:
+    """Resize image so longest side <= max_dim, maintaining aspect ratio."""
+    w, h = img.size
+    if max(w, h) <= max_dim:
+        return img
+    scale = max_dim / max(w, h)
+    new_w, new_h = int(w * scale), int(h * scale)
+    return img.resize((new_w, new_h), Image.LANCZOS)
 
-    _instance = None
+
+def _img_to_b64(img: Image.Image) -> str:
+    buf = io.BytesIO()
+    img.save(buf, format="PNG", optimize=True)
+    return base64.b64encode(buf.getvalue()).decode("utf-8")
+
+
+class OllamaVisionClient:
+    """Ollama client for Qwen2.5-VL vision inference.
+    Supports batch queries with multiple images."""
+
     _session: Optional[aiohttp.ClientSession] = None
 
     def __init__(self, config: SolverConfig, log: Optional[Callable] = None):
@@ -51,16 +67,19 @@ class OllamaVisionClient:
 
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
-            timeout = aiohttp.ClientTimeout(total=self.timeout)
-            self._session = aiohttp.ClientSession(timeout=timeout)
+            self._session = aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=self.timeout)
+            )
         return self._session
 
-    async def query(self, prompt: str, image_b64: str, max_tokens: int = 300) -> str:
+    async def query(self, prompt: str, images_b64: List[str], max_tokens: int = 300) -> str:
+        """Query model with one or more images. Multiple images = tile-by-tile analysis."""
         session = await self._get_session()
+        total_kb = sum(len(img) for img in images_b64) // 1024
         payload = {
             "model": self.model,
             "prompt": prompt,
-            "images": [image_b64],
+            "images": images_b64,
             "stream": False,
             "options": {
                 "num_ctx": self.num_ctx,
@@ -68,31 +87,31 @@ class OllamaVisionClient:
                 "num_predict": max_tokens,
             }
         }
-        img_size_kb = len(image_b64) // 1024
-        self._log(f"[Ollama] Querying {self.model} (image: ~{img_size_kb}KB, timeout: {self.timeout}s)")
+        self._log(f"[Ollama] {self.model} ({len(images_b64)} images, ~{total_kb}KB total)")
         try:
             async with session.post(f"{self.base_url}/api/generate", json=payload) as resp:
                 if resp.status == 200:
                     data = await resp.json()
                     response = data.get("response", "").strip()
                     if response:
-                        self._log(f"[Ollama] Response: {response[:200]}")
+                        self._log(f"[Ollama] → {response[:250]}")
                     else:
                         self._log("[Ollama] Empty response", level="warn")
                     return response
-                err_text = await resp.text()
-                self._log(f"[Ollama] HTTP {resp.status}: {err_text[:200]}", level="error")
+                err = await resp.text()
+                self._log(f"[Ollama] HTTP {resp.status}: {err[:200]}", level="error")
                 return ""
         except asyncio.TimeoutError:
-            self._log(f"[Ollama] TIMEOUT after {self.timeout}s — model too slow on this CPU", level="error")
+            self._log(f"[Ollama] TIMEOUT after {self.timeout}s", level="error")
             return ""
         except Exception as e:
             self._log(f"[Ollama] Error: {e}", level="error")
             return ""
 
-    async def query_with_retry(self, prompt: str, image_b64: str, max_tokens: int = 300, retries: int = 1) -> str:
+    async def query_with_retry(self, prompt: str, images_b64: List[str],
+                               max_tokens: int = 300, retries: int = 1) -> str:
         for attempt in range(retries + 1):
-            result = await self.query(prompt, image_b64, max_tokens)
+            result = await self.query(prompt, images_b64, max_tokens)
             if result:
                 return result
             if attempt < retries:
@@ -102,7 +121,6 @@ class OllamaVisionClient:
     async def close(self):
         if self._session and not self._session.closed:
             await self._session.close()
-        OllamaVisionClient._instance = None
 
 
 STEALTH_SCRIPT = """
@@ -199,22 +217,10 @@ class Verifier:
         return False
 
 
-def _resize_b64(image_bytes: bytes, max_dim: int = 800) -> bytes:
-    """Resize image so longest side <= max_dim, return PNG bytes."""
-    img = Image.open(io.BytesIO(image_bytes))
-    w, h = img.size
-    if max(w, h) <= max_dim:
-        return image_bytes
-    scale = max_dim / max(w, h)
-    new_w, new_h = int(w * scale), int(h * scale)
-    img = img.resize((new_w, new_h), Image.LANCZOS)
-    buf = io.BytesIO()
-    img.save(buf, format="PNG", optimize=True)
-    return buf.getvalue()
-
-
 class GridSolver:
-    """Solves grid captchas using Qwen2.5-VL vision."""
+    """Solves grid captchas by splitting into individual tiles and sending
+    all tiles as separate images in ONE Qwen2.5-VL query.
+    Each tile is small (~170x190px), so inference is fast even on CPU."""
 
     def __init__(self, config: SolverConfig, log: Optional[Callable] = None):
         self.config = config
@@ -227,183 +233,181 @@ class GridSolver:
         return self.ollama
 
     async def solve(self, page: Page) -> bool:
-        self._log("[GridSolver] Starting with Qwen2.5-VL...")
+        self._log("[GridSolver] Starting...")
 
-        iframe_selectors = [
+        # 1. Find the challenge iframe
+        iframe = await self._find_challenge_iframe(page)
+        if not iframe:
+            self._log("[GridSolver] No challenge iframe found", level="error")
+            return False
+
+        # 2. Get challenge text
+        challenge_text = await self._get_challenge_text(page)
+
+        # 3. Screenshot the iframe area
+        box = await iframe.bounding_box()
+        if not box or box['width'] < 80:
+            self._log("[GridSolver] Iframe bounding box too small", level="error")
+            return False
+
+        self._log(f"[GridSolver] Captured {box['width']:.0f}x{box['height']:.0f} challenge area")
+        try:
+            screenshot_bytes = await page.screenshot(clip={
+                "x": box['x'], "y": box['y'],
+                "width": box['width'], "height": box['height']
+            })
+        except Exception as e:
+            self._log(f"[GridSolver] Screenshot failed: {e}", level="error")
+            return False
+
+        # 4. Split into individual tile images
+        tiles_img = await self._extract_tiles(page, box)
+        if not tiles_img:
+            # Fallback: split the screenshot manually into 3x3 grid
+            tiles_img = self._split_grid(screenshot_bytes, cols=3)
+
+        self._log(f"[GridSolver] Split into {len(tiles_img)} tiles")
+
+        # 5. Resize each tile to small (max 140px) for fast inference
+        tile_b64s = []
+        for tile in tiles_img:
+            small = _resize_image(tile, max_dim=140)
+            tile_b64s.append(_img_to_b64(small))
+
+        prompt = (f"hCaptcha challenge: \"{challenge_text or 'Select matching images'}\"\\n"
+                  f"Tile 0 to {len(tile_b64s)-1}. For each tile, reply YES if it matches the challenge text, "
+                  f"NO if not.\\n"
+                  f"Reply with a JSON array of matching tile numbers ONLY. Example: [0,3,5] or []")
+
+        # 6. Send ALL tile images in ONE query
+        ollama = await self._get_ollama()
+        answer = await ollama.query_with_retry(prompt, tile_b64s, max_tokens=100)
+        tile_nums = self._parse_tiles(answer)
+
+        if not tile_nums:
+            # Retry with simpler prompt
+            self._log("[GridSolver] Retrying with simpler prompt...")
+            answer2 = await ollama.query_with_retry(
+                "Matching tile numbers as JSON array?", tile_b64s, max_tokens=100)
+            tile_nums = self._parse_tiles(answer2)
+
+        if not tile_nums:
+            self._log("[GridSolver] No matching tiles identified", level="error")
+            return False
+
+        self._log(f"[GridSolver] Clicking tiles: {tile_nums}")
+
+        # 7. Click the identified tiles
+        tile_boxes = await self._get_tile_boxes(page, box)
+        for idx in tile_nums:
+            if idx < len(tile_boxes):
+                x, y, w, h = tile_boxes[idx]
+                cx = x + w/2 + random.uniform(-3, 3)
+                cy = y + h/2 + random.uniform(-3, 3)
+                await HumanMouse.move_and_click(page, cx, cy)
+                await asyncio.sleep(0.12)
+
+        # 8. Click verify/submit button
+        await self._click_verify(page)
+        await asyncio.sleep(1.5)
+
+        solved = await Verifier(page).is_solved()
+        self._log(f"[GridSolver] {'✓ SOLVED' if solved else '✗ Not solved'}")
+        return solved
+
+    async def _find_challenge_iframe(self, page: Page):
+        selectors = [
             "iframe[src*='newassets.hcaptcha.com/captcha']",
             "iframe[src*='hcaptcha.com/captcha']",
             "iframe[title*='hCaptcha challenge']",
         ]
-        iframe = None
-        for sel in iframe_selectors:
+        for sel in selectors:
             try:
                 loc = page.locator(sel)
                 count = await loc.count()
                 for i in range(count):
                     box = await loc.nth(i).bounding_box()
                     if box and box['width'] > 80 and box['height'] > 80:
-                        iframe = loc.nth(i)
-                        self._log(f"[GridSolver] Found challenge iframe via: {sel} ({box['width']:.0f}x{box['height']:.0f})")
-                        break
-                if iframe:
-                    break
+                        self._log(f"[GridSolver] Iframe via: {sel} ({box['width']:.0f}x{box['height']:.0f})")
+                        return loc.nth(i)
             except:
                 continue
+        return None
 
-        if not iframe:
-            self._log("[GridSolver] No iframe found, using page screenshot", level="warn")
-            return await self._solve_page(page)
+    async def _get_challenge_text(self, page: Page) -> str:
+        for sel in ["iframe[src*='newassets.hcaptcha.com/captcha']", "iframe[src*='hcaptcha.com/captcha']"]:
+            try:
+                frame = page.frame_locator(sel)
+                for text_sel in [".challenge-header .prompt-text", ".prompt-text", ".task-text", "h2"]:
+                    try:
+                        el = frame.locator(text_sel)
+                        if await el.count() > 0:
+                            text = (await el.first.text_content() or "").strip()
+                            if text:
+                                return text
+                    except:
+                        continue
+            except:
+                continue
+        return ""
 
-        challenge_text = ""
-        try:
-            frame = page.frame_locator(iframe_selectors[0])
-            for sel in [".challenge-header .prompt-text", ".prompt-text", ".task-text", "h2"]:
-                try:
-                    el = frame.locator(sel)
-                    if await el.count() > 0:
-                        challenge_text = (await el.first.text_content() or "").strip()
-                        if challenge_text:
-                            self._log(f"[GridSolver] Challenge text: '{challenge_text}'")
-                            break
-                except:
-                    continue
-        except:
-            pass
+    async def _extract_tiles(self, page: Page, iframe_box: dict) -> Optional[List[Image.Image]]:
+        """Try to screenshot individual tile elements from the iframe."""
+        for sel in ["iframe[src*='newassets.hcaptcha.com/captcha']", "iframe[src*='hcaptcha.com/captcha']"]:
+            try:
+                frame = page.frame_locator(sel)
+                for tile_sel in [".task-image .image", ".task-image img", ".challenge-item img"]:
+                    tiles = frame.locator(tile_sel)
+                    count = await tiles.count()
+                    if count > 0:
+                        imgs = []
+                        for i in range(count):
+                            try:
+                                b = await tiles.nth(i).bounding_box()
+                                if b and b['width'] > 20:
+                                    ss = await tiles.nth(i).screenshot()
+                                    imgs.append(Image.open(io.BytesIO(ss)))
+                            except:
+                                continue
+                        if imgs:
+                            return imgs
+            except:
+                continue
+        return None
 
-        try:
-            box = await iframe.bounding_box()
-            if not box or box['width'] < 100:
-                self._log("[GridSolver] Iframe too small, using page screenshot", level="warn")
-                return await self._solve_page(page)
-            self._log(f"[GridSolver] Iframe: {box['width']:.0f}x{box['height']:.0f} at ({box['x']:.0f},{box['y']:.0f})")
-            screenshot_bytes = await page.screenshot(clip={
-                "x": box['x'], "y": box['y'],
-                "width": box['width'], "height": box['height']
-            })
-            # Resize to save bandwidth and speed up inference
-            screenshot_bytes = _resize_b64(screenshot_bytes, max_dim=640)
-        except Exception as e:
-            self._log(f"[GridSolver] Screenshot failed: {e}", level="error")
-            return await self._solve_page(page)
-
-        b64 = base64.b64encode(screenshot_bytes).decode("utf-8")
-        ollama = await self._get_ollama()
-
-        prompt = f"""hCaptcha grid challenge. Text: "{challenge_text or 'Select matching images'}"
-Tiles numbered 0-8, left-to-right top-to-bottom.
-Tell me which tile numbers to click.
-Reply with ONLY a plain JSON array. Example: [0,3,5] or []
-Do NOT include markdown, code blocks, or coordinates.
-Just the array."""
-
-        self._log("[GridSolver] Querying Qwen...")
-        answer = await ollama.query_with_retry(prompt, b64, max_tokens=100)
-        self._log(f"[GridSolver] Qwen response: {answer[:200] if answer else 'EMPTY'}")
-
-        tile_nums = self._parse_tiles(answer)
-        if not tile_nums:
-            self._log("[GridSolver] Retrying with simpler prompt...")
-            answer2 = await ollama.query_with_retry(
-                "Which numbered tiles to click? JSON array only.", b64, max_tokens=100)
-            if answer2:
-                self._log(f"[GridSolver] Retry response: {answer2[:200]}")
-            tile_nums = self._parse_tiles(answer2)
-
-        if not tile_nums:
-            self._log("[GridSolver] No tiles identified — Qwen couldn't parse the image", level="error")
-            return False
-
-        self._log(f"[GridSolver] Clicking tiles: {tile_nums}")
-
-        try:
-            # Try to get individual tile positions from iframe
-            tiles = await self._get_tiles(page, box)
-        except:
-            tiles = []
-
-        if not tiles:
-            # Fall back to estimating grid positions
-            self._log("[GridSolver] Using estimated grid positions")
-            bx, by, bw, bh = box['x'], box['y'], box['width'], box['height']
-            tiles = []
-            for r in range(3):
-                for c in range(3):
-                    tiles.append((bx + c * bw // 3, by + r * bh // 3, bw // 3, bh // 3))
-
-        for idx in tile_nums:
-            if idx < len(tiles):
-                x, y, w, h = tiles[idx]
-                cx = x + w/2 + random.uniform(-3, 3)
-                cy = y + h/2 + random.uniform(-3, 3)
-                await HumanMouse.move_and_click(page, cx, cy)
-                await asyncio.sleep(0.15)
-
-        await self._click_verify(page)
-        verifier = Verifier(page)
-        await asyncio.sleep(1.0)
-        solved = await verifier.is_solved()
-        self._log(f"[GridSolver] {'SOLVED!' if solved else 'Still not solved'}")
-        return solved
-
-    async def _solve_page(self, page: Page) -> bool:
-        self._log("[GridSolver] Using full-page screenshot fallback")
-        screenshot_bytes = await page.screenshot()
-        screenshot_bytes = _resize_b64(screenshot_bytes, max_dim=640)
-        b64 = base64.b64encode(screenshot_bytes).decode("utf-8")
-        ollama = await self._get_ollama()
-        answer = await ollama.query_with_retry(
-            "hCaptcha grid. Tiles 0-8. Reply with only a plain JSON array like [0,3,5]. No markdown, no coordinates.",
-            b64, max_tokens=100)
-        self._log(f"[GridSolver] Fallback response: {answer[:200] if answer else 'EMPTY'}")
-        tile_nums = self._parse_tiles(answer)
-        if not tile_nums:
-            self._log("[GridSolver] Fallback failed — no tiles identified", level="error")
-            return False
+    def _split_grid(self, screenshot_bytes: bytes, cols: int = 3) -> List[Image.Image]:
+        """Split a captcha screenshot into a grid of individual tile images."""
         img = Image.open(io.BytesIO(screenshot_bytes))
         w, h = img.size
-        gx, gy = int(w * 0.15), int(h * 0.35)
-        gw, gh = int(w * 0.7), int(h * 0.45)
-        cols = 3
-        tw, th = gw // cols, gh // cols
-        for idx in tile_nums:
-            if idx >= cols * cols:
-                continue
-            r, c = divmod(idx, cols)
-            await HumanMouse.move_and_click(page, gx + c * tw + tw // 2, gy + r * th + th // 2)
-            await asyncio.sleep(0.15)
-        await self._click_verify(page)
-        verifier = Verifier(page)
-        await asyncio.sleep(1.0)
-        return await verifier.is_solved()
+        # The grid is usually in the bottom ~60% of the captcha iframe
+        # Header is ~15%, tiles start at ~15% from top
+        grid_top = int(h * 0.12)
+        grid_height = h - grid_top
+        rows = cols
+        tw = w // cols
+        th = grid_height // rows
+        tiles = []
+        for r in range(rows):
+            for c in range(cols):
+                tile = img.crop((c * tw, grid_top + r * th,
+                                 (c + 1) * tw, grid_top + (r + 1) * th))
+                tiles.append(tile)
+        return tiles
 
     def _parse_tiles(self, answer: str) -> List[int]:
-        """Parse Qwen response to extract tile indices.
-        Handles multiple formats:
-        - Simple array: [0, 3, 5]
-        - Named objects: [{"number": 1, "coordinate": [x, y]}, ...]
-        - Markdown-wrapped: ```json [...] ```
-        """
         if not answer:
             return []
-        # Remove markdown code block markers
         answer = re.sub(r'```(?:json)?\s*|\s*```', '', answer).strip()
-        
-        # Find outermost brackets (greedy, handles nested arrays)
         start = answer.find('[')
         end = answer.rfind(']')
         if start == -1 or end == -1 or end <= start:
             return []
-        
         try:
             parsed = json.loads(answer[start:end+1])
             if not isinstance(parsed, list):
                 return []
-            
-            # Format 1: simple array of ints [0, 3, 5]
             if all(isinstance(x, (int, float)) for x in parsed):
                 return [int(x) for x in parsed if 0 <= int(x) <= 50]
-            
-            # Format 2: array of objects {"number": X} or {"tile": X} or {"index": X}
             nums = []
             for item in parsed:
                 if isinstance(item, dict):
@@ -414,11 +418,12 @@ Just the array."""
                             break
             if nums:
                 return nums
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, ValueError):
             pass
         return []
 
-    async def _get_tiles(self, page: Page, iframe_box: dict) -> List[Tuple[float, float, float, float]]:
+    async def _get_tile_boxes(self, page: Page, iframe_box: dict) -> List[Tuple[float, float, float, float]]:
+        """Get bounding boxes for each tile, either from iframe elements or estimated."""
         for sel in ["iframe[src*='newassets.hcaptcha.com/captcha']", "iframe[src*='hcaptcha.com/captcha']"]:
             try:
                 frame = page.frame_locator(sel)
@@ -426,16 +431,28 @@ Just the array."""
                     tiles = frame.locator(tile_sel)
                     count = await tiles.count()
                     if count > 0:
-                        positions = []
+                        result = []
                         for i in range(count):
                             box = await tiles.nth(i).bounding_box()
                             if box:
-                                positions.append((box['x'], box['y'], box['width'], box['height']))
-                        if positions:
-                            return positions
+                                result.append((box['x'], box['y'], box['width'], box['height']))
+                        if result:
+                            return result
             except:
                 continue
-        return []
+        # Fallback: estimate grid
+        cols = 3
+        bx, by, bw, bh = iframe_box['x'], iframe_box['y'], iframe_box['width'], iframe_box['height']
+        grid_top = int(by + bh * 0.12)
+        grid_bottom = by + bh
+        gh = grid_bottom - grid_top
+        tw = bw // cols
+        th = gh // cols
+        result = []
+        for r in range(cols):
+            for c in range(cols):
+                result.append((bx + c * tw, grid_top + r * th, tw, th))
+        return result
 
     async def _click_verify(self, page: Page):
         for sel in ["iframe[src*='newassets.hcaptcha.com/captcha']", "iframe[src*='hcaptcha.com/captcha']"]:
@@ -630,10 +647,10 @@ async def main():
     config = SolverConfig()
     solver = MasterSolver(config)
     print("=" * 60)
-    print("  MasterSolver - Qwen2.5-VL powered")
+    print("  MasterSolver - Tile-split Qwen2.5-VL")
     print("=" * 60)
-    print(f"  Ollama: {config.ollama_base_url}")
-    print(f"  Model:  {config.ollama_model}")
+    print(f"  Model: {config.ollama_model}")
+    print("  Strategy: split grid→9 tiles→1 batch query")
     print("= " * 30)
 
 
