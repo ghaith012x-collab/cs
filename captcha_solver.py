@@ -130,9 +130,12 @@ class Mouse:
     def _jerk(t): return 10*t**3 - 15*t**4 + 6*t**5
 
     @staticmethod
-    def _path(sx, sy, ex, ey):
+    def _path(sx, sy, ex, ey, fast=False):
         d = math.hypot(ex - sx, ey - sy)
-        n = max(18, min(80, int(d / 4)))
+        if fast:
+            n = max(8, min(25, int(d / 8)))
+        else:
+            n = max(18, min(80, int(d / 4)))
         p = []
         for i in range(n):
             t = i / (n - 1)
@@ -150,20 +153,20 @@ class Mouse:
         await page.mouse.click(tx, ty)
 
     @staticmethod
-    async def drag(page, sx, sy, ex, ey):
-        for x, y in Mouse._path(sx + random.uniform(-20, 20), sy + random.uniform(-20, 20), sx, sy):
+    async def drag(page, sx, sy, ex, ey, fast=False):
+        for x, y in Mouse._path(sx + random.uniform(-20, 20), sy + random.uniform(-20, 20), sx, sy, fast):
             await page.mouse.move(x, y)
-            await asyncio.sleep(random.uniform(0.003, 0.006))
-        await asyncio.sleep(0.05)
+            await asyncio.sleep(random.uniform(0.002, 0.004) if fast else random.uniform(0.003, 0.006))
+        await asyncio.sleep(0.02 if fast else 0.05)
         await page.mouse.down()
-        await asyncio.sleep(0.03)
-        path = Mouse._path(sx, sy, ex, ey)
+        await asyncio.sleep(0.01 if fast else 0.03)
+        path = Mouse._path(sx, sy, ex, ey, fast)
         for x, y in path:
             await page.mouse.move(x, y)
-            await asyncio.sleep(random.uniform(0.004, 0.008))
-        await asyncio.sleep(0.05)
+            await asyncio.sleep(random.uniform(0.002, 0.004) if fast else random.uniform(0.004, 0.008))
+        await asyncio.sleep(0.02 if fast else 0.05)
         await page.mouse.up()
-        await asyncio.sleep(0.1)
+        await asyncio.sleep(0.05 if fast else 0.1)
 
 
 # ── Verifier ──────────────────────────────────────────────
@@ -606,9 +609,9 @@ class DragSolver:
         # For R-only/L-only: tries MULTIPLE drags internally.
         all_pairs = await self._opencv_find_all_pairs(page, iframe, box)
         if all_pairs:
-            for i, (sx, sy, ex, ey) in enumerate(all_pairs):
+            for i, (sx, sy, ex, ey) in enumerate(all_pairs[:6]):  # Max 6 pairs, fast drags
                 self._log(f'[Drag] OpenCV pair {i}: ({sx:.0f},{sy:.0f})→({ex:.0f},{ey:.0f})')
-                if await self._try_drag(page, sx, sy, ex, ey, f'CV{i}'):
+                if await self._try_drag(page, sx, sy, ex, ey, f'CV{i}', fast=True):
                     await self._save_template_on_success(page, iframe, box,
                                                          (sx, sy, ex, ey), template_key)
                     return True
@@ -618,44 +621,44 @@ class DragSolver:
             if await self._try_muscle_memory(page, iframe, box, template_key):
                 return True
 
-        # ── Method 3: TARGETED HEURISTICS ──
-        # Uses OpenCV's detection Y-position as anchor, sweeps horizontally.
-        self._log('[Drag] Targeted heuristics...')
+        # ── Method 3: FAST GRID SWEEP ──
+        # Sweeps the full iframe quickly with FAST drags (fewer mouse points).
+        # 4 rows × 6 L→R + 4 R→L = ~40 attempts × ~1.5s = ~60s
+        self._log('[Drag] Fast grid sweep...')
         bx, by, bw, bh = box['x'], box['y'], box['width'], box['height']
         
-        # Get Y positions from the all_pairs for targeting
-        if all_pairs:
-            avg_y = sum(p[1] for p in all_pairs) // len(all_pairs)
-        else:
-            avg_y = by + int(bh * 0.3)  # fallback: try top 30%
-        
-        # Try multiple Y rows around the detected Y position
-        for y_off in [0, -40, 40, -80, 80, -20, 20]:
-            sy = avg_y + y_off
-            if sy < by + 30 or sy > by + bh * 0.75:
-                continue
-            # Try L→R at 8 X fractions
-            for col_frac in [0.08, 0.15, 0.22, 0.30, 0.38]:
-                sx = bx + bw * col_frac
-                for end_frac in [0.55, 0.65, 0.75, 0.85, 0.92]:
-                    ex = bx + bw * end_frac
+        for row_frac in [0.15, 0.35, 0.55, 0.75]:
+            sy = by + bh * row_frac
+            # L→R from 6 start positions to 6 end positions
+            start_xs = [bx + bw * f for f in [0.05, 0.15, 0.25, 0.35, 0.45, 0.55]]
+            end_xs = [bx + bw * f for f in [0.65, 0.75, 0.85, 0.95]]
+            for sx in start_xs:
+                for ex in end_xs:
                     if abs(ex - sx) < 60:
                         continue
-                    if await self._try_drag(page, sx, sy, ex, sy, f'H{col_frac:.0f}'):
-                        await self._save_template_on_success(
-                            page, iframe, box, (sx, sy, ex, sy), template_key)
-                        return True
-            # Try R→L at 4 X fractions
-            for col_frac in [0.92, 0.85, 0.75]:
-                sx = bx + bw * col_frac
-                for end_frac in [0.08, 0.15, 0.22]:
-                    ex = bx + bw * end_frac
+                    await Mouse.drag(page, sx, sy, ex, sy, fast=True)
+                    await asyncio.sleep(0.5)
+                    if await Verifier(page).solved():
+                        await _click_verify(page)
+                        await asyncio.sleep(0.3)
+                        if await Verifier(page).solved():
+                            self._log(f'[Drag] ✓ Grid L→R@{row_frac:.0f}')
+                            return True
+            # R→L from 4 start positions
+            start_xs_r = [bx + bw * f for f in [0.95, 0.85, 0.75, 0.65]]
+            end_xs_r = [bx + bw * f for f in [0.05, 0.15, 0.25]]
+            for sx in start_xs_r:
+                for ex in end_xs_r:
                     if abs(ex - sx) < 60:
                         continue
-                    if await self._try_drag(page, sx, sy, ex, sy, f'HR{col_frac:.0f}'):
-                        await self._save_template_on_success(
-                            page, iframe, box, (sx, sy, ex, sy), template_key)
-                        return True
+                    await Mouse.drag(page, sx, sy, ex, sy, fast=True)
+                    await asyncio.sleep(0.5)
+                    if await Verifier(page).solved():
+                        await _click_verify(page)
+                        await asyncio.sleep(0.3)
+                        if await Verifier(page).solved():
+                            self._log(f'[Drag] ✓ Grid R→L@{row_frac:.0f}')
+                            return True
 
         self._log('[Drag] ✗ Failed', level='error')
         return False
@@ -883,13 +886,13 @@ class DragSolver:
         else:
             return "top_to_bottom" if dy > 0 else "bottom_to_top"
 
-    async def _try_drag(self, page, sx, sy, ex, ey, label: str) -> bool:
+    async def _try_drag(self, page, sx, sy, ex, ey, label: str, fast=False) -> bool:
         self._log(f"[Drag] Trying {label}: ({sx:.0f},{sy:.0f})→({ex:.0f},{ey:.0f})")
-        await Mouse.drag(page, sx, sy, ex, ey)
-        await asyncio.sleep(1)
+        await Mouse.drag(page, sx, sy, ex, ey, fast=fast)
+        await asyncio.sleep(0.5 if fast else 1)
         if await Verifier(page).solved():
             await _click_verify(page)
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(0.3 if fast else 0.5)
             if await Verifier(page).solved():
                 self._log(f"[Drag] ✓ ({label})")
                 return True
