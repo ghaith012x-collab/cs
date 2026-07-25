@@ -564,37 +564,86 @@ class FarmSession:
                     rec.tiles_captured = len(tiles_pil) if tiles_pil else 0
                     self._log(f"  Tiles captured: {rec.tiles_captured}")
 
-                    # Save tiles to database
+                    # ── Classify tiles with Moondream and save only matches ──
                     if tiles_pil and not self.db._noop:
-                        class_name = objects[0] if objects else "unknown"
+                        # Get the primary object name from challenge text
+                        target = objects[0] if objects else "unknown"
+                        
+                        # Classify each tile using Moondream (via GridSolver's ollama client)
+                        classified_tiles = []  # (tile_pil, class_name, confidence)
+                        
+                        if self._grid_solver and hasattr(self._grid_solver, 'ollama') and self._grid_solver.ollama:
+                            self._log(f"  🔍 Classifying {len(tiles_pil)} tiles with Moondream...")
+                            
+                            for i, tile in enumerate(tiles_pil):
+                                if not self.running:
+                                    break
+                                cropped = _smart_crop(tile, padding=0.15)
+                                buf = io.BytesIO()
+                                cropped.save(buf, format='PNG', optimize=True)
+                                b64 = base64.b64encode(buf.getvalue()).decode()
+                                
+                                # Ask Moondream: does this tile contain the target?
+                                try:
+                                    ans = await self._grid_solver.ollama.ask_retry(
+                                        f"Does this tile contain a {target}? Answer YES or NO only.",
+                                        [b64], 50)
+                                    if ans and 'yes' in ans.strip().lower()[:10]:
+                                        classified_tiles.append((cropped, target, 0.9))
+                                    elif objects and len(objects) > 1:
+                                        # Try the second object (e.g., for drag challenges)
+                                        target2 = objects[1]
+                                        ans2 = await self._grid_solver.ollama.ask_retry(
+                                            f"Does this tile contain a {target2}? Answer YES or NO only.",
+                                            [b64], 50)
+                                        if ans2 and 'yes' in ans2.strip().lower()[:10]:
+                                            classified_tiles.append((cropped, target2, 0.9))
+                                        else:
+                                            classified_tiles.append((cropped, target, 0.4))
+                                    else:
+                                        classified_tiles.append((cropped, target, 0.4))
+                                except Exception as tile_err:
+                                    self._log(f"  Tile {i} classify error: {tile_err}", level="warn")
+                                    classified_tiles.append((cropped, target, 0.5))
+                        else:
+                            # No Moondream available — save all with medium confidence
+                            self._log("  ⚠️ No Moondream available, saving tiles with medium confidence")
+                            for tile in tiles_pil:
+                                cropped = _smart_crop(tile, padding=0.15)
+                                classified_tiles.append((cropped, target, 0.6))
+                        
+                        # Save classified tiles to DB
                         tile_records = []
-                        for tile in tiles_pil:
-                            cropped = _smart_crop(tile, padding=0.15)
+                        thumb_b64 = None
+                        for cropped, cls_name, conf in classified_tiles:
                             buf = io.BytesIO()
                             cropped.save(buf, format='PNG', optimize=True)
                             b64 = base64.b64encode(buf.getvalue()).decode()
                             tile_records.append({
-                                'class_name': class_name,
+                                'class_name': cls_name,
                                 'image_b64': b64,
                                 'challenge': captcha_text[:100],
-                                'confidence': 0.9,
-                                'success': True,
+                                'confidence': conf,
+                                'success': conf >= 0.7,
                             })
+                        
                         saved = await self.db.save_tiles_batch(tile_records)
                         rec.tiles_saved = saved
                         self.tiles_saved_total += saved
-                        # Generate a small thumbnail for the log entry
-                        thumb_b64 = None
-                        if tiles_pil:
+                        
+                        # Thumbnail for logs
+                        if classified_tiles:
                             try:
-                                thumb = tiles_pil[0].copy()
+                                thumb = classified_tiles[0][0].copy()
                                 thumb.thumbnail((100, 100))
                                 buf = io.BytesIO()
                                 thumb.save(buf, format='PNG')
                                 thumb_b64 = base64.b64encode(buf.getvalue()).decode()
                             except:
                                 pass
-                        self._log(f"  💾 Saved {saved} tiles to DB [{class_name}]", image_b64=thumb_b64)
+                        
+                        matching = sum(1 for _, _, c in classified_tiles if c >= 0.7)
+                        self._log(f"  💾 Saved {saved} tiles ({matching}/{len(classified_tiles)} matching '{target}')", image_b64=thumb_b64)
 
             rec.time_taken = time.time() - start
             self.recognitions.append(rec)
@@ -628,12 +677,25 @@ class FarmSession:
 
     @staticmethod
     def _extract_objects(text: str, ctype: str = "grid") -> list:
-        """Extract object names from challenge text."""
+        """Extract object names from challenge text.
+        
+        'click all images containing a star' → ['star']
+        'select all squares with buses' → ['bus']
+        'Please drag the spaceship to the star' → ['spaceship', 'star']
+        'which animal is odd' → searches known list
+        """
         if not text:
             return ["unknown"]
-        t = text.lower().strip()
+        
+        # Normalize: lowercase, strip, remove polite prefixes
+        t = text.lower().strip().strip('.!?,:;')
+        for polite in ['please ', 'kindly ', 'now ']:
+            if t.startswith(polite):
+                t = t[len(polite):].strip()
+        
         objects = []
 
+        # ── Odd one out / which is different ──
         if any(w in t for w in ['odd', 'different', 'does not belong',
                                  'disappearing', 'dissapearing']):
             known = ['lion', 'tiger', 'bear', 'elephant', 'gorilla', 'monkey',
@@ -659,6 +721,7 @@ class FarmSession:
                 objects.append("odd_one_out")
             return objects
 
+        # ── Grid: "select all images containing a star" ──
         phrases = ['select all images containing ', 'click all images with ',
                    'select all squares with ', 'click all squares containing ',
                    'choose all images with ', 'select all matching ',
@@ -672,19 +735,32 @@ class FarmSession:
                         subj = subj[len(art):]
                 words = subj.split()
                 if words:
-                    objects.append(words[0])
+                    o = words[0].strip('.,!?:;')
+                    if o and o not in objects:
+                        objects.append(o)
                 break
 
+        # ── Drag: "drag the spaceship to the star" ──
         if any(w in t for w in ['drag', 'move', 'slide', 'place']):
+            # Remove the action word prefix if present
+            for action in ['drag ', 'move ', 'slide ', 'place ']:
+                if t.startswith(action):
+                    t = t[len(action):].strip()
+                    break
+            # Remove articles
+            for art in ['the ', 'a ', 'an ', 'your ']:
+                if t.startswith(art):
+                    t = t[len(art):].strip()
+                    break
+            # Split by ' to ', ' into ', ' onto ', ' in '
             for sep in [' to ', ' into ', ' onto ', ' in ']:
                 if sep in t:
                     parts = t.split(sep, 1)
                     for part in parts:
                         cleaned = part.strip().strip('.!?,:;')
-                        for prefix in ['drag ', 'move ', 'slide ', 'place ',
-                                       'the ', 'a ', 'an ', 'your ']:
-                            if cleaned.startswith(prefix):
-                                cleaned = cleaned[len(prefix):]
+                        for art in ['the ', 'a ', 'an ', 'your ']:
+                            if cleaned.startswith(art):
+                                cleaned = cleaned[len(art):]
                         words = cleaned.split()
                         if words:
                             o = words[0].strip('.,!?:;')
