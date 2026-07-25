@@ -319,58 +319,44 @@ class GridSolver:
         text = await _challenge_text(page)
         self._log(f"[Grid] Challenge: '{text[:60]}' | area {box['width']:.0f}x{box['height']:.0f}")
 
-        # Get smaller tile images (DOM if possible, otherwise split screenshot)
-        tiles_b64 = await self._get_tile_b64s(page, box)
-        if not tiles_b64:
-            self._log("[Grid] Splitting screenshot into tiles")
+        # Get example image + tiles for OpenCV matching
+        tiles_pil, tile_boxes = await self._get_tiles_dom(page, box)
+        if not tiles_pil:
+            self._log("[Grid] DOM tiles not found, splitting screenshot")
             raw = await page.screenshot(clip={"x": box['x'], "y": box['y'], "width": box['width'], "height": box['height']})
-            tiles_pil = self._split_grid(raw, 3)
+            tiles_pil = self._split_grid(raw)
+            tile_boxes = []
+
+        self._log(f"[Grid] {len(tiles_pil)} tiles")
+
+        # Method 1: OpenCV template matching (instant, no AI)
+        # Works when grid has an "example" image — matches example against each tile
+        nums = await self._solve_opencv(page)
+        if nums:
+            self._log(f"[Grid] OpenCV matched tiles: {nums}")
+        else:
+            # Method 2: Moondream AI (slow but works for text-based challenges)
+            self._log("[Grid] OpenCV failed, trying Moondream...")
             tiles_b64 = [_b64(_resize(t, 140)) for t in tiles_pil]
-
-        self._log(f"[Grid] {len(tiles_b64)} tiles prepared")
-
-        if not self.ollama:
-            self.ollama = OllamaClient(self.config, log=self._log)
-
-        # Extract target object from challenge text
-        subject = self._extract_subject(text)
-        self._log(f"[Grid] Looking for: '{subject}'")
-
-        # Query ONE tile at a time — tiny images, simple YES/NO
-        nums = []
-        for i, tile_b64 in enumerate(tiles_b64):
-            ans = await self.ollama.ask_retry(
-                f"Does this tile contain a {subject}? Answer YES or NO only.",
-                [tile_b64], 50)
-            ans_lower = ans.strip().lower()[:10]
-            if 'yes' in ans_lower:
-                nums.append(i)
-                self._log(f"[Grid] Tile {i}: YES")
-            else:
-                self._log(f"[Grid] Tile {i}: no")
-            await asyncio.sleep(0.05)
-
-        # Fallback: ask about whole image
-        if not nums:
-            self._log("[Grid] No tiles matched, trying single-image fallback...")
-            ss = await _iframe_b64(iframe, max_dim=400) or tiles_b64[0]
-            ans = await self.ollama.ask_retry(
-                f"hCaptcha: \"{text}\". Which numbered tiles have {subject}? Reply numbers with spaces: 0 3 5",
-                [ss], 50)
-            if ans:
-                found = re.findall(r'\\d+', ans)
-                nums = [int(n) for n in found if 0 <= int(n) <= 50][:9]
-                if nums:
-                    self._log(f"[Grid] Fallback tiles: {nums}")
+            if not self.ollama:
+                self.ollama = OllamaClient(self.config, log=self._log)
+            subject = self._extract_subject(text)
+            self._log(f"[Grid] Looking for: '{subject}'")
+            nums = []
+            for i, tile_b64 in enumerate(tiles_b64):
+                ans = await self.ollama.ask_retry(
+                    f"Does this tile contain a {subject}? Answer YES or NO only.",
+                    [tile_b64], 50)
+                if 'yes' in ans.strip().lower()[:10]:
+                    nums.append(i)
+                    self._log(f"[Grid] Tile {i}: YES")
 
         if not nums:
             self._log("[Grid] No tiles identified", level="error")
             return False
 
-        self._log(f"[Grid] Tiles to click: {nums}")
-
-        # Click each tile
-        tboxes = await self._get_tile_boxes(page, box)
+        # Click tiles
+        tboxes = tile_boxes or await self._get_tile_boxes(page, box)
         for idx in nums:
             if idx < len(tboxes):
                 x, y, w, h = tboxes[idx]
@@ -383,6 +369,113 @@ class GridSolver:
         ok = await Verifier(page).solved()
         self._log(f"[Grid] {'✓' if ok else '✗'}")
         return ok
+
+    async def _solve_opencv(self, page: Page) -> Optional[List[int]]:
+        """Use OpenCV template matching to find tiles matching the example image.
+        Finds the 'example' image element in the iframe, screenshots it,
+        then matches it against each tile using normalized cross-correlation."""
+        try:
+            # Find example image in hCaptcha iframe
+            example_raw = None
+            tiles_raw = []
+            tile_boxes = []
+
+            for sel in IFRAME_SELS:
+                f = page.frame_locator(sel)
+                # Look for example image (usually first or has 'example' class)
+                for es in [".example-image img", ".example-image", 
+                          "[class*='example'] img", "[class*='example']",
+                          ".challenge-example img", ".challenge-example"]:
+                    try:
+                        ex = f.locator(es)
+                        if await ex.count() > 0:
+                            example_raw = await ex.first.screenshot()
+                            if example_raw and len(example_raw) > 100:
+                                break
+                    except:
+                        continue
+                
+                # Get tile images
+                for ts in [".task-image .image", ".task-image img", ".challenge-item img"]:
+                    try:
+                        tiles = f.locator(ts)
+                        n = await tiles.count()
+                        if n > 0:
+                            for i in range(min(n, 12)):
+                                b = await tiles.nth(i).bounding_box()
+                                if b and b['width'] > 20:
+                                    raw = await tiles.nth(i).screenshot()
+                                    tiles_raw.append(raw)
+                                    tile_boxes.append((b['x'], b['y'], b['width'], b['height']))
+                            break
+                    except:
+                        continue
+                if tiles_raw:
+                    break
+
+            if not example_raw or len(tiles_raw) < 3:
+                return None
+
+            # Convert to grayscale for matching
+            example_gray = cv2.imdecode(np.frombuffer(example_raw, np.uint8), cv2.IMREAD_GRAYSCALE)
+            if example_gray is None or example_gray.shape[0] < 10:
+                return None
+
+            self._log(f"[Grid] OpenCV: {len(tiles_raw)} tiles, example={example_gray.shape[1]}x{example_gray.shape[0]}")
+
+            # Match example against each tile
+            matched = []
+            for i, tile_raw in enumerate(tiles_raw):
+                tile_gray = cv2.imdecode(np.frombuffer(tile_raw, np.uint8), cv2.IMREAD_GRAYSCALE)
+                if tile_gray is None:
+                    continue
+
+                # Resize example to tile size for fair comparison
+                ex_resized = cv2.resize(example_gray, (tile_gray.shape[1], tile_gray.shape[0]))
+
+                # Try multiple matching methods
+                best = 0
+                for method in [cv2.TM_CCOEFF_NORMED, cv2.TM_CCORR_NORMED]:
+                    try:
+                        result = cv2.matchTemplate(tile_gray, ex_resized, method)
+                        _, max_val, _, _ = cv2.minMaxLoc(result)
+                        best = max(best, max_val)
+                    except:
+                        continue
+
+                self._log(f"[Grid] Tile {i}: match={best:.3f}")
+                if best > 0.6:  # Threshold for match
+                    matched.append(i)
+
+            if matched:
+                self._log(f"[Grid] OpenCV matched {len(matched)}/{len(tiles_raw)} tiles")
+                return matched
+
+            # Try histogram comparison (more robust for different sizes)
+            matched = []
+            for i, tile_raw in enumerate(tiles_raw):
+                tile_img = cv2.imdecode(np.frombuffer(tile_raw, np.uint8), cv2.IMREAD_COLOR)
+                ex_img = cv2.imdecode(np.frombuffer(example_raw, np.uint8), cv2.IMREAD_COLOR)
+                if tile_img is None or ex_img is None:
+                    continue
+                tile_hsv = cv2.cvtColor(tile_img, cv2.COLOR_BGR2HSV)
+                ex_hsv = cv2.cvtColor(ex_img, cv2.COLOR_BGR2HSV)
+                tile_hist = cv2.calcHist([tile_hsv], [0, 1], None, [8, 8], [0, 180, 0, 256])
+                ex_hist = cv2.calcHist([ex_hsv], [0, 1], None, [8, 8], [0, 180, 0, 256])
+                cv2.normalize(tile_hist, tile_hist, 0, 1, cv2.NORM_MINMAX)
+                cv2.normalize(ex_hist, ex_hist, 0, 1, cv2.NORM_MINMAX)
+                similarity = cv2.compareHist(tile_hist, ex_hist, cv2.HISTCMP_CORREL)
+                self._log(f"[Grid] Tile {i}: hist={similarity:.3f}")
+                if similarity > 0.7:
+                    matched.append(i)
+
+            if matched:
+                self._log(f"[Grid] Hist matched {len(matched)}/{len(tiles_raw)} tiles")
+            return matched if matched else None
+
+        except Exception as e:
+            self._log(f"[Grid] OpenCV error: {e}", level="warn")
+            return None
 
     @staticmethod
     def _extract_subject(text: str) -> str:
@@ -412,7 +505,8 @@ class GridSolver:
                     return subj.split()[0]
         return "the object"
 
-    async def _get_tile_b64s(self, page: Page, box: dict) -> Optional[List[str]]:
+    async def _get_tiles_dom(self, page: Page, box: dict) -> Tuple[List[Image.Image], List[Tuple]]:
+        """Get tile images and their page coordinates from the iframe DOM."""
         for sel in IFRAME_SELS:
             try:
                 f = page.frame_locator(sel)
@@ -420,20 +514,22 @@ class GridSolver:
                     tiles = f.locator(ts)
                     n = await tiles.count()
                     if n > 0:
-                        result = []
+                        imgs = []
+                        boxes = []
                         for i in range(min(n, 12)):
                             try:
                                 b = await tiles.nth(i).bounding_box()
                                 if b and b['width'] > 20:
                                     raw = await tiles.nth(i).screenshot()
-                                    result.append(_b64(_resize(Image.open(io.BytesIO(raw)), 140)))
+                                    imgs.append(Image.open(io.BytesIO(raw)))
+                                    boxes.append((b['x'], b['y'], b['width'], b['height']))
                             except:
                                 continue
-                        if result:
-                            return result
+                        if imgs:
+                            return imgs, boxes
             except:
                 continue
-        return None
+        return [], []
 
     def _split_grid(self, raw: bytes, cols: int = 3) -> List[Image.Image]:
         img = Image.open(io.BytesIO(raw))
