@@ -515,7 +515,8 @@ class DragSolver:
 
         # ── Method 2: CANVAS COLOR CLUSTERING ──
         # Uses color segmentation to find distinct objects (rocketship, star) by hue
-        canvas_coords = await self._canvas_color_cluster(page, box)
+        # Screenshot the iframe element directly (Locator has .screenshot(), FrameLocator doesn't)
+        canvas_coords = await self._canvas_color_cluster(iframe, box)
         if canvas_coords:
             if await self._try_drag(page, *canvas_coords, "Canvas"):
                 await self._save_template_on_success(page, iframe, box, canvas_coords, template_key)
@@ -528,7 +529,7 @@ class DragSolver:
 
         # ── Method 4: MULTI-OBJECT CANVAS PAIRS ──
         # Find ALL colored objects and try every pair combination
-        pair_coords = await self._canvas_pair_detection(page, box)
+        pair_coords = await self._canvas_pair_detection(iframe, box)
         if pair_coords:
             for coords in pair_coords[:6]:  # Try up to 6 best pairs
                 if await self._try_drag(page, *coords, "Pair"):
@@ -626,16 +627,12 @@ class DragSolver:
                 continue
         return None
 
-    async def _canvas_color_cluster(self, page: Page, box: dict) -> Optional[Tuple]:
-        """Find drag objects by HSV color clustering. Detects distinct colored regions
-        (drag objects are usually bright red/orange/blue against muted backgrounds)."""
+    async def _canvas_color_cluster(self, iframe, box: dict) -> Optional[Tuple]:
+        """Find drag objects by HSV color clustering on iframe screenshot.
+        Uses color ranges for common drag objects (red rocketship, star, etc.)."""
         try:
-            for sel in IFRAME_SELS:
-                f = page.frame_locator(sel)
-                raw = await f.first.screenshot()
-                if raw and len(raw) >= 500:
-                    break
-            else:
+            raw = await iframe.screenshot()
+            if not raw or len(raw) < 500:
                 return None
 
             img = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_COLOR)
@@ -730,15 +727,11 @@ class DragSolver:
             self._log(f"[Drag] Canvas error: {e}", level="warn")
             return None
 
-    async def _canvas_pair_detection(self, page: Page, box: dict) -> List[Tuple]:
+    async def _canvas_pair_detection(self, iframe, box: dict) -> List[Tuple]:
         """Find ALL distinct colored objects and return every possible drag→target pair."""
         try:
-            for sel in IFRAME_SELS:
-                f = page.frame_locator(sel)
-                raw = await f.first.screenshot()
-                if raw and len(raw) >= 500:
-                    break
-            else:
+            raw = await iframe.screenshot()
+            if not raw or len(raw) < 500:
                 return []
 
             img = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_COLOR)
