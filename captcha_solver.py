@@ -664,46 +664,37 @@ class DragSolver:
             if await self._try_muscle_memory(page, iframe, box, template_key):
                 return True
 
-        # ── Method 3: RAPID-FIRE RANDOM DRAGS ──
-        # Try 250 random positions across the iframe VERY fast (~0.2s each)
-        # Total: ~50s for 250 attempts — brute force beats heuristics!
-        self._log('[Drag] Rapid-fire (250 random attempts)...')
+        # ── Method 3: Y-AXIS GRID SWEEP ──
+        # Smart sweep: drag from left edge to right edge at every Y position.
+        # hCaptcha drag objects are always on one side of the iframe,
+        # targets on the other, at similar Y heights.
+        # Sweeping ALL Y positions at ~25px intervals = ~20 drags × 0.3s = ~6s!
+        self._log('[Drag] Y-sweep (60 positions)...')
         bx, by, bw, bh = box['x'], box['y'], box['width'], box['height']
         
-        # Generate random drag positions covering the full iframe
-        random.seed()
-        for attempt in range(250):
-            # Random start position
-            sx = bx + random.uniform(bw * 0.05, bw * 0.95)
-            sy = by + random.uniform(bh * 0.1, bh * 0.75)
-            # Random end position (mostly to the right/left for horizontal drags)
-            if random.random() < 0.7:  # 70% horizontal
-                if random.random() < 0.6:  # 60% L→R
-                    ex = sx + random.uniform(50, bw * 0.8)
-                else:  # 40% R→L
-                    ex = sx - random.uniform(50, bw * 0.8)
-                ey = sy + random.uniform(-20, 20)
-            else:  # 30% vertical
-                ex = sx + random.uniform(-40, 40)
-                if random.random() < 0.5:
-                    ey = sy + random.uniform(50, bh * 0.6)
-                else:
-                    ey = sy - random.uniform(50, bh * 0.6)
+        # Pre-compute Y positions to try (top 70% of iframe, 10px steps)
+        y_positions = list(range(int(by + bh * 0.05), int(by + bh * 0.70), 10))
+        random.shuffle(y_positions)  # Shuffle to avoid hCaptcha detecting pattern
+        
+        # Left start, right target (most common)
+        left_x = bx + bw * 0.08  # 8% from left
+        right_x = bx + bw * 0.82  # 82% from left
+        
+        for attempt, y in enumerate(y_positions[:60]):
+            # Alternate direction per attempt
+            if attempt % 2 == 0:
+                sx, sy = left_x + random.uniform(-15, 15), y + random.uniform(-5, 5)
+                ex, ey = right_x + random.uniform(-15, 15), y + random.uniform(-5, 5)
+            else:
+                sx, sy = right_x + random.uniform(-15, 15), y + random.uniform(-5, 5)
+                ex, ey = left_x + random.uniform(-15, 15), y + random.uniform(-5, 5)
             
-            # Clamp to iframe bounds
-            ex = max(bx + 10, min(bx + bw - 10, ex))
-            ey = max(by + 10, min(by + bh - 10, ey))
-            
-            if abs(ex - sx) + abs(ey - sy) < 50:
-                continue
-            
-            # Super-fast drag: skip the human simulation, just teleport + snap
             try:
                 await page.mouse.move(sx, sy)
                 await page.mouse.down()
                 await page.mouse.move(ex, ey, steps=3)
                 await page.mouse.up()
-                await asyncio.sleep(0.15)
+                await asyncio.sleep(0.2)
             except Exception:
                 break
             
@@ -711,15 +702,49 @@ class DragSolver:
                 await _click_verify(page)
                 await asyncio.sleep(0.2)
                 if await Verifier(page).solved():
-                    self._log(f'[Drag] ✓ Rapid #{attempt}')
+                    self._log(f'[Drag] ✓ Sweep @Y={y:.0f}')
                     await self._save_template_on_success(
                         page, iframe, box, (sx, sy, ex, ey), template_key)
                     return True
             
-            if attempt > 0 and attempt % 50 == 0:
-                self._log(f'[Drag] ...{attempt} attempts so far')
+            if attempt > 0 and attempt % 15 == 0:
+                self._log(f'[Drag] Sweep: {attempt}/{len(y_positions)}')
         
-        self._log('[Drag] ✗ Failed (250 attempts)', level='error')
+        # If left→right sweep failed, try right→left with different offsets
+        self._log('[Drag] Y-sweep offset pass...')
+        for attempt, y in enumerate(y_positions[:40]):
+            # Try smaller drag distance (object might be closer together)
+            left_x2 = bx + bw * 0.15
+            right_x2 = bx + bw * 0.65
+            
+            if attempt % 2 == 0:
+                sx = left_x2 + random.uniform(-10, 10)
+                ex = right_x2 + random.uniform(-10, 10)
+            else:
+                sx = right_x2 + random.uniform(-10, 10)
+                ex = left_x2 + random.uniform(-10, 10)
+            sy = y + random.uniform(-5, 5)
+            ey = y + random.uniform(-15, 15)
+            
+            try:
+                await page.mouse.move(sx, sy)
+                await page.mouse.down()
+                await page.mouse.move(ex, ey, steps=2)
+                await page.mouse.up()
+                await asyncio.sleep(0.18)
+            except Exception:
+                break
+            
+            if await Verifier(page).solved():
+                await _click_verify(page)
+                await asyncio.sleep(0.2)
+                if await Verifier(page).solved():
+                    self._log(f'[Drag] ✓ Sweep2 @Y={y:.0f}')
+                    await self._save_template_on_success(
+                        page, iframe, box, (sx, sy, ex, ey), template_key)
+                    return True
+        
+        self._log('[Drag] ✗ Sweep failed', level='error')
         return False
 
     async def _js_find_drag_elements(self, page: Page, iframe, box: dict) -> Optional[Tuple]:
