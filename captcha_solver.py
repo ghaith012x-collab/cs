@@ -53,13 +53,16 @@ def _b64(img: Image.Image) -> str:
     return base64.b64encode(buf.getvalue()).decode("utf-8")
 
 
-def _ss_b64(page: Page, x: float, y: float, w: float, h: float, max_dim: int = 224) -> Optional[str]:
-    """Screenshot a region, resize, return base64."""
+async def _iframe_b64(iframe, max_dim: int = 320) -> Optional[str]:
+    """Screenshot an iframe element directly, resize, return base64.
+    Element-level screenshot is more reliable than page.clip() for iframes."""
     try:
-        raw = page.screenshot(clip={"x": x, "y": y, "width": w, "height": h})
+        raw = await iframe.screenshot()
+        if not raw or len(raw) < 100:
+            return None
         img = Image.open(io.BytesIO(raw))
         return _b64(_resize(img, max_dim))
-    except:
+    except Exception as e:
         return None
 
 
@@ -281,8 +284,16 @@ class GridSolver:
         text = await _challenge_text(page)
         self._log(f"[Grid] Challenge: '{text[:60]}' | area {box['width']:.0f}x{box['height']:.0f}")
 
-        # Take screenshot of challenge area
-        ss = _ss_b64(page, box['x'], box['y'], box['width'], box['height'], max_dim=400)
+        # Take screenshot of challenge area via element-level screenshot
+        ss = await _iframe_b64(iframe, max_dim=400)
+        if not ss:
+            self._log("[Grid] Iframe screenshot failed, retrying via page clip...", level="warn")
+            try:
+                raw = await page.screenshot(clip={"x": box['x'], "y": box['y'], "width": box['width'], "height": box['height']})
+                if raw and len(raw) > 100:
+                    ss = _b64(_resize(Image.open(io.BytesIO(raw)), 400))
+            except:
+                pass
         if not ss:
             self._log("[Grid] Screenshot failed", level="error")
             return False
@@ -459,9 +470,17 @@ class DragSolver:
 
         # Method 2: Use Qwen to identify drag source and target from screenshot
         self._log("[Drag] Using Qwen vision for coordinate detection...")
-        ss = _ss_b64(page, box['x'], box['y'], box['width'], box['height'], max_dim=320)
+        ss = await _iframe_b64(iframe, max_dim=320)
         if not ss:
-            self._log("[Drag] Screenshot failed", level="error")
+            self._log("[Drag] Iframe screenshot failed, trying page clip...", level="warn")
+            try:
+                raw = await page.screenshot(clip={"x": box['x'], "y": box['y'], "width": box['width'], "height": box['height']})
+                if raw and len(raw) > 100:
+                    ss = _b64(_resize(Image.open(io.BytesIO(raw)), 320))
+            except Exception as e:
+                self._log(f"[Drag] Page clip also failed: {e}", level="error")
+        if not ss:
+            self._log("[Drag] Screenshot failed entirely", level="error")
             return False
 
         if not self.ollama:
