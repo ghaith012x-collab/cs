@@ -108,14 +108,23 @@ class FarmSession:
         self._farm_task: Optional[asyncio.Task] = None
         self._latest_screenshot_b64 = ""
 
-    def _log(self, msg: str, level: str = "info"):
-        """Log a farm message (stored + printed)."""
+    def _log(self, msg: str, level: str = "info", image_b64: Optional[str] = None):
+        """Log a farm message (stored + printed).
+        
+        Args:
+            msg: The log message text
+            level: 'info', 'warn', or 'error'
+            image_b64: Optional base64 PNG thumbnail of a captured tile
+        """
         line = f"[Farm][{level.upper()}] {msg}"
         print(line, flush=True)
         if self._external_log:
             try: self._external_log(msg, level)
             except: pass
-        self._farm_logs.append({"time": time.strftime("%H:%M:%S"), "msg": msg, "level": level})
+        entry = {"time": time.strftime("%H:%M:%S"), "msg": msg, "level": level}
+        if image_b64:
+            entry["img"] = image_b64[:5000]  # keep thumbnails small
+        self._farm_logs.append(entry)
         if len(self._farm_logs) > self._max_logs:
             self._farm_logs = self._farm_logs[-self._max_logs:]
 
@@ -574,7 +583,18 @@ class FarmSession:
                         saved = await self.db.save_tiles_batch(tile_records)
                         rec.tiles_saved = saved
                         self.tiles_saved_total += saved
-                        self._log(f"  💾 Saved {saved} tiles to DB [{class_name}]")
+                        # Generate a small thumbnail for the log entry
+                        thumb_b64 = None
+                        if tiles_pil:
+                            try:
+                                thumb = tiles_pil[0].copy()
+                                thumb.thumbnail((100, 100))
+                                buf = io.BytesIO()
+                                thumb.save(buf, format='PNG')
+                                thumb_b64 = base64.b64encode(buf.getvalue()).decode()
+                            except:
+                                pass
+                        self._log(f"  💾 Saved {saved} tiles to DB [{class_name}]", image_b64=thumb_b64)
 
             rec.time_taken = time.time() - start
             self.recognitions.append(rec)

@@ -539,11 +539,12 @@ body{font-family:system-ui;background:#0a0f1e;color:#f1f5f9;min-height:100vh;dis
 .status-badge.running{background:#064e3b;color:#6ee7b7}
 .status-badge.stopped{background:#27272a;color:#a1a1aa}
 .log-box{background:#0d1326;border-radius:8px;padding:10px;max-height:200px;overflow-y:auto;font-family:monospace;font-size:11px;line-height:1.6}
-.log-entry{padding:2px 0;border-bottom:1px solid #1a2440}
-.log-time{color:#4b5563;margin-right:6px}
+.log-entry{padding:4px 0;border-bottom:1px solid #1a2440;display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.log-time{color:#4b5563;margin-right:4px;flex-shrink:0}
 .log-info{color:#a7f3d0}
 .log-warn{color:#fde68a}
 .log-error{color:#fca5a5}
+.log-thumb{width:48px;height:48px;border-radius:4px;border:1px solid #374;object-fit:cover;margin-left:auto;flex-shrink:0;background:#0d1326}
 .badge-demo{background:#6366f1;color:white;padding:2px 8px;border-radius:4px;font-size:10px;font-weight:700}
 .badge-discord{background:#5865f2;color:white;padding:2px 8px;border-radius:4px;font-size:10px;font-weight:700}
 .mode-btn{background:#1e2a45;color:#94a3b8;padding:8px 14px;border-radius:8px;border:0;font-size:12px;font-weight:600;cursor:pointer;transition:all .15s}
@@ -718,7 +719,11 @@ async function pollStatus(){
       let html='';
       for(let e of logs.slice(-30).reverse()){
         let cls='log-'+e.level;
-        html+='<div class=\"log-entry\"><span class=\"log-time\">'+e.time+'</span><span class=\"'+cls+'\">'+e.msg+'</span></div>';
+        let imgHtml='';
+        if(e.img){
+          imgHtml='<img class=\"log-thumb\" src=\"data:image/png;base64,'+e.img+'\" alt=\"tile\">';
+        }
+        html+='<div class=\"log-entry\"><span class=\"log-time\">'+e.time+'</span><span class=\"'+cls+'\">'+e.msg+'</span>'+imgHtml+'</div>';
       }
       lb.innerHTML=html;
     }
