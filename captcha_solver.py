@@ -523,38 +523,7 @@ class DragSolver:
             if await self._try_drag(page, coords[0], coords[1], coords[2], coords[3], "DOM"):
                 return True
 
-        # Method 3: Moondream vision — ask which direction to drag
-        self._log("[Drag] Trying Moondream vision...")
-        direction = await self._moondream_direction(page, iframe, text)
-        moondream_solved = False
-        if direction:
-            cx, cy = box['x'] + box['width'] / 2, box['y'] + box['height'] / 2
-            bw, bh = box['width'], box['height']
-            dist = min(bw, bh) * 0.35
-
-            if direction == "left_to_right":
-                if await self._try_drag(page, cx - dist, cy, cx + dist, cy, f"Moondream L→R {dist:.0f}px"):
-                    moondream_solved = True
-            elif direction == "right_to_left":
-                if await self._try_drag(page, cx + dist, cy, cx - dist, cy, f"Moondream R→L {dist:.0f}px"):
-                    moondream_solved = True
-            elif direction == "top_to_bottom":
-                if await self._try_drag(page, cx, cy - dist, cx, cy + dist, f"Moondream T→B {dist:.0f}px"):
-                    moondream_solved = True
-            elif direction == "bottom_to_top":
-                if await self._try_drag(page, cx, cy + dist, cx, cy - dist, f"Moondream B→T {dist:.0f}px"):
-                    moondream_solved = True
-
-            # If Moondream solved it, SAVE the target side as a template for next time!
-            if moondream_solved and template_key:
-                self._log(f"[Drag] Saving '{template_key}' template for future muscle memory!")
-                await self._save_target_template(page, iframe, box, template_key, direction)
-                return True
-
-        if moondream_solved:
-            return True
-
-        # Method 4: Element pair scanning (DOM-based big elements)
+        # Method 3: Element pair scanning (DOM-based big elements)
         elems = await self._scan_iframe_elements(page)
         if elems:
             self._log(f"[Drag] Scanning {len(elems)} elements...")
