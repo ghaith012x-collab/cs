@@ -3,6 +3,7 @@ import base64
 import json
 import os
 import random
+import socket
 import time
 from pathlib import Path
 from typing import Optional
@@ -11,6 +12,50 @@ from playwright.async_api import async_playwright, Page, BrowserContext
 
 import captcha_solver
 
+
+# ── TOR Control ───────────────────────────────────────────
+
+def _tor_newnym():
+    """Signal TOR to switch to a new identity (new exit IP).
+    Connects to TOR control port :9051 and sends SIGNAL NEWNYM.
+    This is instant — TOR builds a new circuit for next connection."""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(3)
+        s.connect(("127.0.0.1", 9051))
+        # Read the authentication prompt
+        s.recv(1024)
+        # Send newnym signal (no auth required per our config)
+        s.sendall(b"SIGNAL NEWNYM\r\n")
+        resp = s.recv(1024).decode().strip()
+        s.close()
+        if "250" in resp:
+            return True
+    except Exception as e:
+        print(f"[TOR] newnym error: {e}", flush=True)
+    return False
+
+
+def _tor_check():
+    """Check if TOR SOCKS5 proxy is running on port 9050."""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(2)
+        s.connect(("127.0.0.1", 9050))
+        s.close()
+        return True
+    except:
+        return False
+
+
+USER_AGENTS = [
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0',
+    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.0.0 Safari/537.36',
+]
 
 
 class DiscordAutomation:
@@ -21,13 +66,12 @@ class DiscordAutomation:
         self._context = None
         self._page = None
         self._screenshots: list = []
-        self._activity_log: list = []  # Real activity log - never lies, never fakes
+        self._activity_log: list = []
         self._email = ""
         self._username = ""
         self._password = ""
 
     def _log(self, message: str, level: str = "info") -> None:
-        """Add a truthful entry to the activity log. Never fake, never lie."""
         import time as _time
         entry = {
             "time": _time.strftime("%H:%M:%S"),
@@ -36,16 +80,26 @@ class DiscordAutomation:
             "message": message
         }
         self._activity_log.append(entry)
-        # Keep last 200 entries
         if len(self._activity_log) > 200:
             self._activity_log = self._activity_log[-200:]
         print(f"[{entry['time']}] [{level.upper()}] {message}", flush=True)
 
     def get_activity_log(self) -> list:
-        """Return the real activity log."""
         return self._activity_log
 
     async def initialize(self) -> None:
+        # Signal TOR to get a fresh IP for this session
+        if _tor_check():
+            self._log("[TOR] Rotating IP for new session...")
+            if _tor_newnym():
+                self._log("[TOR] New identity requested successfully")
+            else:
+                self._log("[TOR] Could not signal new identity, using current circuit", level="warn")
+            # Wait for new circuit to establish
+            await asyncio.sleep(2)
+        else:
+            self._log("[TOR] Not available — running without proxy", level="warn")
+
         self._playwright = await async_playwright().start()
         
         args = [
@@ -61,10 +115,18 @@ class DiscordAutomation:
             args=args
         )
         
-        self._context = await self._browser.new_context(
-            viewport={'width': 1920, 'height': 1080},
-            user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-        )
+        # Use TOR proxy + random user agent for each session
+        ua = random.choice(USER_AGENTS)
+        ctx_opts = {
+            'viewport': {'width': 1920, 'height': 1080},
+            'user_agent': ua,
+        }
+        if _tor_check():
+            ctx_opts['proxy'] = {'server': 'socks5://127.0.0.1:9050'}
+        
+        self._context = await self._browser.new_context(**ctx_opts)
+        
+        self._log(f"User-Agent: {ua[:60]}...")
         
         await self._context.add_init_script("""
             // Stealth: webdriver=false (not undefined - absence is now a signal)

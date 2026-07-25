@@ -31,6 +31,17 @@ if ! ollama list 2>/dev/null | grep -q "$MODEL"; then
     echo "Model $MODEL pulled successfully"
 fi
 
+# Start TOR for IP rotation
+echo "Starting TOR..."
+tor -f /etc/tor/torrc &
+TOR_PID=$!
+sleep 3
+if kill -0 $TOR_PID 2>/dev/null; then
+    echo "TOR is ready (SOCKS5 :9050)"
+else
+    echo "WARNING: TOR may not have started correctly"
+fi
+
 # Start the Python app
 echo "Starting Discord Automation..."
 exec python -u app.py

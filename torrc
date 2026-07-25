@@ -1,0 +1,19 @@
+## TOR config for IP rotation
+## SOCKS5 proxy on port 9050 (for Playwright)
+## Control port on 9051 (for newnym signal)
+
+SOCKSPort 0.0.0.0:9050
+ControlPort 9051
+CookieAuthentication 0
+DataDirectory /var/lib/tor
+Log notice stdout
+
+## Don't be a relay
+ORPort 0
+ExitRelay 0
+BridgeRelay 0
+
+## Performance tuning
+NumCPUs 1
+MaxCircuitDirtiness 60 seconds
+NewCircuitPeriod 30 seconds

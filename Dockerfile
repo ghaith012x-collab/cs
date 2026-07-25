@@ -7,7 +7,7 @@ RUN apt-get update && apt-get install -y \
     wget gnupg xvfb zstd libglib2.0-0 libnss3 libnspr4 libdbus-1-3 \
     libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 libxkbcommon0 \
     libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libgbm1 \
-    libasound2 libcairo2 libpango-1.0-0 curl \
+    libasound2 libcairo2 libpango-1.0-0 curl tor \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Ollama
@@ -36,6 +36,7 @@ RUN ollama serve & \
     kill $OLLAMA_PID 2>/dev/null || true
 
 COPY app.py server.py captcha_solver.py config.json requirements.txt ./
+COPY torrc /etc/tor/torrc
 COPY test/ ./test/
 
 # Start script that runs Ollama + the Python app
