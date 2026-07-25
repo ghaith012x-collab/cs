@@ -602,90 +602,89 @@ class DragSolver:
 
         # ── Method 1: OPENCV CANVAS OBJECT DETECTION ──
         # Screenshots the iframe, finds objects using MSER + adaptive thresholding.
-        # For L+R case (objects on both sides): returns coords to try once.
-        # For R-only/L-only case: tries MULTIPLE drags internally, returns coords
-        # if one succeeded.
-        coords = await self._opencv_find_objects(page, iframe, box)
-        if coords:
-            # OpenCV found L+R pair. Try it once.
-            self._log(f"[Drag] OpenCV coords: ({coords[0]:.0f},{coords[1]:.0f})→({coords[2]:.0f},{coords[3]:.0f})")
-            if await self._try_drag(page, *coords, "OpenCV"):
-                await self._save_template_on_success(page, iframe, box, coords, template_key)
-                return True
-        else:
-            # OpenCV already tried R-only/L-only multi-drags (logged internally)
-            # If we're here, all those attempts failed — continue to next method
-            pass
+        # For L+R case: returns ALL L-R pairs (tries each).
+        # For R-only/L-only: tries MULTIPLE drags internally.
+        all_pairs = await self._opencv_find_all_pairs(page, iframe, box)
+        if all_pairs:
+            for i, (sx, sy, ex, ey) in enumerate(all_pairs):
+                self._log(f'[Drag] OpenCV pair {i}: ({sx:.0f},{sy:.0f})→({ex:.0f},{ey:.0f})')
+                if await self._try_drag(page, sx, sy, ex, ey, f'CV{i}'):
+                    await self._save_template_on_success(page, iframe, box,
+                                                         (sx, sy, ex, ey), template_key)
+                    return True
 
         # ── Method 2: VISUAL MUSCLE MEMORY ──
         if template_key and template_key != 'target':
             if await self._try_muscle_memory(page, iframe, box, template_key):
                 return True
 
-        # ── Method 3: FULL-GRID HEURISTICS ──
-        # Sweeps the entire iframe area with L→R and R→L drags.
-        # 4 rows × 4 start columns × 2 directions = 32 attempts
-        self._log('[Drag] Grid heuristics (32 attempts)...')
-        bw, bh = box['width'], box['height']
-        bx, by = box['x'], box['y']
+        # ── Method 3: TARGETED HEURISTICS ──
+        # Uses OpenCV's detection Y-position as anchor, sweeps horizontally.
+        self._log('[Drag] Targeted heuristics...')
+        bx, by, bw, bh = box['x'], box['y'], box['width'], box['height']
         
-        for row_frac in [0.3, 0.5, 0.7, 0.9]:  # 4 vertical positions
-            sy = by + bh * row_frac
-            for col_frac in [0.1, 0.3, 0.5, 0.7]:  # 4 start X positions
+        # Get Y positions from the all_pairs for targeting
+        if all_pairs:
+            avg_y = sum(p[1] for p in all_pairs) // len(all_pairs)
+        else:
+            avg_y = by + int(bh * 0.3)  # fallback: try top 30%
+        
+        # Try multiple Y rows around the detected Y position
+        for y_off in [0, -40, 40, -80, 80, -20, 20]:
+            sy = avg_y + y_off
+            if sy < by + 30 or sy > by + bh * 0.75:
+                continue
+            # Try L→R at 8 X fractions
+            for col_frac in [0.08, 0.15, 0.22, 0.30, 0.38]:
                 sx = bx + bw * col_frac
-                for end_frac in [0.9, 0.7]:  # 2 end X positions
-                    if abs(end_frac - col_frac) < 0.2:
-                        continue
+                for end_frac in [0.55, 0.65, 0.75, 0.85, 0.92]:
                     ex = bx + bw * end_frac
-                    if abs(ex - sx) < 50:
+                    if abs(ex - sx) < 60:
                         continue
-                    if await self._try_drag(page, sx, sy, ex, sy, f'G{row_frac:.0f}'):
-                        await self._save_template_on_success(page, iframe, box, (sx, sy, ex, sy), template_key)
+                    if await self._try_drag(page, sx, sy, ex, sy, f'H{col_frac:.0f}'):
+                        await self._save_template_on_success(
+                            page, iframe, box, (sx, sy, ex, sy), template_key)
                         return True
-            
-            # Also try from right edge to left (R→L)
-            for col_frac in [0.9, 0.7, 0.5]:
+            # Try R→L at 4 X fractions
+            for col_frac in [0.92, 0.85, 0.75]:
                 sx = bx + bw * col_frac
-                for end_frac in [0.1, 0.3]:
+                for end_frac in [0.08, 0.15, 0.22]:
                     ex = bx + bw * end_frac
-                    if abs(ex - sx) < 50:
+                    if abs(ex - sx) < 60:
                         continue
-                    if await self._try_drag(page, sx, sy, ex, sy, f'GR{row_frac:.0f}'):
-                        await self._save_template_on_success(page, iframe, box, (sx, sy, ex, sy), template_key)
+                    if await self._try_drag(page, sx, sy, ex, sy, f'HR{col_frac:.0f}'):
+                        await self._save_template_on_success(
+                            page, iframe, box, (sx, sy, ex, sy), template_key)
                         return True
 
         self._log('[Drag] ✗ Failed', level='error')
         return False
 
-    async def _opencv_find_objects(self, page: Page, iframe, box: dict) -> Optional[Tuple]:
-        """Find drag objects in hCaptcha iframe screenshot using OpenCV blob detection.
+    async def _opencv_find_all_pairs(self, page: Page, iframe, box: dict) -> List[Tuple]:
+        """Find ALL possible drag→target pairs from iframe screenshot.
         
-        Uses a multi-strategy approach:
-        1. MSER (Maximally Stable Extremal Regions) — finds blobs regardless of color
-        2. Adaptive thresholding on left/right halves separately
-        3. SimpleBlobDetector with color/shape params
-        
-        When objects found on only ONE side, tries MULTIPLE starting positions
-        from the opposite side (sweep).
+        Uses MSER + adaptive thresholding + edge detection to find objects.
+        Returns ALL L→R and R→L combinations as page coordinates.
+        For R-only/L-only: returns multiple guessed positions.
+        For L+R: returns ALL cross pairs (not just largest).
         """
         try:
             raw = await iframe.screenshot()
             if not raw or len(raw) < 100:
-                return None
+                return []
 
             img = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_COLOR)
             if img is None:
-                return None
+                return []
 
             h, w = img.shape[:2]
-            # Only analyze top 70% (skip verify button at bottom)
             crop_h = int(h * 0.7)
             img_crop = img[:crop_h, :]
             gray = cv2.cvtColor(img_crop, cv2.COLOR_BGR2GRAY)
 
-            objects = []  # (cx_iframe, cy_iframe, w, h, area)
+            objects = []
 
-            # ── Strategy 1: MSER — finds stable blobs regardless of color ──
+            # Strategy 1: MSER
             try:
                 mser = cv2.MSER_create(
                     _delta=5, _min_area=200, _max_area=10000,
@@ -696,16 +695,13 @@ class DragSolver:
                     area = cv2.contourArea(region)
                     if area < 200 or area > 15000:
                         continue
-                    aspect = max(rw, rh) / max(min(rw, rh), 1)
-                    if aspect > 5:
+                    if max(rw, rh) / max(min(rw, rh), 1) > 5:
                         continue
-                    cx_obj = x + rw // 2
-                    cy_obj = y + rh // 2
-                    objects.append((cx_obj, cy_obj, rw, rh, area))
+                    objects.append((x + rw // 2, y + rh // 2, rw, rh, area))
             except Exception:
                 pass
 
-            # ── Strategy 2: Adaptive threshold per half ──
+            # Strategy 2: Adaptive threshold per half
             if len(objects) < 3:
                 mid_x = w // 2
                 for half_name, half_img, x_offset in [
@@ -724,17 +720,16 @@ class DragSolver:
                             if area < 200 or area > 15000:
                                 continue
                             x, y, cw, ch = cv2.boundingRect(cnt)
-                            aspect = max(cw, ch) / max(min(cw, ch), 1)
-                            if aspect > 4:
+                            if max(cw, ch) / max(min(cw, ch), 1) > 4:
                                 continue
                             roi = half_img[y:y+ch, x:x+cw]
                             if roi.size > 0 and np.std(roi) > 15:
-                                objects.append((x_offset + x + cw//2,
-                                                y + ch//2, cw, ch, area))
+                                objects.append((x_offset + x + cw // 2,
+                                                y + ch // 2, cw, ch, area))
                     except Exception:
                         continue
 
-            # ── Strategy 3: Canny edge + contours ──
+            # Strategy 3: Canny edge
             if len(objects) < 3:
                 try:
                     edges = cv2.Canny(gray, 30, 100)
@@ -746,18 +741,16 @@ class DragSolver:
                         if area < 300 or area > 20000:
                             continue
                         x, y, cw, ch = cv2.boundingRect(cnt)
-                        aspect = max(cw, ch) / max(min(cw, ch), 1)
-                        if aspect > 5:
+                        if max(cw, ch) / max(min(cw, ch), 1) > 5:
                             continue
-                        roi = gray[y:y+ch, x:x+cw]
-                        if roi.size > 0 and np.std(roi) > 20:
-                            objects.append((x + cw//2, y + ch//2, cw, ch, area))
+                        roi_g = gray[y:y+ch, x:x+cw]
+                        if roi_g.size > 0 and np.std(roi_g) > 20:
+                            objects.append((x + cw // 2, y + ch // 2, cw, ch, area))
                 except Exception:
                     pass
 
-            if len(objects) < 2:
-                self._log(f'[Drag] OpenCV: {len(objects)} object(s)')
-                return None
+            if not objects:
+                return []
 
             # Merge overlapping detections
             merged = []
@@ -777,88 +770,81 @@ class DragSolver:
                         used[j] = True
                 if len(group) > 1:
                     total_area = sum(g[4] for g in group)
-                    avg_x = sum(g[0] * g[4] for g in group) / total_area
-                    avg_y = sum(g[1] * g[4] for g in group) / total_area
-                    merged.append((int(avg_x), int(avg_y),
-                                   max(g[2] for g in group),
-                                   max(g[3] for g in group),
-                                   total_area))
+                    merged.append((
+                        int(sum(g[0] * g[4] for g in group) / total_area),
+                        int(sum(g[1] * g[4] for g in group) / total_area),
+                        max(g[2] for g in group),
+                        max(g[3] for g in group),
+                        total_area))
                 else:
                     merged.append(o1)
             objects = merged if merged else objects
 
-            # Classify by side
             mid_x = w // 2
-            left = [o for o in objects if o[0] < mid_x - 30]
-            right = [o for o in objects if o[0] > mid_x + 30]
+            left = sorted([o for o in objects if o[0] < mid_x - 30], key=lambda o: -o[4])
+            right = sorted([o for o in objects if o[0] > mid_x + 30], key=lambda o: -o[4])
             center = [o for o in objects if mid_x - 30 <= o[0] <= mid_x + 30]
 
             self._log(f'[Drag] OpenCV: {len(objects)} obj(s), L={len(left)} R={len(right)} C={len(center)}')
 
-            # ── CASE 1: Objects on BOTH sides ──
+            pairs = []
+
+            # CASE 1: L+R — return ALL cross pairs
             if left and right:
-                left.sort(key=lambda o: -o[4])
-                right.sort(key=lambda o: -o[4])
-                src = left[0]
-                tgt = right[0]
-                sx = box['x'] + src[0]
-                sy = box['y'] + src[1]
-                ex = box['x'] + tgt[0]
-                ey = box['y'] + tgt[1]
-                self._log(f'[Drag] OpenCV pair: ({src[0]},{src[1]})→({tgt[0]},{tgt[1]})')
-                return (sx, sy, ex, ey)
+                for l_obj in left[:3]:  # Top 3 left
+                    for r_obj in right[:3]:  # Top 3 right
+                        dist = abs(r_obj[0] - l_obj[0])
+                        if dist > 60:
+                            sx = box['x'] + l_obj[0]
+                            sy = box['y'] + l_obj[1]
+                            ex = box['x'] + r_obj[0]
+                            ey = box['y'] + r_obj[1]
+                            pairs.append((sx, sy, ex, ey))
 
-            # ── CASE 2: Objects on RIGHT side only (star found, spaceship not) ──
-            # Try MULTIPLE left starting positions dragging to the detected right object
-            if right:
-                tgt = max(right, key=lambda o: o[4])
-                tgt_px = box['x'] + tgt[0]
-                tgt_py = box['y'] + tgt[1]
-                # Try 8 different left starting positions (10% to 45% from left edge)
-                attempts = []
-                for frac in [0.08, 0.15, 0.22, 0.30, 0.38, 0.45]:
-                    sx = box['x'] + int(w * frac)
-                    sy = box['y'] + tgt[1] + random.randint(-20, 20)
-                    attempts.append((sx, sy, tgt_px, tgt_py + random.randint(-10, 10)))
-                # Also try center objects if any
-                for c_obj in center:
-                    sx = box['x'] + c_obj[0]
-                    sy = box['y'] + c_obj[1]
-                    attempts.append((sx, sy, tgt_px, tgt_py))
-                self._log(f'[Drag] OpenCV R-only: {len(attempts)} attempts')
-                for i, (sx, sy, ex, ey) in enumerate(attempts):
-                    if await self._try_drag(page, sx, sy, ex, ey,
-                                            f'CV-R{i}'):
-                        return (sx, sy, ex, ey)
-                return None  # All R-only attempts failed
+            # CASE 2: R-only — multiple left guesses
+            if not left and right:
+                for tgt in right[:2]:
+                    tgt_px = box['x'] + tgt[0]
+                    tgt_py = box['y'] + tgt[1]
+                    for frac in [0.08, 0.15, 0.22, 0.30, 0.38, 0.45]:
+                        sx = box['x'] + int(w * frac)
+                        sy = box['y'] + tgt[1] + random.randint(-15, 15)
+                        pairs.append((sx, sy, tgt_px, tgt_py + random.randint(-8, 8)))
+                    for c_obj in center:
+                        sx = box['x'] + c_obj[0]
+                        sy = box['y'] + c_obj[1]
+                        pairs.append((sx, sy, tgt_px, tgt_py))
 
-            # ── CASE 3: Objects on LEFT side only ──
-            if left:
-                src = max(left, key=lambda o: o[4])
-                src_px = box['x'] + src[0]
-                src_py = box['y'] + src[1]
-                # Try 6 different right-ending positions
-                attempts = []
-                for frac in [0.55, 0.65, 0.75, 0.85, 0.92]:
-                    ex = box['x'] + int(w * frac)
-                    ey = box['y'] + src[1] + random.randint(-20, 20)
-                    attempts.append((src_px, src_py, ex, ey))
-                for c_obj in center:
-                    ex = box['x'] + c_obj[0]
-                    ey = box['y'] + c_obj[1]
-                    attempts.append((src_px, src_py, ex, ey))
-                self._log(f'[Drag] OpenCV L-only: {len(attempts)} attempts')
-                for i, (sx, sy, ex, ey) in enumerate(attempts):
-                    if await self._try_drag(page, sx, sy, ex, ey,
-                                            f'CV-L{i}'):
-                        return (sx, sy, ex, ey)
-                return None
+            # CASE 3: L-only — multiple right guesses
+            if not right and left:
+                for src in left[:2]:
+                    src_px = box['x'] + src[0]
+                    src_py = box['y'] + src[1]
+                    for frac in [0.55, 0.65, 0.75, 0.85, 0.92]:
+                        ex = box['x'] + int(w * frac)
+                        ey = box['y'] + src[1] + random.randint(-15, 15)
+                        pairs.append((src_px, src_py, ex, ey))
+                    for c_obj in center:
+                        ex = box['x'] + c_obj[0]
+                        ey = box['y'] + c_obj[1]
+                        pairs.append((src_px, src_py, ex, ey))
 
-            return None
+            # CASE 4: Center only — try all pairs
+            if not left and not right and len(center) >= 2:
+                c_sorted = sorted(center, key=lambda o: o[0])
+                for i in range(min(len(c_sorted), 3)):
+                    for j in range(i + 1, min(len(c_sorted), i + 3)):
+                        if abs(c_sorted[j][0] - c_sorted[i][0]) > 40:
+                            pairs.append((
+                                box['x'] + c_sorted[i][0], box['y'] + c_sorted[i][1],
+                                box['x'] + c_sorted[j][0], box['y'] + c_sorted[j][1]))
+
+            self._log(f'[Drag] OpenCV: {len(pairs)} pair(s)')
+            return pairs
 
         except Exception as e:
             self._log(f'[Drag] OpenCV error: {e}', level='warn')
-            return None
+            return []
 
     async def _try_muscle_memory(self, page: Page, iframe, box: dict, key: str) -> bool:
         target_pos = await self._find_template_target(page, iframe, box, key)
