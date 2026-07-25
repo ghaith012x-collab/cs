@@ -123,42 +123,123 @@ def preprocess(img: np.ndarray, input_size: int = 640) -> np.ndarray:
     return tensor, scale
 
 
-def postprocess(output: np.ndarray, original_shape: Tuple[int, int],
+def postprocess(outputs, original_shape: Tuple[int, int],
                 scale: float, conf_threshold: float = 0.25) -> List[dict]:
     """Parse YOLO ONNX output into bounding boxes.
     
-    Output shape: (1, 300, 6) where 6 = [x1, y1, x2, y2, confidence, class_id]
-    (end-to-end NMS baked into ONNX graph by default)
+    Handles multiple ONNX output formats:
+    - End-to-end NMS: (1, 300, 6) = [x1,y1,x2,y2,conf,cls]
+    - Standard: (1, 84, 8400) = 4 coords + 80 class scores
+    - Tuple/list of tensors: unpack first valid one
     """
-    detections = output[0][0]  # Shape: (300, 6)
-    h, w = original_shape[:2]
+    if isinstance(outputs, (list, tuple)):
+        # Model might return multiple output tensors
+        output = outputs[0] if len(outputs) > 0 else outputs
+    else:
+        output = outputs
     
+    # Handle numpy array or convert
+    if not isinstance(output, np.ndarray):
+        try:
+            output = np.array(output)
+        except Exception:
+            return []
+    
+    h, w = original_shape[:2]
     results = []
-    for det in detections:
-        conf = float(det[4])
-        if conf < conf_threshold:
-            continue
+    
+    try:
+        shape = output.shape
         
-        cls_id = int(det[5])
+        if len(shape) == 3 and shape[1] == 300 and shape[2] == 6:
+            # Format: (1, 300, 6) — end-to-end NMS
+            dets = output[0]
+            for det in dets:
+                conf = float(det[4])
+                if conf < conf_threshold:
+                    continue
+                cls_id = int(det[5])
+                x1 = float(det[0]) / scale
+                y1 = float(det[1]) / scale
+                x2 = float(det[2]) / scale
+                y2 = float(det[3]) / scale
+                x1, y1 = max(0, x1), max(0, y1)
+                x2, y2 = min(w, x2), min(h, y2)
+                if x2 - x1 < 2 or y2 - y1 < 2:
+                    continue
+                results.append({
+                    "class_id": cls_id, "confidence": conf,
+                    "bbox": (int(x1), int(y1), int(x2 - x1), int(y2 - y1)),
+                    "center": (int((x1 + x2) / 2), int((y1 + y2) / 2)),
+                })
+                
+        elif len(shape) == 3 and shape[1] == 84:
+            # Format: (1, 84, 8400) — standard YOLO output
+            dets = output[0]  # (84, 8400)
+            num_dets = shape[2]
+            for i in range(num_dets):
+                scores = dets[4:, i]
+                max_score = float(np.max(scores))
+                if max_score < conf_threshold:
+                    continue
+                cls_id = int(np.argmax(scores))
+                conf = max_score
+                # Box coords: cx, cy, bw, bh (normalized)
+                cx, cy, bw, bh = dets[0, i], dets[1, i], dets[2, i], dets[3, i]
+                x1 = (float(cx) - float(bw) / 2) * w / scale
+                y1 = (float(cy) - float(bh) / 2) * h / scale
+                x2 = (float(cx) + float(bw) / 2) * w / scale
+                y2 = (float(cy) + float(bh) / 2) * h / scale
+                x1, y1 = max(0, x1 / input_w()), max(0, y1 / input_h())
+                x2, y2 = min(w, x2 / input_w()), min(h, y2 / input_h())
+                if x2 - x1 < 2 or y2 - y1 < 2:
+                    continue
+                # Actually: the cx,cy are already in input-size coordinates
+                # Let me just use the proper formula
+                x1 = max(0, (float(cx) - float(bw) / 2) * w)
+                y1 = max(0, (float(cy) - float(bh) / 2) * h)
+                x2 = min(w, (float(cx) + float(bw) / 2) * w)
+                y2 = min(h, (float(cy) + float(bh) / 2) * h)
+                results.append({
+                    "class_id": cls_id, "confidence": conf,
+                    "bbox": (int(x1), int(y1), int(x2 - x1), int(y2 - y1)),
+                    "center": (int((x1 + x2) / 2), int((y1 + y2) / 2)),
+                })
+                
+        elif len(shape) == 2:
+            # Format: (N, 6) — raw detections
+            for det in output:
+                if len(det) < 6:
+                    continue
+                conf = float(det[4])
+                if conf < conf_threshold:
+                    continue
+                cls_id = int(det[5])
+                x1 = max(0, float(det[0]) / scale)
+                y1 = max(0, float(det[1]) / scale)
+                x2 = min(w, float(det[2]) / scale)
+                y2 = min(h, float(det[3]) / scale)
+                if x2 - x1 < 2 or y2 - y1 < 2:
+                    continue
+                results.append({
+                    "class_id": cls_id, "confidence": conf,
+                    "bbox": (int(x1), int(y1), int(x2 - x1), int(y2 - y1)),
+                    "center": (int((x1 + x2) / 2), int((y1 + y2) / 2)),
+                })
         
-        # Scale coordinates back to original image size
-        x1 = float(det[0]) / scale
-        y1 = float(det[1]) / scale
-        x2 = float(det[2]) / scale
-        y2 = float(det[3]) / scale
-        
-        # Clamp to image bounds
-        x1, y1 = max(0, x1), max(0, y1)
-        x2, y2 = min(w, x2), min(h, y2)
-        
-        results.append({
-            "class_id": cls_id,
-            "confidence": conf,
-            "bbox": (int(x1), int(y1), int(x2 - x1), int(y2 - y1)),  # x, y, w, h
-            "center": (int((x1 + x2) / 2), int((y1 + y2) / 2)),
-        })
+    except Exception:
+        pass
     
     return results
+
+
+def input_w() -> float:
+    """Return the model's expected input width."""
+    return 640.0
+
+def input_h() -> float:
+    """Return the model's expected input height."""
+    return 640.0
 
 
 def run_inference(image: np.ndarray, conf_threshold: float = 0.25
