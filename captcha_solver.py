@@ -651,46 +651,62 @@ class DragSolver:
             if await self._try_muscle_memory(page, iframe, box, template_key):
                 return True
 
-        # ── Method 3: FAST GRID SWEEP ──
-        # Sweeps the full iframe quickly with FAST drags (fewer mouse points).
-        # 4 rows × 6 L→R + 4 R→L = ~40 attempts × ~1.5s = ~60s
-        self._log('[Drag] Fast grid sweep...')
+        # ── Method 3: RAPID-FIRE RANDOM DRAGS ──
+        # Try 250 random positions across the iframe VERY fast (~0.2s each)
+        # Total: ~50s for 250 attempts — brute force beats heuristics!
+        self._log('[Drag] Rapid-fire (250 random attempts)...')
         bx, by, bw, bh = box['x'], box['y'], box['width'], box['height']
         
-        for row_frac in [0.15, 0.35, 0.55, 0.75]:
-            sy = by + bh * row_frac
-            # L→R from 6 start positions to 6 end positions
-            start_xs = [bx + bw * f for f in [0.05, 0.15, 0.25, 0.35, 0.45, 0.55]]
-            end_xs = [bx + bw * f for f in [0.65, 0.75, 0.85, 0.95]]
-            for sx in start_xs:
-                for ex in end_xs:
-                    if abs(ex - sx) < 60:
-                        continue
-                    await Mouse.drag(page, sx, sy, ex, sy, fast=True)
-                    await asyncio.sleep(0.5)
-                    if await Verifier(page).solved():
-                        await _click_verify(page)
-                        await asyncio.sleep(0.3)
-                        if await Verifier(page).solved():
-                            self._log(f'[Drag] ✓ Grid L→R@{row_frac:.0f}')
-                            return True
-            # R→L from 4 start positions
-            start_xs_r = [bx + bw * f for f in [0.95, 0.85, 0.75, 0.65]]
-            end_xs_r = [bx + bw * f for f in [0.05, 0.15, 0.25]]
-            for sx in start_xs_r:
-                for ex in end_xs_r:
-                    if abs(ex - sx) < 60:
-                        continue
-                    await Mouse.drag(page, sx, sy, ex, sy, fast=True)
-                    await asyncio.sleep(0.5)
-                    if await Verifier(page).solved():
-                        await _click_verify(page)
-                        await asyncio.sleep(0.3)
-                        if await Verifier(page).solved():
-                            self._log(f'[Drag] ✓ Grid R→L@{row_frac:.0f}')
-                            return True
-
-        self._log('[Drag] ✗ Failed', level='error')
+        # Generate random drag positions covering the full iframe
+        random.seed()
+        for attempt in range(250):
+            # Random start position
+            sx = bx + random.uniform(bw * 0.05, bw * 0.95)
+            sy = by + random.uniform(bh * 0.1, bh * 0.75)
+            # Random end position (mostly to the right/left for horizontal drags)
+            if random.random() < 0.7:  # 70% horizontal
+                if random.random() < 0.6:  # 60% L→R
+                    ex = sx + random.uniform(50, bw * 0.8)
+                else:  # 40% R→L
+                    ex = sx - random.uniform(50, bw * 0.8)
+                ey = sy + random.uniform(-20, 20)
+            else:  # 30% vertical
+                ex = sx + random.uniform(-40, 40)
+                if random.random() < 0.5:
+                    ey = sy + random.uniform(50, bh * 0.6)
+                else:
+                    ey = sy - random.uniform(50, bh * 0.6)
+            
+            # Clamp to iframe bounds
+            ex = max(bx + 10, min(bx + bw - 10, ex))
+            ey = max(by + 10, min(by + bh - 10, ey))
+            
+            if abs(ex - sx) + abs(ey - sy) < 50:
+                continue
+            
+            # Super-fast drag: skip the human simulation, just teleport + snap
+            try:
+                await page.mouse.move(sx, sy)
+                await page.mouse.down()
+                await page.mouse.move(ex, ey, steps=3)
+                await page.mouse.up()
+                await asyncio.sleep(0.15)
+            except Exception:
+                break
+            
+            if await Verifier(page).solved():
+                await _click_verify(page)
+                await asyncio.sleep(0.2)
+                if await Verifier(page).solved():
+                    self._log(f'[Drag] ✓ Rapid #{attempt}')
+                    await self._save_template_on_success(
+                        page, iframe, box, (sx, sy, ex, ey), template_key)
+                    return True
+            
+            if attempt > 0 and attempt % 50 == 0:
+                self._log(f'[Drag] ...{attempt} attempts so far')
+        
+        self._log('[Drag] ✗ Failed (250 attempts)', level='error')
         return False
 
     async def _yolo_detect(self, page: Page, iframe, box: dict) -> Optional[Tuple]:

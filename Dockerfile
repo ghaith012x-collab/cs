@@ -21,9 +21,13 @@ RUN pip install --no-cache-dir \
     aiofiles==23.1.0 \
     aiohttp==3.9.1 \
     Pillow==10.2.0 \
-    onnxruntime>=1.18.0 \
+    onnxruntime>=1.18.1 \
     onnx>=1.16.0 \
     protobuf>=3.20.3
+
+# Donwload YOLO model as alternative (fallback if ultralytics export fails)
+RUN mkdir -p /app/_models && \
+    wget -q https://github.com/ultralytics/assets/releases/download/v8.3.0/yolo11n.pt -O /app/_models/yolo11n.pt 2>/dev/null || true
 
 RUN python -m playwright install chromium
 
