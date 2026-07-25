@@ -201,6 +201,24 @@ class Verifier:
         return False
 
 
+# ── Drag patterns (offsets from iframe center) ───────────
+
+DRAG_PATTERNS = [
+    (100, 0, -120, 0),     # right→left 220px
+    (80, 0, -150, 0),      # right→left 230px
+    (120, 0, -80, 0),      # right→left 200px
+    (-100, 0, 100, 0),     # left→right 200px
+    (0, 80, 0, -80),       # bottom→top 160px
+    (0, -80, 0, 80),       # top→bottom 160px
+    (140, 30, -100, -30),  # diagonal down-right→up-left
+    (-140, -30, 100, 30),  # diagonal up-left→down-right
+    (0, 0, -180, 0),       # from center left 180px
+    (0, 0, 180, 0),        # from center right 180px
+    (0, 0, 0, -120),       # from center up 120px
+    (0, 0, 0, 120),        # from center down 120px
+]
+
+
 # ── Iframe helpers ────────────────────────────────────────
 
 IFRAME_SELS = [
@@ -468,61 +486,33 @@ class DragSolver:
                 self._log("[Drag] ✓ Solved via DOM")
                 return True
 
-        # Method 2: Use Qwen to identify drag source and target from screenshot
-        self._log("[Drag] Using Qwen vision for coordinate detection...")
-        ss = await _iframe_b64(iframe, max_dim=320)
-        if not ss:
-            self._log("[Drag] Iframe screenshot failed, trying page clip...", level="warn")
-            try:
-                raw = await page.screenshot(clip={"x": box['x'], "y": box['y'], "width": box['width'], "height": box['height']})
-                if raw and len(raw) > 100:
-                    ss = _b64(_resize(Image.open(io.BytesIO(raw)), 320))
-            except Exception as e:
-                self._log(f"[Drag] Page clip also failed: {e}", level="error")
-        if not ss:
-            self._log("[Drag] Screenshot failed entirely", level="error")
-            return False
-
-        if not self.ollama:
-            self.ollama = OllamaClient(self.config, log=self._log)
-
-        # Query Qwen for coordinates
-        p = (f"hCaptcha: \"{text}\"\n"
-             f"Where is the draggable object and where is the target?\n"
-             f"Reply JSON: {{\"source\":[x,y], \"target\":[x,y]}} using pixel coords from this image.\n"
-             f"If unsure, guess the drag direction and distance.")
-        ans = await self.ollama.ask_retry(p, [ss], 200)
-
-        # Parse coordinates
-        coords = self._parse_coords(ans, box)
-        if coords:
-            sx, sy, ex, ey = coords
-            self._log(f"[Drag] Qwen coords: ({sx:.0f},{sy:.0f}) → ({ex:.0f},{ey:.0f})")
-            await Mouse.drag(page, sx, sy, ex, ey)
-            await asyncio.sleep(1.5)
-            if await Verifier(page).solved():
-                self._log("[Drag] ✓ Solved via Qwen")
-                return True
-
-        # Method 3: Try variations — drag from center right to center left, various distances
-        self._log("[Drag] Trying heuristic drag patterns...")
-        cx, cy = box['x'] + box['width'] / 2, box['y'] + box['height'] / 2
-        patterns = [
-            (cx + 100, cy, cx - 100, cy),   # right→left 200px
-            (cx + 80, cy, cx - 150, cy),    # right→left 230px
-            (cx + 120, cy, cx - 80, cy),    # right→left 200px
-            (cx - 100, cy, cx + 100, cy),   # left→right 200px
-            (cx, cy + 80, cx, cy - 80),     # bottom→top
-            (cx, cy - 80, cx, cy + 80),     # top→bottom
-            (cx + 150, cy + 50, cx - 100, cy - 50),  # diagonal
-        ]
-        for pi, (sx, sy, ex, ey) in enumerate(patterns):
-            self._log(f"[Drag] Pattern {pi + 1}/{len(patterns)}")
-            await Mouse.drag(page, sx, sy, ex, ey)
-            await asyncio.sleep(0.8)
+        # Method 2: Try heuristic drag patterns (Qwen CPU inference too slow — skip!)
+        self._log(f"[Drag] Trying {len(DRAG_PATTERNS)} heuristic patterns...")
+        for pi, (sx, sy, ex, ey) in enumerate(DRAG_PATTERNS):
+            # Offset patterns from iframe center for each attempt
+            cx, cy = box['x'] + box['width'] / 2, box['y'] + box['height'] / 2
+            px, py = cx + sx, cy + sy
+            qx, qy = cx + ex, cy + ey
+            self._log(f"[Drag] Pattern {pi + 1}/{len(DRAG_PATTERNS)}: ({px:.0f},{py:.0f})→({qx:.0f},{qy:.0f})")
+            await Mouse.drag(page, px, py, qx, qy)
+            await asyncio.sleep(0.6)
             if await Verifier(page).solved():
                 self._log("[Drag] ✓ Solved via heuristic")
                 return True
+        
+        # Method 3: broader range with varying distances
+        self._log("[Drag] Trying broader range...")
+        for dist in [60, 90, 120, 150, 180, 210, 250]:
+            for dx, dy in [(-dist, 0), (dist, 0), (0, -dist), (0, dist), (-dist, -dist//2)]:
+                px = box['x'] + box['width'] / 2 + dx
+                py = box['y'] + box['height'] / 2 + dy
+                qx = box['x'] + box['width'] / 2 - dx
+                qy = box['y'] + box['height'] / 2 - dy
+                await Mouse.drag(page, px, py, qx, qy)
+                await asyncio.sleep(0.4)
+                if await Verifier(page).solved():
+                    self._log(f"[Drag] ✓ Solved at dist={dist}, dir=({dx},{dy})")
+                    return True
 
         self._log("[Drag] ✗ All methods failed", level="error")
         return False
