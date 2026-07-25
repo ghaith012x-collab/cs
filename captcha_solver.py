@@ -624,7 +624,20 @@ class DragSolver:
         _, template_key = self._extract_drag_subjects(text)
         _load_templates()
 
-        # ── Method 0: YOLO AI OBJECT DETECTION ──
+        # ── Method 0: JS DOM EXTRACTION ──
+        # Injects JavaScript into the hCaptcha iframe to find positioned elements.
+        # hCaptcha drag objects are DOM elements with position:absolute,
+        # obfuscated class names, but predictable size (~50-80px) and layout.
+        # This reads getBoundingClientRect() for pixel-perfect coordinates.
+        js_coords = await self._js_find_drag_elements(page, iframe, box)
+        if js_coords:
+            self._log(f'[Drag] JS coords: ({js_coords[0]:.0f},{js_coords[1]:.0f})→({js_coords[2]:.0f},{js_coords[3]:.0f})')
+            if await self._try_drag(page, *js_coords, 'JS', fast=True):
+                await self._save_template_on_success(page, iframe, box,
+                                                     (js_coords[0], js_coords[1], js_coords[2], js_coords[3]), template_key)
+                return True
+
+        # ── Method 1: YOLO AI OBJECT DETECTION ──
         # Uses YOLOv11n ONNX Runtime (~56ms per inference) to detect
         # actual drag objects in the iframe screenshot.
         yolo_result = await self._yolo_detect(page, iframe, box)
@@ -708,6 +721,116 @@ class DragSolver:
         
         self._log('[Drag] ✗ Failed (250 attempts)', level='error')
         return False
+
+    async def _js_find_drag_elements(self, page: Page, iframe, box: dict) -> Optional[Tuple]:
+        """Find drag object + target by injecting JS into the hCaptcha iframe.
+        
+        hCaptcha renders drag objects as positioned DOM elements inside the iframe.
+        Even with obfuscated class names, they have predictable characteristics:
+        - position: absolute or fixed
+        - Size: 30-120px
+        - z-index > 0 or explicitly set
+        - Located above the verify button area
+        
+        This is INSTANT (no AI, no screenshots) — reads element positions directly.
+        Returns (sx, sy, ex, ey) in page coordinates, or None.
+        """
+        for sel in IFRAME_SELS:
+            try:
+                f = page.frame_locator(sel)
+                data = await f.first.evaluate("""() => {
+    const results = [];
+    const vh = window.innerHeight;
+    const maxY = vh * 0.75;  // Skip verify button area
+    
+    for (const el of document.querySelectorAll('*')) {
+        const tag = el.tagName;
+        if (tag === 'SCRIPT' || tag === 'STYLE' || tag === 'LINK') continue;
+        
+        const rect = el.getBoundingClientRect();
+        if (rect.y > maxY || rect.bottom > maxY) continue;
+        if (rect.width < 30 || rect.width > 120) continue;
+        if (rect.height < 30 || rect.height > 120) continue;
+        if (rect.width * rect.height < 900) continue;
+        
+        const style = window.getComputedStyle(el);
+        const pos = style.position;
+        if (pos !== 'absolute' && pos !== 'fixed') continue;
+        
+        const zIdx = parseInt(style.zIndex) || 0;
+        const opacity = parseFloat(style.opacity) || 1;
+        if (opacity < 0.3) continue;  // Skip invisible elements
+        
+        // Check if element has visible content (bg image, image, or colored bg)
+        const bg = style.backgroundImage || '';
+        const hasBg = bg.includes('url(') || bg.includes('gradient');
+        const isImg = tag === 'IMG';
+        const bgColor = style.backgroundColor || '';
+        const hasColor = bgColor !== 'rgba(0, 0, 0, 0)' && bgColor !== 'transparent';
+        
+        if (!hasBg && !isImg && !hasColor && zIdx === 0) continue;
+        
+        // Score: how likely is this a drag object?
+        let score = 0;
+        score += hasBg ? 3 : 0;
+        score += isImg ? 2 : 0;
+        score += hasColor ? 1 : 0;
+        score += zIdx > 0 ? 2 : 0;
+        score += rect.width > 40 && rect.width < 90 ? 2 : 0;
+        score += rect.height > 40 && rect.height < 90 ? 2 : 0;
+        
+        results.push({
+            x: rect.x, y: rect.y, w: rect.width, h: rect.height,
+            cx: rect.x + rect.width / 2,
+            cy: rect.y + rect.height / 2,
+            score: score
+        });
+    }
+    
+    if (results.length < 2) return null;
+    
+    // Sort by score descending
+    results.sort((a, b) => b.score - a.score);
+    
+    // Take top candidates (score >= 3)
+    const top = results.filter(e => e.score >= 3);
+    if (top.length < 2) return null;
+    
+    const midX = window.innerWidth / 2;
+    const leftSide = top.filter(e => e.cx < midX - 40);
+    const rightSide = top.filter(e => e.cx > midX + 40);
+    
+    if (leftSide.length && rightSide.length) {
+        // Pick highest scored from each side
+        const src = leftSide.reduce((a, b) => a.score > b.score ? a : b);
+        const tgt = rightSide.reduce((a, b) => a.score > b.score ? a : b);
+        return { sx: src.cx, sy: src.cy, ex: tgt.cx, ey: tgt.cy };
+    }
+    
+    // Fallback: top 2 by score if not on opposite sides
+    if (top.length >= 2) {
+        const first = top[0], second = top[1];
+        if (Math.abs(first.cx - second.cx) > 50) {
+            return {
+                sx: Math.min(first.cx, second.cx),
+                sy: Math.min(first.cy, second.cy),
+                ex: Math.max(first.cx, second.cx),
+                ey: Math.max(first.cy, second.cy)
+            };
+        }
+    }
+    
+    return null;
+}""")
+                if data and 'sx' in data:
+                    sx = box['x'] + data['sx']
+                    sy = box['y'] + data['sy']
+                    ex = box['x'] + data['ex']
+                    ey = box['y'] + data['ey']
+                    return (sx, sy, ex, ey)
+            except Exception:
+                continue
+        return None
 
     async def _yolo_detect(self, page: Page, iframe, box: dict) -> Optional[Tuple]:
         """Use YOLOv11n ONNX model to detect drag objects in iframe screenshot.
