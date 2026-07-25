@@ -506,145 +506,118 @@ class DragSolver:
         _load_templates()
 
         # ── Method 1: SMART DOM EXTRACTION ──
-        # Finds elements with specific characteristics of draggable objects and targets
+        # Finds positioned elements with visual content in top 75% of iframe
+        # (ignores verify button area). Scores and matches left/right pairs.
         dom_coords = await self._dom_smart_extract(page, box)
         if dom_coords:
             if await self._try_drag(page, *dom_coords, "DOM"):
                 await self._save_template_on_success(page, iframe, box, dom_coords, template_key)
                 return True
 
-        # ── Method 2: CANVAS COLOR CLUSTERING ──
-        # Uses color segmentation to find distinct objects (rocketship, star) by hue
-        # Screenshot the iframe element directly (Locator has .screenshot(), FrameLocator doesn't)
-        canvas_coords = await self._canvas_color_cluster(iframe, box)
-        if canvas_coords:
-            if await self._try_drag(page, *canvas_coords, "Canvas"):
-                await self._save_template_on_success(page, iframe, box, canvas_coords, template_key)
-                return True
-
-        # ── Method 3: VISUAL MUSCLE MEMORY ──
+        # ── Method 2: VISUAL MUSCLE MEMORY ──
         if template_key and template_key != "target":
             if await self._try_muscle_memory(page, iframe, box, template_key):
                 return True
 
-        # ── Method 4: MULTI-OBJECT CANVAS PAIRS ──
-        # Find ALL colored objects and try every pair combination
-        pair_coords = await self._canvas_pair_detection(iframe, box)
-        if pair_coords:
-            for coords in pair_coords[:6]:  # Try up to 6 best pairs
-                if await self._try_drag(page, *coords, "Pair"):
-                    return True
-
-        # ── Method 5: FULL HEURISTICS ──
-        # Try from multiple start positions (left edge, right edge, center)
-        # in multiple directions (left→right, right→left, top→bottom, bottom→top)
-        self._log("[Drag] Full heuristics (30 attempts)...")
+        # ── Method 3: TARGETED HEURISTICS ──
+        # Drags from various positions across the iframe in multiple directions.
+        # The actual draggable is somewhere along the edges; target opposite side.
+        self._log("[Drag] Targeted heuristics...")
         cx, cy = box['x'] + box['width'] / 2, box['y'] + box['height'] / 2
         bw, bh = box['width'], box['height']
         max_d = min(bw, bh) * 0.5
 
-        # 1. Center-based horizontal drags (8 attempts)
+        # 1. Center horizontal (L↔R) — 8 attempts
         for dist in [max_d * 0.3, max_d * 0.5, max_d * 0.7, max_d * 0.9]:
             for dx in [-dist, dist]:
-                sx, sy = cx + dx, cy + random.uniform(-15, 15)
-                ex, ey = cx - dx, cy + random.uniform(-15, 15)
-                if await self._try_drag(page, sx, sy, ex, ey,
-                                        f"H{dx:+.0f}"):
+                if await self._try_drag(page, cx + dx, cy, cx - dx, cy, f"H{dx:+.0f}"):
                     return True
 
-        # 2. Edge-based horizontal (drag from left edge to center, right edge to center)
-        # 8 attempts
-        for edge_x, direction, label in [(box['x'] + 30, bw*0.6, 'Ledge'),
-                                          (box['x'] + bw - 30, -bw*0.6, 'Redge')]:
-            for dist_f in [0.4, 0.6, 0.8, 1.0]:
-                sx, sy = edge_x, cy + random.uniform(-15, 15)
-                ex = sx + direction * dist_f
-                ey = cy + random.uniform(-15, 15)
-                if await self._try_drag(page, sx, sy, ex, ey, f"{label}{dist_f:.0f}"):
+        # 2. Edge-to-center (drag from near left/right edges toward center) — 8 attempts
+        for sx_pos, label in [(box['x'] + 25, 'LE'), (box['x'] + bw - 25, 'RE')]:
+            for f in [0.3, 0.5, 0.7, 0.9]:
+                ex_pos = cx + (sx_pos - cx) * (1 - f)
+                if await self._try_drag(page, sx_pos, cy, ex_pos, cy, f"{label}{f:.0f}"):
                     return True
 
-        # 3. Vertical drags (8 attempts)
-        for dist in [max_d * 0.3, max_d * 0.5, max_d * 0.7, max_d * 0.9]:
+        # 3. Vertical (U↔D) — 4 attempts
+        for dist in [max_d * 0.4, max_d * 0.8]:
             for dy in [-dist, dist]:
-                sx, sy = cx + random.uniform(-15, 15), cy + dy
-                ex, ey = cx + random.uniform(-15, 15), cy - dy
-                if await self._try_drag(page, sx, sy, ex, ey,
-                                        f"V{dy:+.0f}"):
-                    return True
-
-        # 4. Diagonal drags (6 attempts)
-        for dist in [max_d * 0.5, max_d * 0.8]:
-            for dx, dy in [(dist, dist), (-dist, -dist), (dist, -dist), (-dist, dist)]:
-                sx, sy = cx + dx, cy + dy
-                ex, ey = cx - dx, cy - dy
-                if await self._try_drag(page, sx, sy, ex, ey, f"D{dx:+.0f},{dy:+.0f}"):
+                if await self._try_drag(page, cx, cy + dy, cx, cy - dy, f"V{dy:+.0f}"):
                     return True
 
         self._log("[Drag] ✗ Failed", level="error")
         return False
 
     async def _dom_smart_extract(self, page: Page, box: dict) -> Optional[Tuple]:
-        """Smart DOM extraction: finds draggable element + target zone
-        by analyzing CSS properties, position, z-index, and class names."""
+        """Find draggable element + target by analyzing ALL visible DOM elements
+        in the hCaptcha iframe. Only searches the TOP 75% of the iframe
+        (ignoring the verify button/footer at the bottom).
+        
+        In hCaptcha drag challenges, the draggable is an absolutely-positioned
+        element (~50-80px) with a background image, and the target is another
+        positioned element (~50-80px) on the opposite side."""
         for sel in IFRAME_SELS:
             try:
                 f = page.frame_locator(sel)
                 data = await f.first.evaluate("""() => {
     const results = [];
+    const vh = window.innerHeight;
+    const maxY = vh * 0.75;  // Only top 75% — skip verify button area
     for (const el of document.querySelectorAll('*')) {
         const tag = el.tagName;
         if (tag === 'SCRIPT' || tag === 'STYLE' || tag === 'LINK') continue;
         const rect = el.getBoundingClientRect();
-        if (rect.width < 25 || rect.width > 350) continue;
-        if (rect.height < 25 || rect.height > 350) continue;
+        if (rect.y > maxY || rect.bottom > maxY) continue;  // Skip bottom area
+        if (rect.width < 30 || rect.width > 150) continue;   // Drag objects are 30-150px
+        if (rect.height < 30 || rect.height > 150) continue;
+        
         const style = window.getComputedStyle(el);
         const pos = style.position;
         const zIdx = parseInt(style.zIndex) || 0;
         const bg = style.backgroundImage || '';
-        const isDraggable = el.draggable || style.cursor === 'grab' || style.cursor === 'move';
-        const cls = (el.className || '').toLowerCase();
-        const isTarget = cls.includes('target') || cls.includes('drop') || cls.includes('zone') ||
-                         style.borderStyle === 'dashed' || style.border.includes('dash') ||
-                         style.outlineStyle === 'dashed';
-        const hasSrc = el.tagName === 'IMG' && el.src && el.src.length > 0;
         const hasBg = bg.includes('url(') || bg.includes('data:image');
-        results.push({
-            tag, cls: cls.slice(0, 60),
-            x: rect.x, y: rect.y, w: rect.width, h: rect.height,
-            position: pos, zIndex: zIdx,
-            isImgWithSrc: hasSrc, isBgImg: hasBg,
-            isDraggable, isTarget,
-        });
-    }
-    // Priority 1: draggable flag + target flag
-    for (const el of results) {
-        if (el.isDraggable) {
-            for (const t of results) {
-                if (t.isTarget && t !== el) return { source: el, target: t };
-            }
+        const isImg = tag === 'IMG' && el.src && el.src.length > 0;
+        const isAbs = pos === 'absolute' || pos === 'fixed';
+        
+        // Only elements that look like drag objects: positioned, with visual content
+        if (isAbs || hasBg || isImg || zIdx > 0) {
+            results.push({
+                tag: tag,
+                x: rect.x, y: rect.y, w: rect.width, h: rect.height,
+                zIndex: zIdx,
+                hasBgImg: hasBg || isImg,
+                isPositioned: isAbs,
+            });
         }
     }
-    // Priority 2: images with src + target-class elements
-    const imgs = results.filter(e => e.isImgWithSrc || e.isBgImg);
-    const targets = results.filter(e => e.isTarget);
-    if (imgs.length && targets.length) {
-        return { source: imgs[0], target: targets[0] };
+    if (results.length < 2) return null;
+    
+    // Score each element by how "drag-object-like" it is
+    const scored = results.map(el => {
+        let score = 0;
+        score += el.hasBgImg ? 3 : 0;         // Has visual content
+        score += el.isPositioned ? 2 : 0;     // Absolutely positioned = interactive
+        score += el.zIndex > 0 ? 1 : 0;       // On top of other elements
+        score += el.w > 35 && el.w < 100 ? 1 : 0;  // Ideal size range
+        score += el.h > 35 && el.h < 100 ? 1 : 0;
+        return { ...el, score };
+    });
+    scored.sort((a, b) => b.score - a.score);
+    
+    // Take top candidates and find a left/right pair
+    const top = scored.filter(e => e.score >= 3);
+    if (top.length < 2) return null;
+    
+    const midX = window.innerWidth / 2;
+    const leftSide = top.filter(e => e.x + e.w/2 < midX - 30);
+    const rightSide = top.filter(e => e.x + e.w/2 > midX + 30);
+    
+    if (leftSide.length && rightSide.length) {
+        return { source: leftSide[0], target: rightSide[0] };
     }
-    // Priority 3: two small elements with high z-index
-    const smallEls = results.filter(e => e.w < 120 && e.h < 120 && e.zIndex > 0);
-    if (smallEls.length >= 2) {
-        return { source: smallEls[0], target: smallEls[1] };
-    }
-    // Priority 4: elements on opposite sides of center
-    const mid = 300;
-    const leftEls = results.filter(e => e.x + e.w/2 < mid);
-    const rightEls = results.filter(e => e.x + e.w/2 > mid);
-    if (leftEls.length && rightEls.length) {
-        const src = leftEls.sort((a,b) => b.zIndex - a.zIndex)[0];
-        const tgt = rightEls.sort((a,b) => b.zIndex - a.zIndex)[0];
-        return { source: src, target: tgt };
-    }
-    return null;
+    // Fallback: best two by score
+    return { source: top[0], target: top[1] };
 }""")
                 if data and 'source' in data and 'target' in data:
                     src, tgt = data['source'], data['target']
@@ -652,160 +625,12 @@ class DragSolver:
                     sy = box['y'] + src['y'] + src['h'] / 2
                     ex = box['x'] + tgt['x'] + tgt['w'] / 2
                     ey = box['y'] + tgt['y'] + tgt['h'] / 2
-                    self._log(f"[Drag] DOM: img=({src['x']:.0f},{src['y']:.0f} {src['w']:.0f}x{src['h']:.0f}) "
-                              f"target=({tgt['x']:.0f},{tgt['y']:.0f} {tgt['w']:.0f}x{tgt['h']:.0f})")
+                    self._log(f"[Drag] DOM: ({src['x']:.0f},{src['y']:.0f} {src['w']:.0f}x{src['h']:.0f} score={src['score']})→"
+                              f"({tgt['x']:.0f},{tgt['y']:.0f} {tgt['w']:.0f}x{tgt['h']:.0f} score={tgt['score']})")
                     return (sx, sy, ex, ey)
             except:
                 continue
         return None
-
-    async def _canvas_color_cluster(self, iframe, box: dict) -> Optional[Tuple]:
-        """Find drag objects by EDGE DETECTION + contour analysis.
-        Finds objects by SHAPE (not color) — robust against any color scheme.
-        Splits iframe into left/right half, finds best object in each."""
-        try:
-            raw = await iframe.screenshot()
-            if not raw or len(raw) < 500:
-                return None
-
-            gray = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_GRAYSCALE)
-            if gray is None:
-                return None
-            h, w = gray.shape[:2]
-            if h < 50 or w < 50:
-                return None
-
-            # 1. Blur to reduce noise
-            blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-
-            # 2. Edge detection — finds ALL shapes regardless of color
-            edges = cv2.Canny(blurred, 30, 100)
-
-            # 3. Dilate to close gaps in edges
-            kernel = np.ones((3, 3), np.uint8)
-            dilated = cv2.dilate(edges, kernel, iterations=2)
-
-            # 4. Find contours (distinct shapes)
-            contours, _ = cv2.findContours(dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-            objects = []
-            for cnt in contours:
-                area = cv2.contourArea(cnt)
-                if 200 < area < 5000:  # Object size range
-                    x, y, cw, ch = cv2.boundingRect(cnt)
-                    cx = x + cw / 2
-                    cy = y + ch / 2
-                    objects.append({
-                        'cx': cx, 'cy': cy, 'area': area,
-                        'w': cw, 'h': ch, 'left': x, 'top': y,
-                    })
-
-            if not objects:
-                self._log("[Drag] Edge: no objects found")
-                return None
-
-            # 5. Filter: keep only reasonably-sized objects (not too wide/tall)
-            objects = [o for o in objects if o['w'] < w * 0.6 and o['h'] < h * 0.6]
-
-            # 6. Split into LEFT and RIGHT halves
-            mid_x = w / 2
-            left_objs = [o for o in objects if o['cx'] < mid_x - 20]  # Clearly on left
-            right_objs = [o for o in objects if o['cx'] > mid_x + 20]  # Clearly on right
-
-            self._log(f"[Drag] Edge: L={len(left_objs)} R={len(right_objs)} objects")
-
-            # 7. Pick best object from each side
-            # Best = largest area in the middle vertical range
-            def _best_group(objs, h):
-                if not objs:
-                    return None
-                mid_y = h / 2
-                # Prefer objects near the vertical center
-                scored = [(abs(o['cy'] - mid_y), o) for o in objs]
-                scored.sort()
-                return scored[0][1]  # Most vertically centered
-
-            left_best = _best_group(left_objs, h)
-            right_best = _best_group(right_objs, h)
-
-            if left_best and right_best:
-                # Drag from left to right (most common)
-                drag = left_best if left_best['area'] < right_best['area'] else right_best
-                tgt = right_best if drag == left_best else left_best
-            elif left_best:
-                drag, tgt = left_best, None
-            elif right_best:
-                drag, tgt = right_best, None
-            else:
-                return None
-
-            # If only one side has objects, mirror to other side
-            if tgt is None:
-                tgt = {'cx': w - drag['cx'], 'cy': drag['cy'], 'area': drag['area']}
-
-            self._log(f"[Drag] Edge: ({drag['cx']:.0f},{drag['cy']:.0f})→({tgt['cx']:.0f},{tgt['cy']:.0f})")
-
-            page_sx = box['x'] + drag['cx']
-            page_sy = box['y'] + drag['cy']
-            page_ex = box['x'] + tgt['cx']
-            page_ey = box['y'] + tgt['cy']
-
-            return (page_sx, page_sy, page_ex, page_ey)
-        except Exception as e:
-            self._log(f"[Drag] Edge error: {e}", level="warn")
-            return None
-
-    async def _canvas_pair_detection(self, iframe, box: dict) -> List[Tuple]:
-        """Find ALL distinct objects via edge detection and try all L→R pair combos."""
-        try:
-            raw = await iframe.screenshot()
-            if not raw or len(raw) < 500:
-                return []
-
-            gray = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_GRAYSCALE)
-            if gray is None:
-                return []
-            h, w = gray.shape[:2]
-
-            blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-            edges = cv2.Canny(blurred, 30, 100)
-            dilated = cv2.dilate(edges, np.ones((3, 3), np.uint8), iterations=2)
-            contours, _ = cv2.findContours(dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-            objects = []
-            for cnt in contours:
-                area = cv2.contourArea(cnt)
-                if 200 < area < 5000:
-                    x, y, cw, ch = cv2.boundingRect(cnt)
-                    objects.append({'cx': x + cw/2, 'cy': y + ch/2, 'area': area})
-
-            objects = [o for o in objects if o['cx'] > 20 and o['cx'] < w - 20]  # Not at edges
-
-            if len(objects) < 2:
-                return []
-
-            # Try all left→right pair combinations
-            left_objs = [o for o in objects if o['cx'] < w / 2]
-            right_objs = [o for o in objects if o['cx'] >= w / 2]
-
-            pairs = []
-            for lo in left_objs:
-                for ro in right_objs:
-                    y_diff = abs(lo['cy'] - ro['cy'])
-                    if y_diff < h * 0.6:  # Similar vertical position
-                        pairs.append((
-                            box['x'] + lo['cx'], box['y'] + lo['cy'],
-                            box['x'] + ro['cx'], box['y'] + ro['cy'],
-                        ))
-
-            # Sort by vertical alignment (best match first)
-            pairs.sort(key=lambda p: abs(p[1] - p[3]))
-
-            self._log(f"[Drag] Edge: {len(pairs)} L→R pairs")
-            return pairs[:8]  # Try up to 8
-        except Exception as e:
-            self._log(f"[Drag] Pair error: {e}", level="warn")
-            return []
 
     async def _try_muscle_memory(self, page: Page, iframe, box: dict, key: str) -> bool:
         target_pos = await self._find_template_target(page, iframe, box, key)
