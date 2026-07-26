@@ -178,13 +178,16 @@ class DiscordAutomation:
         try:
             self._log("[Vision AI] Checking for hCaptcha...")
 
-            # First check if we already navigated past captcha
-            cur_url = self._page.url
-            if any(k in cur_url for k in ['/channels', '/verify', '/welcome', '/login', '@me']):
-                self._log(f"[Vision AI] Already past captcha — at {cur_url[:50]}")
-                return True
+            # Check if we already navigated past captcha
+            try:
+                cur_url = self._page.url
+                if any(k in cur_url for k in ['/channels', '/verify', '/welcome', '/login', '@me']):
+                    self._log(f"[Vision AI] Already past captcha — at {cur_url[:50]}")
+                    return True
+            except:
+                pass
 
-            # Find the captcha iframe (with 2s timeout per query)
+            # Find the captcha iframe
             iframe = None
             for attempt in range(25):
                 try:
@@ -192,17 +195,19 @@ class DiscordAutomation:
                         self._page.query_selector('iframe[src*="hcaptcha.com"]'),
                         timeout=2.0
                     )
-                except (asyncio.TimeoutError, Exception):
+                except:
                     iframe_el = None
                 if iframe_el:
                     self._log(f"[Vision AI] hCaptcha iframe found (attempt {attempt+1})")
                     iframe = iframe_el
                     break
-                # Check if the page navigated away
-                cur_url = self._page.url
-                if any(k in cur_url for k in ['/channels', '/verify', '/welcome', '/login', '@me']):
-                    self._log(f"[Vision AI] Page navigated to {cur_url[:50]} — no captcha needed")
-                    return True
+                try:
+                    cur_url = self._page.url
+                    if any(k in cur_url for k in ['/channels', '/verify', '/welcome', '/login', '@me']):
+                        self._log(f"[Vision AI] Page navigated to {cur_url[:50]} — no captcha needed")
+                        return True
+                except:
+                    pass
                 await asyncio.sleep(0.5)
 
             if not iframe:
@@ -210,28 +215,48 @@ class DiscordAutomation:
                 return True
 
             await asyncio.sleep(1)
-            await self.capture_screenshot()
+            try:
+                await self.capture_screenshot()
+            except:
+                pass
 
-            # Solve using CLIP vision AI
+            # Solve using CLIP vision AI with timeout
             self._log("[Vision AI] Solving with CLIP (no APIs)...")
 
-            # Pre-load the model
-            await self._vision.ensure_model_loaded()
+            try:
+                await asyncio.wait_for(self._vision.ensure_model_loaded(), timeout=30.0)
+            except:
+                self._log("[Vision AI] CLIP model timed out — skipping captcha", level="warn")
+                return False
 
             # The solver handles: click checkbox → extract text → classify tiles → click → verify
-            token = await self._vision.solve_captcha(self._page, iframe)
+            try:
+                token = await asyncio.wait_for(
+                    self._vision.solve_captcha(self._page, iframe),
+                    timeout=60.0
+                )
+            except asyncio.TimeoutError:
+                self._log("[Vision AI] Captcha solving timed out after 60s", level="warn")
+                token = None
+            except Exception as e:
+                self._log(f"[Vision AI] Captcha solver crashed: {e}", level="error")
+                import traceback
+                traceback.print_exc()
+                token = None
 
             if token:
                 self._log(f"[Vision AI] ✓ Token obtained! {token[:25]}...")
-                # Inject token into the parent page
-                await self._vision.set_token_on_page(self._page, token)
+                try:
+                    await self._vision.set_token_on_page(self._page, token)
+                except:
+                    pass
                 return True
             else:
                 self._log("[Vision AI] ✗ Could not solve captcha", level="error")
                 return False
 
         except Exception as e:
-            self._log(f"[Vision AI] Error: {e}", level="error")
+            self._log(f"[Vision AI] Captcha flow error: {e}", level="error")
             import traceback
             traceback.print_exc()
             return False
