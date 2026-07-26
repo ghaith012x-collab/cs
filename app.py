@@ -472,8 +472,16 @@ async function refresh(){
       s.style.color='#a7f3d0';
     }else{s.textContent='■ Stopped';s.style.color='#fca5a5'}
     let img=document.getElementById('shot');let ph=document.getElementById('camPlaceholder');
-    if(x.screenshots){img.src='/latest?'+Date.now();img.style.display='block';ph.style.display='none'}
-    else{img.style.display='none';ph.style.display='flex'}
+    if(x.screenshots&&x.screenshots>0){
+      img.src='/latest?'+Date.now();
+      img.style.display='block';
+      ph.style.display='none';
+      img.onerror=function(){img.style.display='none';ph.textContent='⚠️ Screenshot failed to load';ph.style.display='flex'};
+    }else{
+      img.style.display='none';
+      ph.style.display='flex';
+      ph.textContent='Waiting for screenshot...';
+    }
   }catch(e){document.getElementById('status').textContent='Unable to reach service'}
 }
 async function refreshLog(){
