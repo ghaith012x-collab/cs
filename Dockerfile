@@ -26,7 +26,6 @@ RUN python setup_extensions.py
 
 # Copy application files
 COPY app.py server.py captcha_solver.py solver_api.py database.py config.json ./
-COPY extensions/ ./extensions/
 COPY torrc /etc/tor/torrc
 COPY start.sh .
 RUN chmod +x start.sh
