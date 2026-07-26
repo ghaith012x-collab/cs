@@ -20,22 +20,12 @@ RUN pip install --no-cache-dir \
 
 RUN python -m playwright install chromium
 
-# Download NopeCHA extension (free hCaptcha solver, no API key needed, 100 solves/day)
-RUN python -c "
-import requests, zipfile, os, shutil
-from pathlib import Path
-print('[Build] Downloading NopeCHA extension...')
-r = requests.get('https://github.com/NopeCHALLC/nopecha-extension/releases/latest/download/chromium_automation.zip', timeout=60, allow_redirects=True)
-r.raise_for_status()
-Path('extensions').mkdir(exist_ok=True)
-with open('extensions/nopecha.zip', 'wb') as f: f.write(r.content)
-with zipfile.ZipFile('extensions/nopecha.zip', 'r') as z: z.extractall('extensions/nopecha')
-os.unlink('extensions/nopecha.zip')
-print(f'[Build] NopeCHA extension ready ({os.path.isdir("extensions/nopecha") and os.path.isfile("extensions/nopecha/manifest.json")})')
-"
+# Copy setup script first, then download NopeCHA extension
+COPY setup_extensions.py requirements.txt ./
+RUN python setup_extensions.py
 
 # Copy application files
-COPY app.py server.py captcha_solver.py solver_api.py database.py setup_extensions.py config.json requirements.txt ./
+COPY app.py server.py captcha_solver.py solver_api.py database.py config.json ./
 COPY extensions/ ./extensions/
 COPY torrc /etc/tor/torrc
 COPY start.sh .
