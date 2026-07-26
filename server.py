@@ -13,6 +13,13 @@ from playwright.async_api import async_playwright, Page, BrowserContext
 from captcha_solver import SolverAPI
 
 
+# ── NopeCHA Extension Path ────────────────────────────────
+# Free hCaptcha solver, no API key needed (100 solves/day)
+NOPECHA_EXT_PATH = os.path.abspath(
+    os.environ.get("NOPECHA_EXT_PATH", "extensions/nopecha")
+)
+
+
 # ── TOR Control ───────────────────────────────────────────
 
 def _tor_newnym():
@@ -102,6 +109,10 @@ class DiscordAutomation:
 
         self._playwright = await async_playwright().start()
         
+        # Load NopeCHA extension if available (free hCaptcha solver, no API key)
+        ext_path = NOPECHA_EXT_PATH
+        ext_available = os.path.isdir(ext_path) and os.path.isfile(os.path.join(ext_path, "manifest.json"))
+        
         args = [
             '--disable-blink-features=AutomationDetected',
             '--no-sandbox',
@@ -110,26 +121,45 @@ class DiscordAutomation:
             '--disable-features=IsolateOrigins,site-per-process',
         ]
         
-        self._browser = await self._playwright.chromium.launch(
-            headless=self.headless,
-            args=args
-        )
-        
-        # Use TOR proxy + random user agent for each session
         ua = random.choice(USER_AGENTS)
-        ctx_opts = {
-            'viewport': {'width': 1920, 'height': 1080},
-            'user_agent': ua,
-        }
-        if _tor_check():
-            ctx_opts['proxy'] = {'server': 'socks5://127.0.0.1:9050'}
         
-        self._context = await self._browser.new_context(**ctx_opts)
+        if ext_available:
+            self._log(f"[Extension] Loading NopeCHA solver from {ext_path}")
+            # Extensions need persistent context
+            user_data_dir = f"/tmp/playwright-ud-{random.randint(10000,99999)}"
+            ctx_opts = {
+                'viewport': {'width': 1920, 'height': 1080},
+                'user_agent': ua,
+                'args': [
+                    f"--disable-extensions-except={ext_path}",
+                    f"--load-extension={ext_path}",
+                ]
+            }
+            if _tor_check():
+                ctx_opts['proxy'] = {'server': 'socks5://127.0.0.1:9050'}
+            self._context = await self._playwright.chromium.launch_persistent_context(
+                user_data_dir,
+                headless=self.headless,
+                **ctx_opts
+            )
+            self._log("[Extension] NopeCHA loaded — it auto-solves hCaptcha for free!")
+        else:
+            self._log(f"[Extension] NopeCHA not found at {ext_path} — using API fallback", level="warn")
+            self._browser = await self._playwright.chromium.launch(
+                headless=self.headless,
+                args=args
+            )
+            ctx_opts = {
+                'viewport': {'width': 1920, 'height': 1080},
+                'user_agent': ua,
+            }
+            if _tor_check():
+                ctx_opts['proxy'] = {'server': 'socks5://127.0.0.1:9050'}
+            self._context = await self._browser.new_context(**ctx_opts)
         
         self._log(f"User-Agent: {ua[:60]}...")
         
         await self._context.add_init_script("""
-            // Stealth: webdriver=false (not undefined - absence is now a signal)
             Object.defineProperty(navigator, 'webdriver', { get: () => false, configurable: true });
             Object.defineProperty(navigator, 'languages', { get: () => Object.freeze(['en-US', 'en']) });
             Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8 });
@@ -137,7 +167,6 @@ class DiscordAutomation:
             Object.defineProperty(navigator, 'platform', { get: () => 'Win32' });
             Object.defineProperty(navigator, 'vendor', { get: () => 'Google Inc.' });
             Object.defineProperty(navigator, 'maxTouchPoints', { get: () => 0 });
-            // WebRTC leak prevention
             const origRTC = window.RTCPeerConnection || window.webkitRTCPeerConnection;
             if (origRTC) {
                 window.RTCPeerConnection = function(...args) {
@@ -244,256 +273,89 @@ class DiscordAutomation:
         return success
 
     async def _solve_hcaptcha_if_present(self) -> bool:
-        """Detect and solve hCaptcha with robust multi-method detection."""
+        """Detect and solve hCaptcha.
+        
+        Priority:
+        1. NopeCHA extension auto-solves (free, no API key, 100/day)
+        2. API fallback (CapSolver, BestCaptchaSolver, etc.)
+        """
         try:
             self._log("Checking for hCaptcha...")
             
-
-            
-            # Wait up to 10 seconds for captcha to appear (it can take a moment)
+            # Wait for captcha to appear
             captcha_found = False
-            for attempt in range(20):  # 20 * 0.5s = 10s max wait
-                # Method 1: iframe with hcaptcha src
-                hcaptcha_iframe = await self._page.query_selector(
-                    'iframe[src*="hcaptcha.com"], '
-                    'iframe[src*="captcha.hcaptcha.com"], '
-                    'iframe[title*="hCaptcha"], '
+            for attempt in range(20):
+                has_iframe = await self._page.query_selector(
+                    'iframe[src*="hcaptcha.com"], iframe[title*="hCaptcha"], '
                     'iframe[title*="Widget containing checkbox"]'
                 )
-                if hcaptcha_iframe:
+                if has_iframe:
                     captcha_found = True
-                    self._log(f"hCaptcha iframe detected (attempt {attempt+1})")
+                    self._log(f"hCaptcha detected (attempt {attempt+1})")
                     break
-                
-                # Method 2: Check for hcaptcha div container
-                hcaptcha_div = await self._page.query_selector(
-                    '#hcaptcha-script, '
-                    'div.h-captcha, '
-                    'div[data-hcaptcha-widget-id], '
-                    'div[class*="hcaptcha"]'
-                )
-                if hcaptcha_div:
+                # Also check JS
+                js = await self._page.evaluate("""() => {
+                    const f = document.querySelector('iframe[src*="hcaptcha"]');
+                    if(f) return 'iframe';
+                    const s = document.querySelector('script[src*="hcaptcha"]');
+                    if(s) return 'script';
+                    return null;
+                }""")
+                if js:
                     captcha_found = True
-                    self._log(f"hCaptcha div detected (attempt {attempt+1})")
+                    self._log(f"hCaptcha via JS ({js}, attempt {attempt+1})")
                     break
-                
-                # Method 3: Check for hcaptcha response textarea (means it loaded)
-                textarea = await self._page.query_selector(
-                    'textarea[name="h-captcha-response"], '
-                    'textarea[name="g-recaptcha-response"]'
-                )
-                if textarea:
-                    captcha_found = True
-                    self._log(f"hCaptcha textarea detected (attempt {attempt+1})")
-                    break
-                
-                # Method 4: Check via JavaScript for any hcaptcha-related elements
-                js_detected = await self._page.evaluate("""
-                    () => {
-                        // Check for hcaptcha script
-                        const scripts = document.querySelectorAll('script[src*="hcaptcha"]');
-                        if (scripts.length > 0) return 'script';
-                        // Check for hcaptcha frames
-                        const frames = document.querySelectorAll('iframe');
-                        for (const f of frames) {
-                            if (f.src && f.src.includes('hcaptcha')) return 'iframe';
-                            if (f.title && f.title.toLowerCase().includes('captcha')) return 'iframe';
-                        }
-                        // Check for challenge overlay
-                        const overlay = document.querySelector('[class*="challenge"], [id*="challenge"]');
-                        if (overlay) return 'overlay';
-                        return null;
-                    }
-                """)
-                if js_detected:
-                    captcha_found = True
-                    self._log(f"hCaptcha detected via JS ({js_detected}, attempt {attempt+1})")
-                    break
-                
                 await asyncio.sleep(0.5)
             
             if not captcha_found:
-                self._log("No hCaptcha detected after 10s - might have passed without captcha")
-                # Check if we're on a success page or error page
-                current_url = self._page.url
-                if 'channels' in current_url or 'app' in current_url:
-                    self._log("Redirected to app - registration succeeded without captcha!")
-                    return True
-                return True  # No captcha = success
+                self._log("No hCaptcha detected — proceeding")
+                return True
             
-            # Wait a moment for the captcha to fully render
-            await asyncio.sleep(2)
+            await asyncio.sleep(1.5)
             
-            # First, check if there's a checkbox to click before the challenge appears
-            try:
-                checkbox_frame = self._page.frame_locator('iframe[src*="hcaptcha"], iframe[title*="Widget containing checkbox"], iframe[title*="hCaptcha"]')
-                checkbox = checkbox_frame.locator('#checkbox, [role="checkbox"]')
-                if await checkbox.count() > 0:
-                    self._log("Clicking hCaptcha checkbox...")
-                    await checkbox.first.click()
-                    await asyncio.sleep(3)
-                    
-                    # Check if clicking checkbox was enough (sometimes it passes)
-                    checked = await self._page.evaluate("""
-                        () => {
-                            const textarea = document.querySelector('textarea[name="h-captcha-response"]');
-                            return textarea && textarea.value && textarea.value.length > 0;
-                        }
-                    """)
-                    if checked:
-                        self._log("hCaptcha passed with just checkbox click!")
+            # TRY 1: Wait for NopeCHA extension to auto-solve (free, no API key)
+            ext_available = os.path.isdir(NOPECHA_EXT_PATH)
+            if ext_available:
+                self._log("[Extension] Waiting for NopeCHA to auto-solve...")
+                for _ in range(40):  # 40 * 1s = 40s max wait
+                    token = await self._page.evaluate("""() => {
+                        const ta = document.querySelector('textarea[name="h-captcha-response"]');
+                        return ta && ta.value && ta.value.length > 20 ? ta.value : '';
+                    }""")
+                    if token:
+                        self._log(f"[Extension] ✓ NopeCHA solved! Token: {token[:20]}...")
                         return True
-            except Exception as e:
-                self._log(f"Checkbox click attempt: {e}")
+                    # Check if page navigated (solved without token check needed)
+                    try:
+                        cu = self._page.url
+                        if any(k in cu for k in ['/channels', '/verify-email', '/welcome']):
+                            self._log(f"[Extension] Navigated to {cu} — solved!")
+                            return True
+                    except:
+                        pass
+                    await asyncio.sleep(1)
+                self._log("[Extension] NopeCHA did not solve — falling back to API", level="warn")
             
-            # Solve using API
+            # TRY 2: API fallback
+            self._log("[API] Solving via external CAPTCHA API...")
             api_solver = SolverAPI(service="capsolver", log=self._log)
-            
-            max_captcha_loops = 3
-            
-            for captcha_attempt in range(1, max_captcha_loops + 1):
-                self._log(f"Captcha attempt {captcha_attempt}/{max_captcha_loops} - Solving via API...")
-                token = await api_solver.solve_from_page(self._page)
-                
-                if not token:
-                    self._log(f"hCaptcha solve FAILED on attempt {captcha_attempt}")
-                    await api_solver.close()
-                    return False
-                
-                # Inject the token into the page
-                injected = await api_solver.set_token_on_page(self._page, token)
-                if not injected:
-                    self._log(f"Token obtained but could not inject on page", level="warn")
-                
-                self._log(f"hCaptcha SOLVED on attempt {captcha_attempt}! (token: {token[:20]}...)")
-                await asyncio.sleep(0.5)
-                
-                # Click "Create Account" after solving
-                self._log("Clicking Create Account after captcha solve...")
-                try:
-                    create_btn = self._page.locator('button:has-text("Create Account"), button:has-text("create account"), button[type="submit"]:has-text("Create"), button:has-text("Register"), button:has-text("Sign Up")')
-                    if await create_btn.count() > 0:
-                        await create_btn.first.click()
-                        self._log("Clicked Create Account button.")
-                    else:
-                        submit_btn = self._page.locator('button[type="submit"]')
-                        if await submit_btn.count() > 0:
-                            await submit_btn.first.click()
-                            self._log("Clicked submit button (fallback).")
-                        else:
-                            self._log("No Create Account button found, pressing Enter...")
-                            await self._page.keyboard.press("Enter")
-                except Exception as btn_err:
-                    self._log(f"Error clicking Create Account: {btn_err}")
-                
-                # Scan for 15 seconds to detect if a new captcha appears
-                self._log("Scanning for new captcha (15s window)...")
-                new_captcha = False
-                scan_start = asyncio.get_event_loop().time()
-                scan_duration = 15  # seconds
-                
-                # All possible hCaptcha iframe selectors
-                captcha_selectors = [
-                    "iframe[src*='newassets.hcaptcha.com/captcha']",
-                    "iframe[src*='hcaptcha.com/captcha']",
-                    "iframe[src*='imgs.hcaptcha.com']",
-                    "iframe[title*='hCaptcha challenge']",
-                    "iframe[title*='hcaptcha challenge']",
-                    "iframe[data-hcaptcha-widget-id]",
-                    "iframe[src*='hcaptcha'][style*='width']",
-                ]
-                
-                while (asyncio.get_event_loop().time() - scan_start) < scan_duration:
-                    # Check if page navigated away (success!)
-                    try:
-                        current_url = self._page.url
-                        if any(kw in current_url for kw in ['/channels', '/verify-email', '/welcome', '/dashboard', '/confirm']):
-                            self._log(f"Page navigated to: {current_url} - signup successful!")
-                            await api_solver.close()
-                            return True
-                    except:
-                        pass
-                    
-                    # Check ALL possible captcha iframe selectors
-                    for sel in captcha_selectors:
-                        try:
-                            challenge_iframe = self._page.locator(sel)
-                            challenge_count = await challenge_iframe.count()
-                            
-                            if challenge_count > 0:
-                                for i in range(challenge_count):
-                                    try:
-                                        frame = challenge_iframe.nth(i)
-                                        box = await frame.bounding_box()
-                                        if box and box['width'] > 100 and box['height'] > 100:
-                                            is_visible = await frame.is_visible()
-                                            if is_visible:
-                                                new_captcha = True
-                                                self._log(f"New active captcha detected! (selector: {sel}, size: {box['width']:.0f}x{box['height']:.0f})")
-                                                break
-                                    except:
-                                        continue
-                            if new_captcha:
-                                break
-                        except:
-                            continue
-                    
-                    if new_captcha:
-                        break
-                    
-                    # Also check for any large overlay/modal that appeared (captcha container)
-                    try:
-                        overlay = self._page.locator("div[style*='position: fixed'], div[style*='position:fixed'], .hcaptcha-box, #hcaptcha, .captcha-container")
-                        if await overlay.count() > 0:
-                            for i in range(await overlay.count()):
-                                box = await overlay.nth(i).bounding_box()
-                                if box and box['width'] > 200 and box['height'] > 200:
-                                    # Check if it contains an iframe
-                                    inner_frames = await overlay.nth(i).locator("iframe").count()
-                                    if inner_frames > 0:
-                                        new_captcha = True
-                                        self._log(f"Captcha overlay/container detected! (size: {box['width']:.0f}x{box['height']:.0f})")
-                                        break
-                    except:
-                        pass
-                    
-                    if new_captcha:
-                        break
-                    
-                    await asyncio.sleep(1.5)  # Poll every 1.5s
-                
-                if not new_captcha:
-                    # Verify the solve token is actually present before declaring success.
-                    # The captcha might have just disappeared/expired without actually being solved.
-                    token_present = await self._page.evaluate("""
-                        () => {
-                            const textarea = document.querySelector('textarea[name="h-captcha-response"]');
-                            return textarea && textarea.value && textarea.value.length > 0;
-                        }
-                    """)
-                    if token_present:
-                        self._log(f"No captcha appeared after {scan_duration}s scan AND token confirmed - proceeding!")
-                        await api_solver.close()
+            try:
+                for attempt in range(2):
+                    token = await api_solver.solve_from_page(self._page)
+                    if token:
+                        await api_solver.set_token_on_page(self._page, token)
+                        self._log(f"[API] ✓ Solved! Token: {token[:20]}...")
                         return True
-                    else:
-                        # Also check if page navigated (registration actually succeeded)
-                        current_url = self._page.url
-                        if any(kw in current_url for kw in ['channels', 'verify-email', 'new-user']):
-                            self._log(f"Page navigated to {current_url} - registration succeeded!")
-                            await api_solver.close()
-                            return True
-                        self._log(f"No captcha appeared but NO TOKEN found - solve was false positive! Retrying...")
-                        # Don't return True - fall through to retry or fail
-                        break
-                
-                self._log(f"Re-solving captcha (loop {captcha_attempt + 1})...")
-                await asyncio.sleep(0.5)
+                    self._log(f"[API] Attempt {attempt+1} failed", level="warn")
+                    await asyncio.sleep(1)
+            finally:
+                await api_solver.close()
             
-            self._log(f"Exhausted {max_captcha_loops} captcha attempts")
-            await api_solver.close()
+            self._log("✗ All solving methods failed", level="error")
             return False
+            
         except Exception as e:
-            self._log(f"hCaptcha solve error: {e}")
+            self._log(f"hCaptcha solve error: {e}", level="error")
             import traceback
             traceback.print_exc()
             return False
