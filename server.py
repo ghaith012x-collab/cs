@@ -178,18 +178,30 @@ class DiscordAutomation:
         try:
             self._log("[Vision AI] Checking for hCaptcha...")
 
-            # Find the captcha iframe
+            # First check if we already navigated past captcha
+            cur_url = self._page.url
+            if any(k in cur_url for k in ['/channels', '/verify', '/welcome', '/login', '@me']):
+                self._log(f"[Vision AI] Already past captcha — at {cur_url[:50]}")
+                return True
+
+            # Find the captcha iframe (with 2s timeout per query)
             iframe = None
             for attempt in range(25):
-                iframe_el = await self._page.query_selector('iframe[src*="hcaptcha.com"]')
+                try:
+                    iframe_el = await asyncio.wait_for(
+                        self._page.query_selector('iframe[src*="hcaptcha.com"]'),
+                        timeout=2.0
+                    )
+                except (asyncio.TimeoutError, Exception):
+                    iframe_el = None
                 if iframe_el:
                     self._log(f"[Vision AI] hCaptcha iframe found (attempt {attempt+1})")
                     iframe = iframe_el
                     break
-                # Check if the page navigated away (solved/redirected)
+                # Check if the page navigated away
                 cur_url = self._page.url
-                if any(k in cur_url for k in ['/channels', '/verify', '/welcome', '/login']):
-                    self._log(f"[Vision AI] Page navigated to {cur_url} — no captcha needed")
+                if any(k in cur_url for k in ['/channels', '/verify', '/welcome', '/login', '@me']):
+                    self._log(f"[Vision AI] Page navigated to {cur_url[:50]} — no captcha needed")
                     return True
                 await asyncio.sleep(0.5)
 
