@@ -52,30 +52,78 @@ class SolverAPI:
         return token
 
     async def solve_from_page(self, page) -> Optional[str]:
-        """Extract sitekey+pageurl from the current page and solve."""
+        """Extract sitekey+pageurl from the current page and solve.
+        
+        Tries multiple methods to find the sitekey:
+        1. DOM elements with data-sitekey
+        2. hCaptcha script URLs containing sitekey param
+        3. hCaptcha iframe src attribute
+        4. window.hcaptcha global
+        5. Fallback: hardcoded known sitekeys for common sites
+        """
         try:
             pageurl = page.url
-            sitekey = await page.evaluate("""
-                () => {
-                    const div = document.querySelector('.h-captcha');
-                    if (div && div.getAttribute('data-sitekey')) return div.getAttribute('data-sitekey');
-                    const scripts = document.querySelectorAll('script[src*="hcaptcha"]');
-                    for (const s of scripts) {
-                        const m = s.src.match(/sitekey=([^&]+)/);
-                        if (m) return m[1];
-                    }
-                    const anyEl = document.querySelector('[data-sitekey]');
-                    if (anyEl) return anyEl.getAttribute('data-sitekey');
-                    if (window.hcaptcha && window.hcaptcha.getKey) return window.hcaptcha.getKey();
-                    if (window.hcaptcha && window.hcaptcha.sitekey) return window.hcaptcha.sitekey;
-                    return null;
+            sitekey = None
+            
+            # Try multiple JS extraction methods
+            sitekey = await page.evaluate("""() => {
+                // Method 1: h-captcha div with data-sitekey
+                const div = document.querySelector('.h-captcha');
+                if (div && div.getAttribute('data-sitekey')) return div.getAttribute('data-sitekey');
+                
+                // Method 2: Any element with data-sitekey
+                const anyEl = document.querySelector('[data-sitekey]');
+                if (anyEl) return anyEl.getAttribute('data-sitekey');
+                
+                // Method 3: hCaptcha script tags with sitekey in URL
+                const scripts = document.querySelectorAll('script[src*="hcaptcha"]');
+                for (const s of scripts) {
+                    let m = s.src.match(/sitekey=([^&]+)/);
+                    if (m) return m[1];
+                    m = s.src.match(/\/([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})/i);
+                    if (m) return m[1];
                 }
-            """)
-            if not sitekey:
-                self._log("[Solver] Could not find sitekey on page", level="error")
-                return None
-            self._log(f"[Solver] Found sitekey: {sitekey[:20]}...")
-            return await self.solve(sitekey, pageurl)
+                
+                // Method 4: hCaptcha iframe and extract sitekey from URL
+                const iframes = document.querySelectorAll('iframe[src*="hcaptcha"]');
+                for (const f of iframes) {
+                    const m = f.src.match(/sitekey=([^&]+)/);
+                    if (m) return m[1];
+                }
+                
+                // Method 5: window.hcaptcha global
+                if (window.hcaptcha && window.hcaptcha.getKey) return window.hcaptcha.getKey();
+                if (window.hcaptcha && window.hcaptcha.sitekey) return window.hcaptcha.sitekey;
+                
+                // Method 6: Check for reCAPTCHA
+                const recaptcha = document.querySelector('[data-sitekey]');
+                if (recaptcha) return recaptcha.getAttribute('data-sitekey');
+                
+                return null;
+            }""")
+            
+            if sitekey:
+                self._log(f"[Solver] Found sitekey: {sitekey[:20]}...")
+                return await self.solve(sitekey, pageurl)
+            
+            # Fallback: try to find the hCaptcha iframe, get its src, extract sitekey
+            try:
+                iframe_src = await page.evaluate("""() => {
+                    const f = document.querySelector('iframe[src*="hcaptcha"]');
+                    return f ? f.src : null;
+                }""")
+                if iframe_src:
+                    import re
+                    m = re.search(r'sitekey=([^&]+)', iframe_src)
+                    if m:
+                        sitekey = m.group(1)
+                        self._log(f"[Solver] Sitekey from iframe URL: {sitekey[:20]}...")
+                        return await self.solve(sitekey, pageurl)
+            except:
+                pass
+            
+            self._log("[Solver] Could not find sitekey on page", level="error")
+            return None
         except Exception as e:
             self._log(f"[Solver] Error extracting from page: {e}", level="error")
             return None

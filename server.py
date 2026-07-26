@@ -311,13 +311,40 @@ class DiscordAutomation:
                 self._log("No hCaptcha detected — proceeding")
                 return True
             
-            await asyncio.sleep(1.5)
+            await asyncio.sleep(2)
+            
+            # Click the hCaptcha checkbox to trigger the challenge
+            try:
+                checkbox_frame = self._page.frame_locator('iframe[src*="hcaptcha"], iframe[title*="hCaptcha"], iframe[title*="checkbox"]')
+                checkbox = checkbox_frame.locator('#checkbox, [role="checkbox"], .checkbox')
+                if await checkbox.count() > 0:
+                    self._log("[Captcha] Clicking hCaptcha checkbox...")
+                    await checkbox.first.click()
+                    await asyncio.sleep(2)
+            except Exception as e:
+                self._log(f"[Captcha] Checkbox click skipped: {e}")
+            
+            # Also try clicking via JS directly on the iframe
+            try:
+                await self._page.evaluate("""() => {
+                    const f = document.querySelector('iframe[src*="hcaptcha"]');
+                    if (f) {
+                        try {
+                            const doc = f.contentDocument || f.contentWindow.document;
+                            const cb = doc.querySelector('#checkbox');
+                            if (cb) { cb.click(); return true; }
+                        } catch(e) {}
+                    }
+                    return false;
+                }""")
+            except:
+                pass
             
             # TRY 1: Wait for NopeCHA extension to auto-solve (free, no API key)
             ext_available = os.path.isdir(NOPECHA_EXT_PATH)
             if ext_available:
                 self._log("[Extension] Waiting for NopeCHA to auto-solve...")
-                for _ in range(40):  # 40 * 1s = 40s max wait
+                for _ in range(60):  # 60 * 1s = 60s max wait
                     token = await self._page.evaluate("""() => {
                         const ta = document.querySelector('textarea[name="h-captcha-response"]');
                         return ta && ta.value && ta.value.length > 20 ? ta.value : '';
@@ -325,7 +352,6 @@ class DiscordAutomation:
                     if token:
                         self._log(f"[Extension] ✓ NopeCHA solved! Token: {token[:20]}...")
                         return True
-                    # Check if page navigated (solved without token check needed)
                     try:
                         cu = self._page.url
                         if any(k in cu for k in ['/channels', '/verify-email', '/welcome']):
