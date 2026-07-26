@@ -20,12 +20,8 @@ RUN pip install --no-cache-dir \
 
 RUN python -m playwright install chromium
 
-# Copy setup script first, then download NopeCHA extension
-COPY setup_extensions.py requirements.txt ./
-RUN python setup_extensions.py
-
 # Copy application files
-COPY app.py server.py captcha_solver.py solver_api.py database.py config.json ./
+COPY app.py server.py captcha_solver.py solver_api.py database.py config.json requirements.txt ./
 COPY torrc /etc/tor/torrc
 COPY start.sh .
 RUN chmod +x start.sh

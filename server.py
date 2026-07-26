@@ -13,13 +13,6 @@ from playwright.async_api import async_playwright, Page, BrowserContext
 from captcha_solver import SolverAPI
 
 
-# ── NopeCHA Extension Path ────────────────────────────────
-# Free hCaptcha solver, no API key needed (100 solves/day)
-NOPECHA_EXT_PATH = os.path.abspath(
-    os.environ.get("NOPECHA_EXT_PATH", "extensions/nopecha")
-)
-
-
 # ── TOR Control ───────────────────────────────────────────
 
 def _tor_newnym():
@@ -109,10 +102,6 @@ class DiscordAutomation:
 
         self._playwright = await async_playwright().start()
         
-        # Load NopeCHA extension if available (free hCaptcha solver, no API key)
-        ext_path = NOPECHA_EXT_PATH
-        ext_available = os.path.isdir(ext_path) and os.path.isfile(os.path.join(ext_path, "manifest.json"))
-        
         args = [
             '--disable-blink-features=AutomationDetected',
             '--no-sandbox',
@@ -123,54 +112,17 @@ class DiscordAutomation:
         
         ua = random.choice(USER_AGENTS)
         
-        if ext_available:
-            self._log(f"[Extension] Loading NopeCHA solver from {ext_path}")
-            user_data_dir = f"/tmp/playwright-ud-{random.randint(10000,99999)}"
-            
-            args = [
-                f"--disable-extensions-except={ext_path}",
-                f"--load-extension={ext_path}",
-                '--disable-blink-features=AutomationDetected',
-                '--no-sandbox',
-                '--disable-setuid-sandbox',
-            ]
-            ctx_opts = {
-                'viewport': {'width': 1920, 'height': 1080},
-                'user_agent': ua,
-                'args': args,
-            }
-            if _tor_check():
-                ctx_opts['proxy'] = {'server': 'socks5://127.0.0.1:9050'}
-            
-            self._context = await self._playwright.chromium.launch_persistent_context(
-                user_data_dir,
-                headless=self.headless,
-                **ctx_opts
-            )
-            
-            # Initialize the extension by visiting its pages
-            ext_page = await self._context.new_page()
-            try:
-                await ext_page.goto("https://nopecha.com/setup", wait_until='domcontentloaded', timeout=10000)
-                self._log("[Extension] NopeCHA setup page loaded — extension activated")
-            except Exception as e:
-                self._log(f"[Extension] Setup page: {e}")
-            await ext_page.close()
-            
-            self._log("[Extension] NopeCHA loaded — auto-solves hCaptcha for free (100/day)")
-        else:
-            self._log(f"[Extension] NopeCHA not found at {ext_path} — using API fallback", level="warn")
-            self._browser = await self._playwright.chromium.launch(
-                headless=self.headless,
-                args=args
-            )
-            ctx_opts = {
-                'viewport': {'width': 1920, 'height': 1080},
-                'user_agent': ua,
-            }
-            if _tor_check():
-                ctx_opts['proxy'] = {'server': 'socks5://127.0.0.1:9050'}
-            self._context = await self._browser.new_context(**ctx_opts)
+        self._browser = await self._playwright.chromium.launch(
+            headless=self.headless,
+            args=args
+        )
+        ctx_opts = {
+            'viewport': {'width': 1920, 'height': 1080},
+            'user_agent': ua,
+        }
+        if _tor_check():
+            ctx_opts['proxy'] = {'server': 'socks5://127.0.0.1:9050'}
+        self._context = await self._browser.new_context(**ctx_opts)
         
         self._log(f"User-Agent: {ua[:60]}...")
         
@@ -288,12 +240,7 @@ class DiscordAutomation:
         return success
 
     async def _solve_hcaptcha_if_present(self) -> bool:
-        """Detect and solve hCaptcha.
-        
-        Priority:
-        1. NopeCHA extension auto-solves (free, no API key, 100/day)
-        2. API fallback (CapSolver, BestCaptchaSolver, etc.)
-        """
+        """Detect and solve hCaptcha via BrightData API (or fallback services)."""
         try:
             self._log("Checking for hCaptcha...")
             
@@ -308,7 +255,6 @@ class DiscordAutomation:
                     captcha_found = True
                     self._log(f"hCaptcha detected (attempt {attempt+1})")
                     break
-                # Also check JS
                 js = await self._page.evaluate("""() => {
                     const f = document.querySelector('iframe[src*="hcaptcha"]');
                     if(f) return 'iframe';
@@ -339,7 +285,6 @@ class DiscordAutomation:
             except Exception as e:
                 self._log(f"[Captcha] Checkbox click skipped: {e}")
             
-            # Also try clicking via JS directly on the iframe
             try:
                 await self._page.evaluate("""() => {
                     const f = document.querySelector('iframe[src*="hcaptcha"]');
@@ -355,31 +300,9 @@ class DiscordAutomation:
             except:
                 pass
             
-            # TRY 1: Wait for NopeCHA extension to auto-solve (free, no API key)
-            ext_available = os.path.isdir(NOPECHA_EXT_PATH)
-            if ext_available:
-                self._log("[Extension] Waiting for NopeCHA to auto-solve...")
-                for _ in range(60):  # 60 * 1s = 60s max wait
-                    token = await self._page.evaluate("""() => {
-                        const ta = document.querySelector('textarea[name="h-captcha-response"]');
-                        return ta && ta.value && ta.value.length > 20 ? ta.value : '';
-                    }""")
-                    if token:
-                        self._log(f"[Extension] ✓ NopeCHA solved! Token: {token[:20]}...")
-                        return True
-                    try:
-                        cu = self._page.url
-                        if any(k in cu for k in ['/channels', '/verify-email', '/welcome']):
-                            self._log(f"[Extension] Navigated to {cu} — solved!")
-                            return True
-                    except:
-                        pass
-                    await asyncio.sleep(1)
-                self._log("[Extension] NopeCHA did not solve — falling back to API", level="warn")
-            
-            # TRY 2: API fallback
-            self._log("[API] Solving via external CAPTCHA API...")
-            api_solver = SolverAPI(service="capsolver", log=self._log)
+            # SOLVE VIA API (BrightData prioritized when API_KEY is set)
+            self._log("[API] Solving via CAPTCHA API...")
+            api_solver = SolverAPI(service="brightdata", log=self._log)
             try:
                 for attempt in range(2):
                     token = await api_solver.solve_from_page(self._page)

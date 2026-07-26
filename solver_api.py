@@ -390,7 +390,7 @@ SERVICE_FREE_CREDITS = {
 }
 
 SERVICE_ENV_VARS = {
-    "brightdata": "BRIGHTDATA_API_KEY",
+    "brightdata": "API_KEY",
     "capsolver": "CAPSOLVER_API_KEY",
     "bestcaptchasolver": "BESTCAPTCHASOLVER_API_KEY",
     "anycaptcha": "ANYCAPTCHA_API_KEY",
