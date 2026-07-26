@@ -296,7 +296,8 @@ class DiscordAutomation:
             # Strategy 2: Click the placeholder text, then type to filter
             try:
                 placeholder = self._page.get_by_text(label, exact=True)
-                if await placeholder.count() > 0:
+                count = await asyncio.wait_for(placeholder.count(), timeout=2.0)
+                if count > 0:
                     await placeholder.first.click()
                     await asyncio.sleep(0.5)
                     await self._page.keyboard.type(option_text, delay=30)
@@ -312,7 +313,8 @@ class DiscordAutomation:
             try:
                 idx = {"Month": 0, "Day": 1, "Year": 2}.get(label, 0)
                 pw = self._page.locator('input[name="password"]')
-                if await pw.count() > 0:
+                count = await asyncio.wait_for(pw.count(), timeout=2.0)
+                if count > 0:
                     await pw.click()
                     await asyncio.sleep(0.2)
                     for _ in range(idx + 1):
@@ -398,11 +400,24 @@ class DiscordAutomation:
             await self._select_dob("Year", year_val)
             await self._human_pause()
 
-            # ── ToS Checkbox (aggressive detection) ──────────────
+            # ── ToS Checkbox (with timeouts — never hang) ────────
             self._log("Checking ToS checkbox...")
             tos_checked = False
 
-            # Strategy 1: Playwright locators
+            async def _try_click(sel: str, timeout=2.0):
+                """Try clicking a selector, return True if clicked."""
+                try:
+                    cb = self._page.locator(sel)
+                    count = await asyncio.wait_for(cb.count(), timeout=timeout)
+                    if count > 0:
+                        await cb.first.click()
+                        self._log(f"✓ ToS via '{sel}'")
+                        return True
+                except (asyncio.TimeoutError, Exception) as e:
+                    self._log(f"  ToS sel '{sel}' timed out ({e})", level="warn")
+                return False
+
+            # Strategy 1: Quick Playwright locators (2s timeout each)
             for sel in [
                 'input[type="checkbox"]',
                 'div[role="checkbox"]',
@@ -413,81 +428,31 @@ class DiscordAutomation:
                 'label:has-text("I have read")',
                 'label:has-text("read and agree")',
             ]:
-                cb = self._page.locator(sel)
-                if await cb.count() > 0:
-                    await cb.first.click()
+                if await _try_click(sel):
                     tos_checked = True
-                    self._log(f"✓ ToS via '{sel}'")
                     break
 
-            # Strategy 2: Find by text "Terms of Service" and click parent
+            # Strategy 2: Find by text "Terms of Service" and click
             if not tos_checked:
                 try:
-                    tos_text = self._page.get_by_text("Terms of Service", exact=False)
-                    if await tos_text.count() > 0:
-                        # Click the parent label or container
-                        el = tos_text.first
-                        parent = self._page.locator(':has-text("Terms of Service")').first
-                        await parent.click()
-                        tos_checked = True
-                        self._log("✓ ToS via text-content click")
-                except Exception as e:
-                    self._log(f"ToS text click error: {e}")
-
-            # Strategy 3: Find by text "I have read" 
-            if not tos_checked:
-                try:
-                    read_text = self._page.get_by_text("I have read", exact=False)
-                    if await read_text.count() > 0:
-                        await read_text.first.click()
-                        tos_checked = True
-                        self._log("✓ ToS via 'I have read' text click")
-                except:
-                    pass
-
-            # Strategy 4: JS — find ANY element with checkbox-related text
-            if not tos_checked:
-                try:
+                    # Use evaluate directly — no timeout issue
                     result = await self._page.evaluate("""() => {
-                        // Find element containing "Terms of Service" text
-                        const walker = document.createTreeWalker(document.body, 4, null);
-                        let node;
-                        while (node = walker.nextNode()) {
-                            if (node.textContent.includes('Terms of Service') || 
-                                node.textContent.includes('terms of service') ||
-                                node.textContent.includes('I have read')) {
-                                // Click the parent that's clickable
-                                let el = node.parentElement;
-                                for (let i = 0; i < 10; i++) {
-                                    if (!el) break;
-                                    const cs = window.getComputedStyle(el);
-                                    if (cs.cursor === 'pointer' || el.tagName === 'LABEL' || el.tagName === 'A') {
-                                        el.click();
-                                        return 'clicked ' + el.tagName;
-                                    }
-                                    el = el.parentElement;
-                                }
-                                // Fallback: click the text node's parent
-                                node.parentElement.click();
-                                return 'clicked parent';
+                        const els = document.querySelectorAll('label, a, span, div');
+                        for (const el of els) {
+                            if (el.textContent.includes('Terms of Service') ||
+                                el.textContent.includes('I have read') ||
+                                el.textContent.includes('read and agree')) {
+                                el.click();
+                                return true;
                             }
                         }
-                        // Last resort: click any unchecked checkbox-like element
-                        const checkboxes = document.querySelectorAll('[class*="checkbox"], [role="checkbox"]');
-                        for (const cb of checkboxes) {
-                            const checked = cb.getAttribute('aria-checked');
-                            if (checked !== 'true') {
-                                cb.click();
-                                return 'clicked checkbox element';
-                            }
-                        }
-                        return 'nothing found';
+                        return false;
                     }""")
-                    if result and 'clicked' in str(result):
+                    if result:
                         tos_checked = True
-                        self._log(f"✓ ToS checkbox {result}")
+                        self._log("✓ ToS via JS text match")
                 except Exception as e:
-                    self._log(f"JS ToS error: {e}")
+                    self._log(f"ToS JS error: {e}")
 
             if tos_checked:
                 self._log("✓ ToS checkbox checked")
@@ -495,9 +460,22 @@ class DiscordAutomation:
             else:
                 self._log("No ToS checkbox found — proceeding anyway")
 
-            # ── Create Account Button (aggressive) ─────────────
+            # ── Create Account Button (with timeouts) ──────────
             self._log("Clicking Create Account...")
             create_clicked = False
+
+            async def _try_btn(sel: str, timeout=2.0):
+                """Try clicking a button selector, return True if clicked."""
+                try:
+                    btn = self._page.locator(sel)
+                    count = await asyncio.wait_for(btn.count(), timeout=timeout)
+                    if count > 0:
+                        await btn.first.click()
+                        self._log(f"✓ Clicked via '{sel}'")
+                        return True
+                except:
+                    pass
+                return False
 
             for sel in [
                 'button:has-text("Create Account")',
@@ -507,15 +485,9 @@ class DiscordAutomation:
                 'button[type="submit"]',
                 '[type="submit"]',
             ]:
-                try:
-                    btn = self._page.locator(sel)
-                    if await btn.count() > 0:
-                        await btn.first.click()
-                        create_clicked = True
-                        self._log(f"✓ Clicked via '{sel}'")
-                        break
-                except:
-                    pass
+                if await _try_btn(sel):
+                    create_clicked = True
+                    break
 
             if not create_clicked:
                 try:
