@@ -10,7 +10,7 @@ from typing import Optional
 
 from playwright.async_api import async_playwright, Page, BrowserContext
 
-import captcha_solver
+from captcha_solver import SolverAPI
 
 
 # ── TOR Control ───────────────────────────────────────────
@@ -346,27 +346,27 @@ class DiscordAutomation:
             except Exception as e:
                 self._log(f"Checkbox click attempt: {e}")
             
-            # Solve with loop: re-detect captcha after clicking Create Account
-            config = captcha_solver.SolverConfig(
-                ollama_base_url="http://localhost:11434",
-                max_rounds=2,
-                ollama_timeout=120,  # CPU inference is slow
-            )
+            # Solve using API
+            api_solver = SolverAPI(service="capsolver", log=self._log)
             
-            max_captcha_loops = 5  # Handle up to 5 consecutive captchas
-            master_solver = captcha_solver.MasterSolver(config, log=self._log)
+            max_captcha_loops = 3
             
             for captcha_attempt in range(1, max_captcha_loops + 1):
-                self._log(f"Captcha attempt {captcha_attempt}/{max_captcha_loops} - Attempting MasterSolver...")
-                success = await master_solver.solve(self._page)
+                self._log(f"Captcha attempt {captcha_attempt}/{max_captcha_loops} - Solving via API...")
+                token = await api_solver.solve_from_page(self._page)
                 
-                if not success:
+                if not token:
                     self._log(f"hCaptcha solve FAILED on attempt {captcha_attempt}")
-                    await master_solver.close()
+                    await api_solver.close()
                     return False
                 
-                self._log(f"hCaptcha SOLVED on attempt {captcha_attempt}! (verified via token or checkbox)")
-                await asyncio.sleep(1.0)
+                # Inject the token into the page
+                injected = await api_solver.set_token_on_page(self._page, token)
+                if not injected:
+                    self._log(f"Token obtained but could not inject on page", level="warn")
+                
+                self._log(f"hCaptcha SOLVED on attempt {captcha_attempt}! (token: {token[:20]}...)")
+                await asyncio.sleep(0.5)
                 
                 # Click "Create Account" after solving
                 self._log("Clicking Create Account after captcha solve...")
@@ -409,7 +409,7 @@ class DiscordAutomation:
                         current_url = self._page.url
                         if any(kw in current_url for kw in ['/channels', '/verify-email', '/welcome', '/dashboard', '/confirm']):
                             self._log(f"Page navigated to: {current_url} - signup successful!")
-                            await master_solver.close()
+                            await api_solver.close()
                             return True
                     except:
                         pass
@@ -473,14 +473,14 @@ class DiscordAutomation:
                     """)
                     if token_present:
                         self._log(f"No captcha appeared after {scan_duration}s scan AND token confirmed - proceeding!")
-                        await master_solver.close()
+                        await api_solver.close()
                         return True
                     else:
                         # Also check if page navigated (registration actually succeeded)
                         current_url = self._page.url
                         if any(kw in current_url for kw in ['channels', 'verify-email', 'new-user']):
                             self._log(f"Page navigated to {current_url} - registration succeeded!")
-                            await master_solver.close()
+                            await api_solver.close()
                             return True
                         self._log(f"No captcha appeared but NO TOKEN found - solve was false positive! Retrying...")
                         # Don't return True - fall through to retry or fail
@@ -490,7 +490,7 @@ class DiscordAutomation:
                 await asyncio.sleep(0.5)
             
             self._log(f"Exhausted {max_captcha_loops} captcha attempts")
-            await master_solver.close()
+            await api_solver.close()
             return False
         except Exception as e:
             self._log(f"hCaptcha solve error: {e}")

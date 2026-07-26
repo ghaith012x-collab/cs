@@ -81,6 +81,25 @@ CREATE TABLE IF NOT EXISTS knowledge (
 );
 
 CREATE INDEX IF NOT EXISTS idx_knowledge_class ON knowledge(class_name);
+
+CREATE TABLE IF NOT EXISTS tokens (
+    id              BIGSERIAL PRIMARY KEY,
+    token           TEXT NOT NULL,
+    service         TEXT NOT NULL DEFAULT 'manual',  -- 'capsolver', 'discord', 'manual'
+    site            TEXT NOT NULL DEFAULT '',
+    account_email   TEXT DEFAULT '',
+    account_username TEXT DEFAULT '',
+    account_password TEXT DEFAULT '',
+    sitekey         TEXT DEFAULT '',
+    pageurl         TEXT DEFAULT '',
+    is_active       BOOLEAN DEFAULT TRUE,
+    expires_at      TIMESTAMPTZ,
+    solved_at       TIMESTAMPTZ DEFAULT NOW(),
+    created_at      TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_tokens_active ON tokens(is_active);
+CREATE INDEX IF NOT EXISTS idx_tokens_service ON tokens(service);
 """
 
 
@@ -387,6 +406,123 @@ class KnowledgeDB:
         except Exception as e:
             self._log(f"[DB] get_knowledge_summary error: {e}", level="error")
             return []
+
+    # ── Token Management ────────────────────────────────
+
+    async def save_token(self, token: str, service: str = "manual",
+                         site: str = "",
+                         account_email: str = "",
+                         account_username: str = "",
+                         account_password: str = "",
+                         sitekey: str = "",
+                         pageurl: str = "",
+                         expires_in_hours: int = 24) -> bool:
+        """Save a CAPTCHA token to the database."""
+        if self._noop:
+            return False
+        try:
+            from datetime import timedelta
+            expires = datetime.now(timezone.utc) + timedelta(hours=expires_in_hours)
+            async with self.pool.acquire() as conn:
+                await conn.execute(
+                    """INSERT INTO tokens
+                       (token, service, site, account_email, account_username,
+                        account_password, sitekey, pageurl, is_active, expires_at)
+                       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,TRUE,$9)""",
+                    token, service, site, account_email, account_username,
+                    account_password, sitekey, pageurl, expires)
+                # Deactivate old tokens for same service+site
+                await conn.execute(
+                    """UPDATE tokens SET is_active = FALSE
+                       WHERE service = $1 AND site = $2
+                       AND id NOT IN (SELECT id FROM tokens
+                                      WHERE service = $1 AND site = $2
+                                      ORDER BY created_at DESC LIMIT 1)""",
+                    service, site)
+            self._log(f"[DB] Saved token for {service}/{site}")
+            return True
+        except Exception as e:
+            self._log(f"[DB] save_token error: {e}", level="error")
+            return False
+
+    async def get_active_tokens(self, service: Optional[str] = None,
+                                site: Optional[str] = None) -> list[dict]:
+        """Get active (non-expired) tokens."""
+        if self._noop:
+            return []
+        try:
+            async with self.pool.acquire() as conn:
+                where = ["is_active = TRUE", "(expires_at IS NULL OR expires_at > NOW())"]
+                params = []
+                if service:
+                    where.append(f"service = ${len(params)+1}")
+                    params.append(service)
+                if site:
+                    where.append(f"site = ${len(params)+1}")
+                    params.append(site)
+                query = f"""SELECT id, token, service, site,
+                                  account_email, account_username,
+                                  is_active, expires_at, solved_at, created_at
+                           FROM tokens
+                           WHERE {' AND '.join(where)}
+                           ORDER BY created_at DESC"""
+                rows = await conn.fetch(query, *params)
+                result = []
+                for r in rows:
+                    d = dict(r)
+                    d["expired"] = d.get("expires_at") and d["expires_at"] < datetime.now(timezone.utc)
+                    result.append(d)
+                return result
+        except Exception as e:
+            self._log(f"[DB] get_active_tokens error: {e}", level="error")
+            return []
+
+    async def get_all_tokens(self, limit: int = 50) -> list[dict]:
+        """Get all tokens with expiry status."""
+        if self._noop:
+            return []
+        try:
+            async with self.pool.acquire() as conn:
+                rows = await conn.fetch(
+                    """SELECT id, token, service, site,
+                              account_email, account_username,
+                              is_active, expires_at, solved_at, created_at
+                       FROM tokens
+                       ORDER BY created_at DESC
+                       LIMIT $1""",
+                    limit)
+                result = []
+                for r in rows:
+                    d = dict(r)
+                    d["expired"] = not d["is_active"] or (
+                        d.get("expires_at") and d["expires_at"] < datetime.now(timezone.utc)
+                    )
+                    d["token_short"] = d["token"][:20] + "..." if d["token"] else ""
+                    result.append(d)
+                return result
+        except Exception as e:
+            self._log(f"[DB] get_all_tokens error: {e}", level="error")
+            return []
+
+    async def expire_old_tokens(self, max_age_hours: int = 48) -> int:
+        """Mark tokens older than max_age_hours as expired."""
+        if self._noop:
+            return 0
+        try:
+            from datetime import timedelta
+            cutoff = datetime.now(timezone.utc) - timedelta(hours=max_age_hours)
+            async with self.pool.acquire() as conn:
+                result = await conn.execute(
+                    """UPDATE tokens SET is_active = FALSE
+                       WHERE created_at < $1 AND is_active = TRUE""",
+                    cutoff)
+                count = int(result.split()[1]) if result else 0
+                if count:
+                    self._log(f"[DB] Expired {count} old tokens")
+                return count
+        except Exception as e:
+            self._log(f"[DB] expire_old_tokens error: {e}", level="error")
+            return 0
 
     # ── Export for Training ──────────────────────────────
 
