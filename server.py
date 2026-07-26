@@ -211,36 +211,35 @@ class DiscordAutomation:
                 await asyncio.sleep(0.5)
 
             if not iframe:
-                # No captcha iframe found — check if registration actually went through
+                # No hCaptcha iframe — try detecting a drag/jigsaw captcha (Arkose Labs Funcaptcha)
                 try:
                     cur_url = self._page.url
                     page_text = await self._page.evaluate("() => document.body.innerText.substring(0, 500)")
+                    
+                    # Check if already past captcha
                     if any(k in cur_url for k in ['/verify', '/welcome', '/channels', '@me', '/login', 'discord.com/app']):
                         self._log(f"[Vision AI] Registration went through — at {cur_url[:50]}")
                         return True
-                    # Check for errors on the page
-                    if 'captcha' in page_text.lower() or 'security' in page_text.lower() or 'try again' in page_text.lower():
-                        # There IS a captcha but we didn't detect the iframe — try harder
-                        self._log("[Vision AI] Possible undetected captcha — checking for other indicators...")
-                        # Wait more and check again
-                        await asyncio.sleep(3)
-                        try:
-                            iframe_el = await asyncio.wait_for(
-                                self._page.query_selector('iframe[src*="captcha"], iframe[title*="captcha"], [class*="captcha"]'),
-                                timeout=5.0
-                            )
-                            if iframe_el:
-                                self._log("[Vision AI] Found captcha via secondary check")
-                                iframe = iframe_el
-                        except:
-                            pass
+                    
+                    # Check for captcha indicators
+                    has_captcha_text = 'captcha' in page_text.lower() or 'security' in page_text.lower()
+                    
+                    if has_captcha_text:
+                        self._log("[Vision AI] Page has captcha text — trying drag/jigsaw solver...")
+                        # Try the drag solver
+                        self._log("[Vision AI] Using drag/jigsaw puzzle solver...")
+                        drag_result = await self._vision.solve_drag_captcha(self._page, iframe=None)
+                        if drag_result:
+                            self._log("✓ Drag captcha solved!")
+                            return True
+                        else:
+                            self._log("[Vision AI] Drag solver failed — could not solve captcha", level="error")
+                            return False
                     else:
-                        # No captcha visible and no errors — registration might have gone through
-                        self._log(f"[Vision AI] No hCaptcha detected — page: {cur_url[:40]}")
-                except:
-                    self._log("[Vision AI] No hCaptcha detected — proceeding without solving")
-
-            if not iframe:
+                        self._log(f"[Vision AI] No captcha indicators on page: {cur_url[:40]}")
+                except Exception as e:
+                    self._log(f"[Vision AI] Captcha check error: {e}", level="warn")
+                
                 return True
 
             await asyncio.sleep(1)
