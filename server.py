@@ -125,24 +125,39 @@ class DiscordAutomation:
         
         if ext_available:
             self._log(f"[Extension] Loading NopeCHA solver from {ext_path}")
-            # Extensions need persistent context
             user_data_dir = f"/tmp/playwright-ud-{random.randint(10000,99999)}"
+            
+            args = [
+                f"--disable-extensions-except={ext_path}",
+                f"--load-extension={ext_path}",
+                '--disable-blink-features=AutomationDetected',
+                '--no-sandbox',
+                '--disable-setuid-sandbox',
+            ]
             ctx_opts = {
                 'viewport': {'width': 1920, 'height': 1080},
                 'user_agent': ua,
-                'args': [
-                    f"--disable-extensions-except={ext_path}",
-                    f"--load-extension={ext_path}",
-                ]
+                'args': args,
             }
             if _tor_check():
                 ctx_opts['proxy'] = {'server': 'socks5://127.0.0.1:9050'}
+            
             self._context = await self._playwright.chromium.launch_persistent_context(
                 user_data_dir,
                 headless=self.headless,
                 **ctx_opts
             )
-            self._log("[Extension] NopeCHA loaded — it auto-solves hCaptcha for free!")
+            
+            # Initialize the extension by visiting its pages
+            ext_page = await self._context.new_page()
+            try:
+                await ext_page.goto("https://nopecha.com/setup", wait_until='domcontentloaded', timeout=10000)
+                self._log("[Extension] NopeCHA setup page loaded — extension activated")
+            except Exception as e:
+                self._log(f"[Extension] Setup page: {e}")
+            await ext_page.close()
+            
+            self._log("[Extension] NopeCHA loaded — auto-solves hCaptcha for free (100/day)")
         else:
             self._log(f"[Extension] NopeCHA not found at {ext_path} — using API fallback", level="warn")
             self._browser = await self._playwright.chromium.launch(

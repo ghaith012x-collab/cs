@@ -1,6 +1,6 @@
 """
-Setup script: Download NopeCHA extension (free hCaptcha solver, no API key needed).
-Downloads the Chromium automation build which is designed for Playwright/Puppeteer.
+Setup script: Download NopeCHA extension (free hCaptcha solver).
+Uses the regular Chromium build which works better in headless mode.
 
 NopeCHA gives 100 free solves per day — no API key or account needed.
 """
@@ -13,7 +13,8 @@ from pathlib import Path
 import requests
 
 EXTENSIONS_DIR = Path("extensions")
-EXTENSION_URL = "https://github.com/NopeCHALLC/nopecha-extension/releases/latest/download/chromium_automation.zip"
+# Use the regular Chromium build (with UI framework) - works better in headless
+EXTENSION_URL = "https://github.com/NopeCHALLC/nopecha-extension/releases/latest/download/chromium.zip"
 
 
 def download_and_extract():
@@ -21,6 +22,12 @@ def download_and_extract():
     EXTENSIONS_DIR.mkdir(exist_ok=True)
 
     zip_path = EXTENSIONS_DIR / "nopecha.zip"
+    extract_to = EXTENSIONS_DIR / "nopecha"
+
+    # Clean previous
+    if extract_to.exists():
+        import shutil
+        shutil.rmtree(extract_to)
 
     # Download
     try:
@@ -35,25 +42,24 @@ def download_and_extract():
 
     # Extract
     try:
-        extract_to = EXTENSIONS_DIR / "nopecha"
-        if extract_to.exists():
-            import shutil
-            shutil.rmtree(extract_to)
         with zipfile.ZipFile(zip_path, "r") as z:
             z.extractall(extract_to)
         print(f"[Setup] Extracted to {extract_to}")
-        # Verify manifest exists
+
+        # Verify manifest
         manifest = extract_to / "manifest.json"
         if manifest.exists():
             print(f"[Setup] ✓ Extension ready at {extract_to}")
+            # List contents
+            files = [f.name for f in extract_to.iterdir()]
+            print(f"[Setup] Files: {files}")
             return True
-        print(f"[Setup] ✗ Manifest not found in {extract_to}")
+        print(f"[Setup] ✗ Manifest not found")
         return False
     except Exception as e:
         print(f"[Setup] Extract failed: {e}")
         return False
     finally:
-        # Clean up zip
         if zip_path.exists():
             zip_path.unlink()
 
