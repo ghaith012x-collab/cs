@@ -561,6 +561,65 @@ class DiscordAutomation:
             await self._select_dob("Year", year_val)
             await self._human_pause()
             
+            # Click Terms of Service consent checkbox
+            self._log("Checking Terms of Service consent checkbox...")
+            tos_checked = False
+            try:
+                # Try multiple selectors for the ToS checkbox
+                for sel in [
+                    'input[type="checkbox"]',
+                    'div[class*="checkbox"]',
+                    'div[class*="tosCheckbox"]',
+                    'div[class*="termsCheckbox"]',
+                    'label:has-text("Terms of Service")',
+                    'label:has-text("terms of service")',
+                    'label:has-text("agree")',
+                    'label:has-text("I have read")',
+                ]:
+                    cb = self._page.locator(sel)
+                    n = await cb.count()
+                    if n > 0:
+                        await cb.first.click()
+                        tos_checked = True
+                        self._log(f"✓ Clicked ToS checkbox via '{sel}'")
+                        break
+            except Exception as e:
+                self._log(f"ToS checkbox click error: {e}")
+            
+            # Also try JS click as fallback
+            if not tos_checked:
+                try:
+                    result = await self._page.evaluate("""() => {
+                        // Find any unchecked checkbox on the page
+                        const checkboxes = document.querySelectorAll('input[type="checkbox"]:not(:checked)');
+                        for (const cb of checkboxes) {
+                            // Check if it's near terms text
+                            const parent = cb.closest('div, label');
+                            if (parent && (parent.textContent.toLowerCase().includes('terms') ||
+                                parent.textContent.toLowerCase().includes('agree') ||
+                                parent.textContent.toLowerCase().includes('tos'))) {
+                                cb.click();
+                                return 'clicked via JS';
+                            }
+                        }
+                        // If no terms checkbox found, click the first unchecked one
+                        if (checkboxes.length > 0) {
+                            checkboxes[0].click();
+                            return 'clicked first checkbox';
+                        }
+                        return 'no checkbox found';
+                    }""")
+                    if result and 'clicked' in str(result):
+                        tos_checked = True
+                        self._log(f"✓ ToS checkbox {result}")
+                except Exception as e:
+                    self._log(f"JS checkbox error: {e}")
+            
+            if tos_checked:
+                await self._human_pause()
+            else:
+                self._log("No ToS checkbox found — proceeding anyway")
+            
             # Click Create Account with multiple fallback methods
             self._log("Clicking Create Account button")
             create_clicked = False
