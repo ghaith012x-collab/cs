@@ -473,26 +473,30 @@ class VisionSolver:
                 }""")
                 if tile_boxes and len(tile_boxes) >= 3:
                     self._log(f"[Vision] Got {len(tile_boxes)} tile bounding boxes")
-                    # Screenshot each tile individually
+                    # Screenshot each tile individually using page.screenshot with absolute coords
                     tiles = []
-                    for box in tile_boxes:
-                        clip = {
-                            'x': box['x'],
-                            'y': box['y'],
-                            'width': box['w'],
-                            'height': box['h']
-                        }
-                        tile_bytes = await iframe.screenshot(clip=clip)
-                        tile_img = Image.open(io.BytesIO(tile_bytes))
-                        tile_img = tile_img.resize((224, 224), Image.LANCZOS)
-                        tiles.append(tile_img)
-                    if tiles:
-                        return tiles
+                    iframe_box = await iframe.bounding_box()
+                    if iframe_box:
+                        for box in tile_boxes:
+                            clip = {
+                                'x': iframe_box['x'] + box['x'],
+                                'y': iframe_box['y'] + box['y'],
+                                'width': box['w'],
+                                'height': box['h']
+                            }
+                            tile_bytes = await page.screenshot(clip=clip)
+                            tile_img = Image.open(io.BytesIO(tile_bytes))
+                            tile_img = tile_img.resize((224, 224), Image.LANCZOS)
+                            tiles.append(tile_img)
+                        if tiles:
+                            return tiles
+                    else:
+                        self._log("[Vision] Could not get iframe bounding box", level="warn")
         except Exception as e:
             self._log(f"[Vision] DOM tile extraction error: {e}", level="warn")
 
         # Strategy 2: Take iframe screenshot and split into grid
-        self._log("[Vision] Splitting grid from iframe screenshot...")
+        self._log("[Vision] Taking iframe screenshot and splitting grid...")
         try:
             grid_bytes = await iframe.screenshot()
             # Determine grid size from aspect ratio
