@@ -447,9 +447,9 @@ class CaptchaSolver:
                     configured.append(svc_name)
             
             # Ordered: configured services first, then preferred, then fallbacks
-            for s in configured:
-                if s not in services_to_try:
-                    services_to_try.append(s)
+            for cfg_svc in configured:
+                if cfg_svc not in services_to_try:
+                    services_to_try.append(cfg_svc)
             if self.preferred not in services_to_try:
                 services_to_try.append(self.preferred)
             for fb in self.fallback:
