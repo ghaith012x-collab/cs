@@ -10,14 +10,12 @@ RUN apt-get update && apt-get install -y \
     libasound2 libcairo2 libpango-1.0-0 curl tor \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Python dependencies (Playwright + AI + web)
+# Install Python dependencies
 RUN pip install --no-cache-dir \
     playwright==1.40.0 \
     aiohttp==3.9.1 \
     Pillow==10.2.0 \
     asyncpg>=0.29.0 \
-    transformers>=4.36.0 \
-    torch>=2.1.0 \
     requests>=2.31.0
 
 # Install Chromium for Playwright
@@ -32,7 +30,5 @@ RUN chmod +x start.sh
 EXPOSE 8080
 ENV PYTHONUNBUFFERED=1
 ENV PORT=8080
-ENV CLIP_MODEL=openai/clip-vit-base-patch32
-ENV TRANSFORMERS_CACHE=/app/.cache/huggingface
 
 CMD ["./start.sh"]
