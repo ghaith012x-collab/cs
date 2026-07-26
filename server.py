@@ -422,11 +422,11 @@ class DiscordAutomation:
                     cb = self._page.locator(sel)
                     count = await asyncio.wait_for(cb.count(), timeout=timeout)
                     if count > 0:
-                        await cb.first.click()
+                        await asyncio.wait_for(cb.first.click(), timeout=3.0)
                         self._log(f"✓ ToS via '{sel}'")
                         return True
                 except (asyncio.TimeoutError, Exception) as e:
-                    self._log(f"  ToS sel '{sel}' timed out ({e})", level="warn")
+                    self._log(f"  ToS sel '{sel}' ({e})", level="warn")
                 return False
 
             # Strategy 1: Quick Playwright locators (2s timeout each)
@@ -482,7 +482,7 @@ class DiscordAutomation:
                     btn = self._page.locator(sel)
                     count = await asyncio.wait_for(btn.count(), timeout=timeout)
                     if count > 0:
-                        await btn.first.click()
+                        await asyncio.wait_for(btn.first.click(), timeout=3.0)
                         self._log(f"✓ Clicked via '{sel}'")
                         return True
                 except:
@@ -504,8 +504,9 @@ class DiscordAutomation:
             if not create_clicked:
                 try:
                     btn = self._page.get_by_role("button", name="Create Account")
-                    if await btn.count() > 0:
-                        await btn.first.click()
+                    c = await asyncio.wait_for(btn.count(), timeout=2.0)
+                    if c > 0:
+                        await asyncio.wait_for(btn.first.click(), timeout=3.0)
                         create_clicked = True
                         self._log("✓ Clicked via get_by_role")
                 except:
@@ -514,8 +515,9 @@ class DiscordAutomation:
             if not create_clicked:
                 try:
                     btn = self._page.get_by_role("button", name="Continue")
-                    if await btn.count() > 0:
-                        await btn.first.click()
+                    c = await asyncio.wait_for(btn.count(), timeout=2.0)
+                    if c > 0:
+                        await asyncio.wait_for(btn.first.click(), timeout=3.0)
                         create_clicked = True
                         self._log("✓ Clicked Continue button")
                 except:
