@@ -293,9 +293,88 @@ class TwoCaptchaAPI:
             return None
 
 
+class BrightDataAPI:
+    """Bright Data CAPTCHA solving via their Web Unlocker API.
+    
+    Endpoint: https://api.brightdata.com/request
+    Documentation: https://docs.brightdata.com
+    
+    Uses the Web Unlocker which auto-solves captchas and returns
+    the solved page response. For token extraction, we solve the
+    captcha page and check for the token in the response.
+    
+    The API key format is: {zone_name}:{password}
+    """
+
+    BASE = "https://api.brightdata.com"
+
+    @staticmethod
+    async def solve_hcaptcha(
+        session: aiohttp.ClientSession,
+        api_key: str,
+        sitekey: str,
+        pageurl: str,
+        log: Optional[Callable] = None,
+    ) -> Optional[str]:
+        log = log or (lambda *a: None)
+        try:
+            # Bright Data Web Unlocker API solves captchas automatically
+            # We send the target URL and get back the solved page
+            zone = api_key  # The API key is the zone:password format
+            url = pageurl.split("?")[0]  # Base URL without query params
+            
+            log(f"[BrightData] Solving via Web Unlocker...")
+            
+            # First approach: use the request API to get the solved page
+            async with session.post(
+                f"{BrightDataAPI.BASE}/request",
+                json={
+                    "zone": zone,
+                    "url": url,
+                    "format": "raw",
+                },
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+                timeout=aiohttp.ClientTimeout(total=60),
+            ) as r:
+                if r.status == 200:
+                    # The page was loaded and captcha was auto-solved
+                    # But we need the token specifically
+                    body = await r.text()
+                    log(f"[BrightData] Page fetched ({len(body)} bytes)")
+                    
+                    # Try to extract token from the response HTML
+                    import re
+                    token_match = re.search(
+                        r'<textarea[^>]*name="h-captcha-response"[^>]*>([^<]+)</textarea>',
+                        body
+                    )
+                    if token_match:
+                        token = token_match.group(1).strip()
+                        if token and len(token) > 20:
+                            log(f"[BrightData] Token found in response!")
+                            return token
+                    
+                    log("[BrightData] Captcha solved but no token in HTML response", level="warn")
+                    return None
+                else:
+                    err = await r.text()
+                    log(f"[BrightData] HTTP {r.status}: {err[:100]}", level="error")
+                    return None
+        except asyncio.TimeoutError:
+            log("[BrightData] Timeout", level="error")
+            return None
+        except Exception as e:
+            log(f"[BrightData] Error: {e}", level="error")
+            return None
+
+
 # ── Unified Solver ───────────────────────────────────────
 
 SERVICE_MAP = {
+    "brightdata": BrightDataAPI,
     "capsolver": CapSolverAPI,
     "bestcaptchasolver": BestCaptchaSolverAPI,
     "anycaptcha": AnyCaptchaAPI,
@@ -303,6 +382,7 @@ SERVICE_MAP = {
 }
 
 SERVICE_FREE_CREDITS = {
+    "brightdata": "Bright Data Web Unlocker (paid, best success rate)",
     "capsolver": "$0.50 free trial (~125 solves)",
     "bestcaptchasolver": "1,000 free credits (~1,000 solves)",
     "anycaptcha": "Free trial (amount varies)",
@@ -310,6 +390,7 @@ SERVICE_FREE_CREDITS = {
 }
 
 SERVICE_ENV_VARS = {
+    "brightdata": "BRIGHTDATA_API_KEY",
     "capsolver": "CAPSOLVER_API_KEY",
     "bestcaptchasolver": "BESTCAPTCHASOLVER_API_KEY",
     "anycaptcha": "ANYCAPTCHA_API_KEY",
@@ -347,27 +428,36 @@ class CaptchaSolver:
     ) -> Optional[str]:
         """Solve an hCaptcha challenge and return the token.
         
+        Auto-prioritizes services that have API keys configured.
         Tries the preferred (or specified) service first, then falls back.
         """
         s = await self._get_session()
+        
+        # Build ordered list: configured services first, then preferred, then fallback
         services_to_try = []
         
         if service:
             services_to_try = [service.lower()]
         else:
-            services_to_try = [self.preferred]
+            # Check which services have keys configured
+            configured = []
+            for svc_name in SERVICE_ENV_VARS:
+                key = os.environ.get(SERVICE_ENV_VARS[svc_name], "")
+                if key:
+                    configured.append(svc_name)
+            
+            # Ordered: configured services first, then preferred, then fallbacks
+            for s in configured:
+                if s not in services_to_try:
+                    services_to_try.append(s)
+            if self.preferred not in services_to_try:
+                services_to_try.append(self.preferred)
             for fb in self.fallback:
-                if fb.lower() not in services_to_try:
-                    services_to_try.append(fb.lower())
-        
-        # Get API key for the first service
-        api_key = self.api_key
-        first_service = services_to_try[0]
-        if not api_key:
-            api_key = os.environ.get(SERVICE_ENV_VARS.get(first_service, ""), "")
+                if fb not in services_to_try:
+                    services_to_try.append(fb)
         
         for svc in services_to_try:
-            svc_key = api_key or os.environ.get(SERVICE_ENV_VARS.get(svc, ""), "")
+            svc_key = os.environ.get(SERVICE_ENV_VARS.get(svc, ""), "")
             if not svc_key:
                 self._log(f"[Solver] No API key for {svc}, skipping", level="warn")
                 continue
