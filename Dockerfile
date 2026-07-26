@@ -2,7 +2,7 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# Minimal system dependencies — just Playwright + Tor
+# System dependencies for Playwright + Tor
 RUN apt-get update && apt-get install -y \
     wget gnupg libglib2.0-0 libnss3 libnspr4 libdbus-1-3 \
     libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 libxkbcommon0 \
@@ -10,18 +10,21 @@ RUN apt-get update && apt-get install -y \
     libasound2 libcairo2 libpango-1.0-0 curl tor \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Python dependencies
+# Install Python dependencies (Playwright + AI + web)
 RUN pip install --no-cache-dir \
     playwright==1.40.0 \
     aiohttp==3.9.1 \
     Pillow==10.2.0 \
     asyncpg>=0.29.0 \
+    transformers>=4.36.0 \
+    torch>=2.1.0 \
     requests>=2.31.0
 
+# Install Chromium for Playwright
 RUN python -m playwright install chromium
 
 # Copy application files
-COPY app.py server.py captcha_solver.py solver_api.py database.py config.json requirements.txt ./
+COPY app.py server.py captcha_solver.py database.py config.json requirements.txt ./
 COPY torrc /etc/tor/torrc
 COPY start.sh .
 RUN chmod +x start.sh
@@ -29,5 +32,7 @@ RUN chmod +x start.sh
 EXPOSE 8080
 ENV PYTHONUNBUFFERED=1
 ENV PORT=8080
+ENV CLIP_MODEL=openai/clip-vit-base-patch32
+ENV TRANSFORMERS_CACHE=/app/.cache/huggingface
 
 CMD ["./start.sh"]
