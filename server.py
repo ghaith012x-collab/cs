@@ -412,59 +412,69 @@ class DiscordAutomation:
             await self._select_dob("Year", year_val)
             await self._human_pause()
 
-            # ── ToS Checkbox (with timeouts — never hang) ────────
+            # ── ToS Checkbox (PURE JS evaluate — instant, no hangs) ─
             self._log("Checking ToS checkbox...")
             tos_checked = False
 
-            async def _try_click(sel: str, timeout=2.0):
-                """Try clicking a selector, return True if clicked."""
-                try:
-                    cb = self._page.locator(sel)
-                    count = await asyncio.wait_for(cb.count(), timeout=timeout)
-                    if count > 0:
-                        await asyncio.wait_for(cb.first.click(), timeout=3.0)
-                        self._log(f"✓ ToS via '{sel}'")
-                        return True
-                except (asyncio.TimeoutError, Exception) as e:
-                    self._log(f"  ToS sel '{sel}' ({e})", level="warn")
-                return False
-
-            # Strategy 1: Quick Playwright locators (2s timeout each)
-            for sel in [
-                'input[type="checkbox"]',
-                'div[role="checkbox"]',
-                '[class*="checkbox"]',
-                'label:has-text("Terms of Service")',
-                'label:has-text("terms of service")',
-                'label:has-text("agree")',
-                'label:has-text("I have read")',
-                'label:has-text("read and agree")',
-            ]:
-                if await _try_click(sel):
-                    tos_checked = True
-                    break
-
-            # Strategy 2: Find by text "Terms of Service" and click
-            if not tos_checked:
-                try:
-                    # Use evaluate directly — no timeout issue
-                    result = await self._page.evaluate("""() => {
-                        const els = document.querySelectorAll('label, a, span, div');
-                        for (const el of els) {
-                            if (el.textContent.includes('Terms of Service') ||
-                                el.textContent.includes('I have read') ||
-                                el.textContent.includes('read and agree')) {
-                                el.click();
-                                return true;
-                            }
+            # Strategy 1: JS evaluate to find and click all types of checkboxes
+            try:
+                tos_checked = await self._page.evaluate("""() => {
+                    // Try checkbox inputs
+                    const checkboxes = document.querySelectorAll('input[type="checkbox"]');
+                    for (const cb of checkboxes) {
+                        if (!cb.checked && cb.offsetParent !== null) {
+                            cb.click();
+                            cb.checked = true;
+                            cb.dispatchEvent(new Event('change', { bubbles: true }));
+                            cb.dispatchEvent(new Event('input', { bubbles: true }));
+                            return 'input_checkbox';
                         }
-                        return false;
-                    }""")
-                    if result:
-                        tos_checked = True
-                        self._log("✓ ToS via JS text match")
-                except Exception as e:
-                    self._log(f"ToS JS error: {e}")
+                    }
+                    // Try role=checkbox
+                    const roles = document.querySelectorAll('[role="checkbox"]');
+                    for (const r of roles) {
+                        const aria = r.getAttribute('aria-checked');
+                        if (aria !== 'true') {
+                            r.click();
+                            return 'role_checkbox';
+                        }
+                    }
+                    // Try any element containing checkbox class
+                    const classEls = document.querySelectorAll('[class*="checkbox"], [class*="Checkbox"]');
+                    for (const el of classEls) {
+                        if (el.offsetParent !== null) {
+                            el.click();
+                            return 'class_checkbox';
+                        }
+                    }
+                    // Find "Terms of Service" text and click its parent label
+                    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null);
+                    let node;
+                    while (node = walker.nextNode()) {
+                        const t = node.textContent.trim();
+                        if (t.includes('Terms of Service') || t.includes('I have read') || t.includes('read and agree')) {
+                            let p = node.parentElement;
+                            for (let i = 0; i < 5 && p; i++) {
+                                if (p.tagName === 'LABEL' || p.tagName === 'A' || p.getAttribute('role') === 'checkbox') {
+                                    p.click();
+                                    return 'text_label_' + p.tagName;
+                                }
+                                p = p.parentElement;
+                            }
+                            // Click the text element itself as last resort
+                            node.parentElement.click();
+                            return 'text_click';
+                        }
+                    }
+                    return 'not_found';
+                }""")
+                if tos_checked and tos_checked != 'not_found':
+                    self._log(f"✓ ToS checked via JS: {tos_checked}")
+                else:
+                    self._log("ToS checkbox not found by JS — proceeding")
+                    tos_checked = False
+            except Exception as e:
+                self._log(f"ToS JS evaluate error: {e}")
 
             if tos_checked:
                 self._log("✓ ToS checkbox checked")
@@ -472,90 +482,75 @@ class DiscordAutomation:
             else:
                 self._log("No ToS checkbox found — proceeding anyway")
 
-            # ── Create Account Button (with timeouts) ──────────
+            # ── Create Account Button (PURE JS evaluate) ────────
             self._log("Clicking Create Account...")
             create_clicked = False
 
-            async def _try_btn(sel: str, timeout=2.0):
-                """Try clicking a button selector, return True if clicked."""
-                try:
-                    btn = self._page.locator(sel)
-                    count = await asyncio.wait_for(btn.count(), timeout=timeout)
-                    if count > 0:
-                        await asyncio.wait_for(btn.first.click(), timeout=3.0)
-                        self._log(f"✓ Clicked via '{sel}'")
-                        return True
-                except:
-                    pass
-                return False
-
-            for sel in [
-                'button:has-text("Create Account")',
-                'button:has-text("Continue")',
-                'button:has-text("Sign Up")',
-                'button:has-text("Create")',
-                'button[type="submit"]',
-                '[type="submit"]',
-            ]:
-                if await _try_btn(sel):
-                    create_clicked = True
-                    break
-
-            if not create_clicked:
-                try:
-                    btn = self._page.get_by_role("button", name="Create Account")
-                    c = await asyncio.wait_for(btn.count(), timeout=2.0)
-                    if c > 0:
-                        await asyncio.wait_for(btn.first.click(), timeout=3.0)
-                        create_clicked = True
-                        self._log("✓ Clicked via get_by_role")
-                except:
-                    pass
-
-            if not create_clicked:
-                try:
-                    btn = self._page.get_by_role("button", name="Continue")
-                    c = await asyncio.wait_for(btn.count(), timeout=2.0)
-                    if c > 0:
-                        await asyncio.wait_for(btn.first.click(), timeout=3.0)
-                        create_clicked = True
-                        self._log("✓ Clicked Continue button")
-                except:
-                    pass
-
-            if not create_clicked:
-                # JS fallback
+            try:
                 result = await self._page.evaluate("""() => {
-                    const btns = document.querySelectorAll('button, [role="button"], a[class*="button"]');
+                    // Try visible buttons first
+                    const btns = document.querySelectorAll('button');
                     for (const btn of btns) {
-                        const t = btn.textContent.toLowerCase();
+                        if (btn.offsetParent === null) continue;
+                        const t = btn.textContent.toLowerCase().trim();
                         if (t.includes('create account') || t.includes('sign up') || t.includes('continue')) {
+                            btn.scrollIntoView({block: 'center'});
                             btn.click();
-                            return 'clicked ' + t.trim();
+                            return 'button_' + t.slice(0, 20);
+                        }
+                        if (btn.getAttribute('type') === 'submit' && !t.includes(' ')) {
+                            // Don't click generic submit if there's a better match
                         }
                     }
+                    // Try submit buttons
                     const submit = document.querySelector('[type="submit"]');
-                    if (submit) { submit.click(); return 'clicked submit'; }
-                    // Submit the form directly
+                    if (submit && submit.offsetParent !== null) {
+                        submit.scrollIntoView({block: 'center'});
+                        submit.click();
+                        return 'submit_btn';
+                    }
+                    // Try role buttons
+                    const roles = document.querySelectorAll('[role="button"]');
+                    for (const r of roles) {
+                        if (r.offsetParent === null) continue;
+                        const t = r.textContent.toLowerCase();
+                        if (t.includes('create account') || t.includes('sign up') || t.includes('continue')) {
+                            r.click();
+                            return 'role_' + t.slice(0, 20);
+                        }
+                    }
+                    // Try form submit directly
                     const form = document.querySelector('form');
-                    if (form) { form.requestSubmit(); return 'form submitted'; }
+                    if (form) {
+                        if (form.requestSubmit) {
+                            form.requestSubmit();
+                            return 'form_requestSubmit';
+                        }
+                        form.submit();
+                        return 'form_submit';
+                    }
                     return 'failed';
                 }""")
                 if result and result != 'failed':
                     create_clicked = True
-                    self._log(f"✓ JS button click: {result}")
+                    self._log(f"✓ Account button clicked: {result}")
+                else:
+                    self._log("Could not find Create Account button via JS", level="warn")
+                    # Last resort: Press Enter on password field
+                    try:
+                        pw = self._page.locator('input[name="password"]')
+                        await asyncio.wait_for(pw.press('Enter'), timeout=2.0)
+                        self._log("Pressed Enter on password")
+                        create_clicked = True
+                    except:
+                        pass
+            except Exception as e:
+                self._log(f"Create Account JS error: {e}", level="warn")
 
             if create_clicked:
                 self._log("Create Account clicked — waiting...")
             else:
                 self._log("WARNING: Could not click Create Account!", level="error")
-                # Try pressing Enter on the password field as last resort
-                try:
-                    await self._page.locator('input[name="password"]').press('Enter')
-                    self._log("Pressed Enter on password field")
-                    create_clicked = True
-                except:
-                    pass
 
             await asyncio.sleep(3)
             await self.capture_screenshot()
