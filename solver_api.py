@@ -294,16 +294,20 @@ class TwoCaptchaAPI:
 
 
 class BrightDataAPI:
-    """Bright Data CAPTCHA solving via their Web Unlocker API.
+    """Bright Data CAPTCHA solving — try as proxy credentials first, then API.
     
-    Endpoint: https://api.brightdata.com/request
-    Documentation: https://docs.brightdata.com
+    Bright Data doesn't have a simple sitekey→token API.
+    Instead, use it as:
+      1. PROXY MODE: Route Playwright through Bright Data's Web Unlocker proxy
+         (requires zone credentials: brd-customer-XXX-zone-YYY:password)
+      2. API MODE: Fetch the page through Bright Data's request API
+         (requires an API token + Web Unlocker zone name)
     
-    Uses the Web Unlocker which auto-solves captchas and returns
-    the solved page response. For token extraction, we solve the
-    captcha page and check for the token in the response.
+    The API_KEY env var should contain zone credentials in format:
+      brd-customer-{CUSTOMER_ID}-zone-{ZONE_NAME}:{ZONE_PASSWORD}
     
-    The API key format is: {zone_name}:{password}
+    Or a Bright Data API token (UUID format) — you MUST also create
+    a Web Unlocker zone in Bright Data dashboard.
     """
 
     BASE = "https://api.brightdata.com"
@@ -317,58 +321,71 @@ class BrightDataAPI:
         log: Optional[Callable] = None,
     ) -> Optional[str]:
         log = log or (lambda *a: None)
-        try:
-            # Bright Data Web Unlocker API solves captchas automatically
-            # We send the target URL and get back the solved page
-            zone = api_key  # The API key is the zone:password format
-            url = pageurl.split("?")[0]  # Base URL without query params
-            
-            log(f"[BrightData] Solving via Web Unlocker...")
-            
-            # First approach: use the request API to get the solved page
-            async with session.post(
-                f"{BrightDataAPI.BASE}/request",
-                json={
-                    "zone": zone,
-                    "url": url,
-                    "format": "raw",
-                },
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json",
-                },
-                timeout=aiohttp.ClientTimeout(total=60),
-            ) as r:
-                if r.status == 200:
-                    # The page was loaded and captcha was auto-solved
-                    # But we need the token specifically
-                    body = await r.text()
-                    log(f"[BrightData] Page fetched ({len(body)} bytes)")
-                    
-                    # Try to extract token from the response HTML
-                    import re
-                    token_match = re.search(
-                        r'<textarea[^>]*name="h-captcha-response"[^>]*>([^<]+)</textarea>',
-                        body
-                    )
-                    if token_match:
-                        token = token_match.group(1).strip()
-                        if token and len(token) > 20:
-                            log(f"[BrightData] Token found in response!")
-                            return token
-                    
-                    log("[BrightData] Captcha solved but no token in HTML response", level="warn")
-                    return None
-                else:
-                    err = await r.text()
-                    log(f"[BrightData] HTTP {r.status}: {err[:100]}", level="error")
-                    return None
-        except asyncio.TimeoutError:
-            log("[BrightData] Timeout", level="error")
+        
+        # If key is in zone credentials format (brd-customer-XXX-zone-YYY:password)
+        # use it as proxy auth; otherwise use as API token
+        is_proxy_creds = "brd-customer-" in api_key.lower()
+        is_uuid = len(api_key) == 36 and api_key.count("-") == 4
+        
+        if is_proxy_creds:
+            # Credentials format: brd-customer-CID-zone-ZONE:PASS
+            # Use as proxy credentials — this won't give us a token directly
+            # but Playwright can route through it for auto-solving
+            log("[BrightData] Detected proxy credentials — these work when routing Playwright through the proxy")
+            log(f"[BrightData] To use: set Playwright proxy to http://{api_key[:25]}...@brd.superproxy.io:22225")
+            log("[BrightData] Proxy mode can't extract tokens directly — try CapSolver instead", level="warn")
             return None
-        except Exception as e:
-            log(f"[BrightData] Error: {e}", level="error")
-            return None
+        
+        if is_uuid:
+            # UUID format: API token — needs a Web Unlocker zone to work
+            log("[BrightData] Detected API token (UUID format)")
+            log("[BrightData] This token needs a Web Unlocker zone created in Bright Data dashboard")
+            
+            # Try the request API using the token as zone name (likely to fail if zone doesn't exist)
+            try:
+                url = pageurl.split("?")[0]
+                log(f"[BrightData] Trying Web Unlocker API with zone={api_key[:8]}...")
+                
+                async with session.post(
+                    f"{BrightDataAPI.BASE}/request",
+                    json={
+                        "zone": api_key,
+                        "url": url,
+                        "format": "raw",
+                    },
+                    headers={
+                        "Authorization": f"Bearer {api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    timeout=aiohttp.ClientTimeout(total=30),
+                ) as r:
+                    if r.status == 200:
+                        body = await r.text()
+                        import re
+                        token_match = re.search(
+                            r'<textarea[^>]*name="h-captcha-response"[^>]*>([^<]+)</textarea>',
+                            body
+                        )
+                        if token_match:
+                            token = token_match.group(1).strip()
+                            if token and len(token) > 20:
+                                log(f"[BrightData] Token found!")
+                                return token
+                        log("[BrightData] No token in response HTML", level="warn")
+                        return None
+                    else:
+                        err = await r.text()
+                        log(f"[BrightData] API error: {err[:120]}", level="error")
+                        log("[BrightData] ⚠️ To fix: go to Bright Data dashboard → Web Access APIs → create a Web Unlocker zone, then set API_KEY='brd-customer-CID-zone-ZONE:PASS'", level="error")
+                        return None
+            except Exception as e:
+                log(f"[BrightData] Error: {e}", level="error")
+                return None
+        
+        # Unknown format
+        log(f"[BrightData] Unknown API key format (starts with {api_key[:8]}...)", level="warn")
+        log("[BrightData] Expected: brd-customer-CID-zone-NAME:PASS or a UUID API token", level="warn")
+        return None
 
 
 # ── Unified Solver ───────────────────────────────────────
