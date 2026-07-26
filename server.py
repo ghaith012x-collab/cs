@@ -398,61 +398,179 @@ class DiscordAutomation:
             await self._select_dob("Year", year_val)
             await self._human_pause()
 
-            # Terms of Service checkbox
+            # ── ToS Checkbox (aggressive detection) ──────────────
             self._log("Checking ToS checkbox...")
             tos_checked = False
+
+            # Strategy 1: Playwright locators
             for sel in [
                 'input[type="checkbox"]',
-                'div[class*="checkbox"]',
+                'div[role="checkbox"]',
+                '[class*="checkbox"]',
                 'label:has-text("Terms of Service")',
                 'label:has-text("terms of service")',
                 'label:has-text("agree")',
                 'label:has-text("I have read")',
+                'label:has-text("read and agree")',
             ]:
                 cb = self._page.locator(sel)
                 if await cb.count() > 0:
                     await cb.first.click()
                     tos_checked = True
-                    self._log(f"✓ Clicked ToS via '{sel}'")
+                    self._log(f"✓ ToS via '{sel}'")
                     break
+
+            # Strategy 2: Find by text "Terms of Service" and click parent
             if not tos_checked:
-                self._log("No ToS checkbox found — proceeding")
+                try:
+                    tos_text = self._page.get_by_text("Terms of Service", exact=False)
+                    if await tos_text.count() > 0:
+                        # Click the parent label or container
+                        el = tos_text.first
+                        parent = self._page.locator(':has-text("Terms of Service")').first
+                        await parent.click()
+                        tos_checked = True
+                        self._log("✓ ToS via text-content click")
+                except Exception as e:
+                    self._log(f"ToS text click error: {e}")
 
-            await self._human_pause()
+            # Strategy 3: Find by text "I have read" 
+            if not tos_checked:
+                try:
+                    read_text = self._page.get_by_text("I have read", exact=False)
+                    if await read_text.count() > 0:
+                        await read_text.first.click()
+                        tos_checked = True
+                        self._log("✓ ToS via 'I have read' text click")
+                except:
+                    pass
 
-            # Click Create Account
+            # Strategy 4: JS — find ANY element with checkbox-related text
+            if not tos_checked:
+                try:
+                    result = await self._page.evaluate("""() => {
+                        // Find element containing "Terms of Service" text
+                        const walker = document.createTreeWalker(document.body, 4, null);
+                        let node;
+                        while (node = walker.nextNode()) {
+                            if (node.textContent.includes('Terms of Service') || 
+                                node.textContent.includes('terms of service') ||
+                                node.textContent.includes('I have read')) {
+                                // Click the parent that's clickable
+                                let el = node.parentElement;
+                                for (let i = 0; i < 10; i++) {
+                                    if (!el) break;
+                                    const cs = window.getComputedStyle(el);
+                                    if (cs.cursor === 'pointer' || el.tagName === 'LABEL' || el.tagName === 'A') {
+                                        el.click();
+                                        return 'clicked ' + el.tagName;
+                                    }
+                                    el = el.parentElement;
+                                }
+                                // Fallback: click the text node's parent
+                                node.parentElement.click();
+                                return 'clicked parent';
+                            }
+                        }
+                        // Last resort: click any unchecked checkbox-like element
+                        const checkboxes = document.querySelectorAll('[class*="checkbox"], [role="checkbox"]');
+                        for (const cb of checkboxes) {
+                            const checked = cb.getAttribute('aria-checked');
+                            if (checked !== 'true') {
+                                cb.click();
+                                return 'clicked checkbox element';
+                            }
+                        }
+                        return 'nothing found';
+                    }""")
+                    if result and 'clicked' in str(result):
+                        tos_checked = True
+                        self._log(f"✓ ToS checkbox {result}")
+                except Exception as e:
+                    self._log(f"JS ToS error: {e}")
+
+            if tos_checked:
+                self._log("✓ ToS checkbox checked")
+                await asyncio.sleep(0.3)
+            else:
+                self._log("No ToS checkbox found — proceeding anyway")
+
+            # ── Create Account Button (aggressive) ─────────────
             self._log("Clicking Create Account...")
             create_clicked = False
-            for method in [
-                lambda: self._page.locator('button:has-text("Create Account")'),
-                lambda: self._page.get_by_role("button", name="Create Account"),
-                lambda: self._page.locator('button[type="submit"]'),
+
+            for sel in [
+                'button:has-text("Create Account")',
+                'button:has-text("Continue")',
+                'button:has-text("Sign Up")',
+                'button:has-text("Create")',
+                'button[type="submit"]',
+                '[type="submit"]',
             ]:
                 try:
-                    btn = method()
+                    btn = self._page.locator(sel)
                     if await btn.count() > 0:
                         await btn.first.click()
                         create_clicked = True
+                        self._log(f"✓ Clicked via '{sel}'")
                         break
                 except:
                     pass
 
             if not create_clicked:
-                await self._page.evaluate("""
-                    () => {
-                        const btns = document.querySelectorAll('button');
-                        for (const btn of btns) {
-                            if (btn.textContent.includes('Create Account')) {
-                                btn.click(); return;
-                            }
-                        }
-                        const submit = document.querySelector('button[type="submit"]');
-                        if (submit) submit.click();
-                    }
-                """)
-                create_clicked = True
+                try:
+                    btn = self._page.get_by_role("button", name="Create Account")
+                    if await btn.count() > 0:
+                        await btn.first.click()
+                        create_clicked = True
+                        self._log("✓ Clicked via get_by_role")
+                except:
+                    pass
 
-            self._log("Create Account clicked — waiting for captcha/redirect...")
+            if not create_clicked:
+                try:
+                    btn = self._page.get_by_role("button", name="Continue")
+                    if await btn.count() > 0:
+                        await btn.first.click()
+                        create_clicked = True
+                        self._log("✓ Clicked Continue button")
+                except:
+                    pass
+
+            if not create_clicked:
+                # JS fallback
+                result = await self._page.evaluate("""() => {
+                    const btns = document.querySelectorAll('button, [role="button"], a[class*="button"]');
+                    for (const btn of btns) {
+                        const t = btn.textContent.toLowerCase();
+                        if (t.includes('create account') || t.includes('sign up') || t.includes('continue')) {
+                            btn.click();
+                            return 'clicked ' + t.trim();
+                        }
+                    }
+                    const submit = document.querySelector('[type="submit"]');
+                    if (submit) { submit.click(); return 'clicked submit'; }
+                    // Submit the form directly
+                    const form = document.querySelector('form');
+                    if (form) { form.requestSubmit(); return 'form submitted'; }
+                    return 'failed';
+                }""")
+                if result and result != 'failed':
+                    create_clicked = True
+                    self._log(f"✓ JS button click: {result}")
+
+            if create_clicked:
+                self._log("Create Account clicked — waiting...")
+            else:
+                self._log("WARNING: Could not click Create Account!", level="error")
+                # Try pressing Enter on the password field as last resort
+                try:
+                    await self._page.locator('input[name="password"]').press('Enter')
+                    self._log("Pressed Enter on password field")
+                    create_clicked = True
+                except:
+                    pass
+
             await asyncio.sleep(3)
             await self.capture_screenshot()
 
