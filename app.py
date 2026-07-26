@@ -41,9 +41,10 @@ class AppHost:
 
     async def start_automation(self) -> None:
         if self._automation and self._running:
-            print("Automation already running")
+            self._log("Automation already running")
             return
         config = self.load_config(self._config_path)
+        # Create fresh automation object
         self._automation = DiscordAutomation(headless=config.get('headless', True))
         self._running = True
         try:
@@ -80,28 +81,43 @@ class AppHost:
     async def stop_automation(self) -> None:
         self._running = False
         if self._automation:
-            await self._automation.close()
-            self._automation = None
+            try:
+                await self._automation.close()
+            except Exception as e:
+                print(f"[STOP] close error (non-fatal): {e}", flush=True)
+            # Keep automation object for logs/screenshots
+            # Don't set to None: self._automation = None
         self._log("Automation stopped")
 
     async def _cleanup(self) -> None:
         self._running = False
         if self._automation:
-            await self._automation.close()
-            self._automation = None
+            try:
+                await self._automation.close()
+            except Exception as e:
+                print(f"[CLEANUP] close error (non-fatal): {e}", flush=True)
+            # Keep automation object so logs/screenshots survive
+            # self._automation = None  — DON'T SET TO NONE
 
     async def start_web_server(self, port: int = 8080) -> None:
         self._web_port = port
 
         async def handle_status(request):
-            if self._automation:
-                return web.json_response({
-                    "running": self._running,
-                    "screenshots": len(self._automation.get_screenshots()),
-                    "email": self._automation._email if self._automation else "",
-                    "username": self._automation._username if self._automation else ""
-                })
-            return web.json_response({"running": False, "screenshots": 0})
+            auto = self._automation
+            screenshots = len(auto.get_screenshots()) if auto else 0
+            email = auto._email if auto else ""
+            username = auto._username if auto else ""
+            # Check if there are stats from the solver
+            stats = {}
+            if auto and hasattr(auto, '_vision'):
+                stats = auto._vision.get_stats()
+            return web.json_response({
+                "running": self._running,
+                "screenshots": screenshots,
+                "email": email,
+                "username": username,
+                "stats": stats,
+            })
 
         async def handle_latest_screenshot(request):
             if self._automation:
@@ -114,8 +130,9 @@ class AppHost:
             return web.Response(status=404)
 
         async def handle_activity_log(request):
-            if self._automation:
-                return web.json_response(self._automation.get_activity_log())
+            auto = self._automation
+            if auto:
+                return web.json_response(auto.get_activity_log())
             return web.json_response([])
 
         async def handle_root(request):

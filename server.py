@@ -598,13 +598,29 @@ class DiscordAutomation:
 
     async def close(self) -> None:
         if self._page:
-            await self._page.close()
+            try:
+                await self._page.close()
+            except:
+                pass
+            self._page = None
         if self._context:
-            await self._context.close()
+            try:
+                await self._context.close()
+            except:
+                pass
+            self._context = None
         if self._browser:
-            await self._browser.close()
+            try:
+                await self._browser.close()
+            except:
+                pass
+            self._browser = None
         if self._playwright:
-            await self._playwright.stop()
+            try:
+                await self._playwright.stop()
+            except:
+                pass
+            self._playwright = None
 
     def get_screenshots(self) -> list:
         return self._screenshots
