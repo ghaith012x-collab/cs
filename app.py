@@ -21,8 +21,7 @@ class AppHost:
         default_config = {
             "email": "alistra742@gmail.com",
             "headless": True,
-            "web_port": 8080,
-            "run_automation": True,
+            "web_port": 8080,                "run_automation": False,
         }
         if os.path.exists(path):
             with open(path, 'r') as f:
@@ -167,19 +166,17 @@ async def main():
                 "email": "alistra742@gmail.com",
                 "headless": True,
                 "web_port": web_port,
-                "run_automation": True,
+                "run_automation": False,
             }, f, indent=2)
         print("Created config.json with alistra742@gmail.com", flush=True)
 
     await host.start_web_server(web_port)
 
-    # AUTO-START: Begin registration immediately
+    # Manual start only — user clicks Start in dashboard
     print("=" * 50, flush=True)
-    print("  AUTO-STARTING DISCORD REGISTRATION", flush=True)
+    print("  CLIP Vision AI ready — click Start in dashboard", flush=True)
     print(f"  Email: alistra742@gmail.com", flush=True)
-    print("  Solver: CLIP Vision AI (no APIs)", flush=True)
     print("=" * 50, flush=True)
-    asyncio.create_task(host.start_automation())
 
     try:
         while True:
@@ -255,7 +252,7 @@ button{font-size:14px;padding:10px 18px;border-radius:9px;border:0;cursor:pointe
 
 <div class="card">
   <h3>🤖 Discord Automation</h3>
-  <p style="font-size:13px;color:#94a3b8;margin-bottom:8px">Email: <strong>alistra742@gmail.com</strong> · Auto-start enabled</p>
+  <p style="font-size:13px;color:#94a3b8;margin-bottom:8px">Email: <strong>alistra742@gmail.com</strong> · Manual start</p>
   <div class="btn-group">
     <button class="btn-primary" onclick="start()">▶ Start</button>
     <button class="btn-stop" onclick="stop()">■ Stop</button>
