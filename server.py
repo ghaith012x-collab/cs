@@ -211,7 +211,36 @@ class DiscordAutomation:
                 await asyncio.sleep(0.5)
 
             if not iframe:
-                self._log("[Vision AI] No hCaptcha detected — proceeding")
+                # No captcha iframe found — check if registration actually went through
+                try:
+                    cur_url = self._page.url
+                    page_text = await self._page.evaluate("() => document.body.innerText.substring(0, 500)")
+                    if any(k in cur_url for k in ['/verify', '/welcome', '/channels', '@me', '/login', 'discord.com/app']):
+                        self._log(f"[Vision AI] Registration went through — at {cur_url[:50]}")
+                        return True
+                    # Check for errors on the page
+                    if 'captcha' in page_text.lower() or 'security' in page_text.lower() or 'try again' in page_text.lower():
+                        # There IS a captcha but we didn't detect the iframe — try harder
+                        self._log("[Vision AI] Possible undetected captcha — checking for other indicators...")
+                        # Wait more and check again
+                        await asyncio.sleep(3)
+                        try:
+                            iframe_el = await asyncio.wait_for(
+                                self._page.query_selector('iframe[src*="captcha"], iframe[title*="captcha"], [class*="captcha"]'),
+                                timeout=5.0
+                            )
+                            if iframe_el:
+                                self._log("[Vision AI] Found captcha via secondary check")
+                                iframe = iframe_el
+                        except:
+                            pass
+                    else:
+                        # No captcha visible and no errors — registration might have gone through
+                        self._log(f"[Vision AI] No hCaptcha detected — page: {cur_url[:40]}")
+                except:
+                    self._log("[Vision AI] No hCaptcha detected — proceeding without solving")
+
+            if not iframe:
                 return True
 
             await asyncio.sleep(1)
@@ -437,60 +466,110 @@ class DiscordAutomation:
             await self._select_dob("Year", year_val)
             await self._human_pause()
 
-            # ── ToS Checkbox (PURE JS evaluate — instant, no hangs) ─
+            # ── ToS Checkbox — FIND THE CORRECT ONE (Terms of Service, not newsletter) ─
             self._log("Checking ToS checkbox...")
             tos_checked = False
 
-            # Strategy 1: JS evaluate to find and click all types of checkboxes
             try:
                 tos_checked = await self._page.evaluate("""() => {
-                    // Try checkbox inputs
-                    const checkboxes = document.querySelectorAll('input[type="checkbox"]');
-                    for (const cb of checkboxes) {
-                        if (!cb.checked && cb.offsetParent !== null) {
-                            cb.click();
-                            cb.checked = true;
-                            cb.dispatchEvent(new Event('change', { bubbles: true }));
-                            cb.dispatchEvent(new Event('input', { bubbles: true }));
-                            return 'input_checkbox';
+                    // Helper: find nearest checkbox sibling/parent
+                    function findNearestCheckbox(el) {
+                        // Check siblings
+                        let sib = el.previousElementSibling || el.nextElementSibling;
+                        while (sib) {
+                            if (sib.tagName === 'INPUT' && sib.type === 'checkbox') return sib;
+                            if (sib.getAttribute('role') === 'checkbox') return sib;
+                            if (sib.querySelector('input[type="checkbox"]')) return sib.querySelector('input[type="checkbox"]');
+                            if (sib.matches('[class*="checkbox"]')) return sib;
+                            sib = sib.nextElementSibling || sib.previousElementSibling;
                         }
-                    }
-                    // Try role=checkbox
-                    const roles = document.querySelectorAll('[role="checkbox"]');
-                    for (const r of roles) {
-                        const aria = r.getAttribute('aria-checked');
-                        if (aria !== 'true') {
-                            r.click();
-                            return 'role_checkbox';
+                        // Check parents
+                        let p = el.parentElement;
+                        for (let i = 0; i < 5 && p; i++) {
+                            const cb = p.querySelector('input[type="checkbox"], [role="checkbox"], [class*="checkbox"]');
+                            if (cb && cb !== el) return cb;
+                            p = p.parentElement;
                         }
+                        return null;
                     }
-                    // Try any element containing checkbox class
-                    const classEls = document.querySelectorAll('[class*="checkbox"], [class*="Checkbox"]');
-                    for (const el of classEls) {
-                        if (el.offsetParent !== null) {
-                            el.click();
-                            return 'class_checkbox';
-                        }
-                    }
-                    // Find "Terms of Service" text and click its parent label
+
+                    // STRATEGY 1: Find checkbox near "Terms of Service" text (MOST ACCURATE)
                     const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null);
                     let node;
                     while (node = walker.nextNode()) {
-                        const t = node.textContent.trim();
-                        if (t.includes('Terms of Service') || t.includes('I have read') || t.includes('read and agree')) {
-                            let p = node.parentElement;
-                            for (let i = 0; i < 5 && p; i++) {
-                                if (p.tagName === 'LABEL' || p.tagName === 'A' || p.getAttribute('role') === 'checkbox') {
-                                    p.click();
-                                    return 'text_label_' + p.tagName;
-                                }
-                                p = p.parentElement;
-                            }
-                            // Click the text element itself as last resort
-                            node.parentElement.click();
-                            return 'text_click';
+                        const t = node.textContent.trim().toLowerCase();
+                        const tosKeywords = ['terms of service', 'terms of use', 'terms & conditions', 
+                                            'terms and conditions', 'i have read', 'read and agree'];
+                        const hasTos = tosKeywords.some(k => t.includes(k));
+                        if (!hasTos) continue;
+                        
+                        // Found text containing ToS reference — find its checkbox
+                        const cb = findNearestCheckbox(node.parentElement);
+                        if (cb) {
+                            cb.scrollIntoView({block: 'center'});
+                            cb.click();
+                            // Force checked
+                            if (cb.type === 'checkbox') cb.checked = true;
+                            cb.dispatchEvent(new Event('change', { bubbles: true }));
+                            cb.dispatchEvent(new Event('input', { bubbles: true }));
+                            return 'tos_text_' + t.slice(0, 30);
                         }
                     }
+
+                    // STRATEGY 2: Find checkbox with label for="..." reference to ToS
+                    const labels = document.querySelectorAll('label');
+                    for (const lbl of labels) {
+                        const t = lbl.textContent.toLowerCase();
+                        const tosKeywords = ['terms of service', 'terms of use', 'i have read', 'read and agree'];
+                        const hasTos = tosKeywords.some(k => t.includes(k));
+                        if (!hasTos) continue;
+                        
+                        const forId = lbl.getAttribute('for');
+                        if (forId) {
+                            const cb = document.getElementById(forId);
+                            if (cb) { cb.click(); cb.checked = true; return 'label_for_' + forId; }
+                        }
+                        // Check inside label
+                        const innerCb = lbl.querySelector('input[type="checkbox"], [role="checkbox"]');
+                        if (innerCb) { innerCb.click(); innerCb.checked = true; return 'label_inner_cb'; }
+                        // Click label itself
+                        lbl.click();
+                        return 'label_click';
+                    }
+
+                    // STRATEGY 3: Last checkbox on the page (Discord puts ToS last)
+                    const allCheckboxes = document.querySelectorAll('input[type="checkbox"]:not([checked])');
+                    if (allCheckboxes.length > 0) {
+                        // Pick the LAST unchecked visible checkbox (most likely ToS)
+                        const lastCb = allCheckboxes[allCheckboxes.length - 1];
+                        if (lastCb.offsetParent !== null) {
+                            lastCb.scrollIntoView({block: 'center'});
+                            lastCb.click();
+                            lastCb.checked = true;
+                            lastCb.dispatchEvent(new Event('change', { bubbles: true }));
+                            lastCb.dispatchEvent(new Event('input', { bubbles: true }));
+                            return 'last_checkbox_' + allCheckboxes.length;
+                        }
+                    }
+
+                    // STRATEGY 4: role=checkbox or class-based
+                    const roles = document.querySelectorAll('[role="checkbox"]:not([aria-checked="true"])');
+                    for (const r of roles) {
+                        if (r.offsetParent !== null) {
+                            r.click(); r.setAttribute('aria-checked', 'true');
+                            return 'role_checkbox';
+                        }
+                    }
+
+                    // STRATEGY 5: Any visible unchecked checkbox
+                    const anyCb = document.querySelectorAll('input[type="checkbox"]');
+                    for (const cb of anyCb) {
+                        if (!cb.checked && cb.offsetParent !== null) {
+                            cb.click(); cb.checked = true;
+                            return 'any_checkbox';
+                        }
+                    }
+
                     return 'not_found';
                 }""")
                 if tos_checked and tos_checked != 'not_found':
