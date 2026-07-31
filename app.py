@@ -19,9 +19,10 @@ class AppHost:
 
     def load_config(self, path: str = "config.json") -> dict:
         default_config = {
-            "email": "alistra742@gmail.com",
+            "email": "",
             "headless": True,
-            "web_port": 8080,                "run_automation": False,
+            "web_port": 8080,
+            "run_automation": False,
         }
         if os.path.exists(path):
             with open(path, 'r') as f:
@@ -44,17 +45,18 @@ class AppHost:
             self._log("Automation already running")
             return
         config = self.load_config(self._config_path)
-        # Create fresh automation object
-        self._automation = DiscordAutomation(headless=config.get('headless', True))
+        # Create fresh automation object (email comes from config or incognitomail.co)
+        self._automation = DiscordAutomation(
+            headless=config.get('headless', True),
+            email=config.get('email', ''),
+        )
         self._running = True
         try:
             await self._automation.initialize()
             screenshot_task = asyncio.create_task(
                 self._capture_periodic_screenshots(config.get('camera_interval', 3))
             )
-            # Auto-fill email and start
-            email = config.get('email', 'alistra742@gmail.com')
-            self._log(f"Auto-starting with email: {email}")
+            self._log("Auto-starting signup (email auto-generated via incognitomail.co if not configured)")
             success = await self._automation.start_discord_signup()
             if success:
                 self._log("✓ Automation completed successfully")
@@ -138,6 +140,14 @@ class AppHost:
         async def handle_root(request):
             return web.Response(text=DASHBOARD_HTML, content_type='text/html')
 
+        async def handle_api_status(request):
+            auto = self._automation
+            key_set = False
+            if auto and hasattr(auto, '_vision'):
+                stats = auto._vision.get_stats()
+                key_set = bool(stats.get('api_key_set'))
+            return web.json_response({"api_key_set": key_set})
+
         async def handle_start(request):
             if self._running:
                 return web.Response(text="Already running")
@@ -156,6 +166,7 @@ class AppHost:
         app.router.add_get('/status', handle_status)
         app.router.add_get('/latest', handle_latest_screenshot)
         app.router.add_get('/activity', handle_activity_log)
+        app.router.add_get('/api_status', handle_api_status)
 
         runner = web.AppRunner(app)
         await runner.setup()
@@ -180,19 +191,23 @@ async def main():
     if not os.path.exists("config.json"):
         with open("config.json", 'w') as f:
             json.dump({
-                "email": "alistra742@gmail.com",
+                "email": "",
                 "headless": True,
                 "web_port": web_port,
                 "run_automation": False,
             }, f, indent=2)
-        print("Created config.json with alistra742@gmail.com", flush=True)
+        print("Created config.json (email auto-generated via incognitomail.co)", flush=True)
 
     await host.start_web_server(web_port)
 
     # Manual start only — user clicks Start in dashboard
+    api_key = os.environ.get('API_KEY', '').strip()
     print("=" * 50, flush=True)
-    print("  CLIP Vision AI ready — click Start in dashboard", flush=True)
-    print(f"  Email: alistra742@gmail.com", flush=True)
+    if api_key:
+        print("  Gemini Vision API ready — click Start in dashboard", flush=True)
+    else:
+        print("  WARNING: API_KEY not set — Gemini disabled, pixel fallback only", flush=True)
+    print("  Email: auto-generated via incognitomail.co (or config.json)", flush=True)
     print("=" * 50, flush=True)
 
     try:
@@ -208,7 +223,7 @@ async def main():
 
 DASHBOARD_HTML = """<!doctype html><html><head>
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>CLIP Vision AI - Captcha Solver</title>
+<title>Gemini Vision AI - Captcha Solver</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:system-ui;background:#0a0e1a;color:#e2e8f0;max-width:960px;margin:0 auto;padding:20px}
@@ -249,13 +264,13 @@ button{font-size:14px;padding:10px 18px;border-radius:9px;border:0;cursor:pointe
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
 </style></head><body>
 <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:4px">
-  <h1>🧠 CLIP Vision AI</h1>
+  <h1>✨ Gemini Vision AI</h1>
   <div class="model-status" id="modelStatus">
     <span class="model-dot loading" id="modelDot"></span>
-    <span id="modelText" style="font-size:13px">Loading CLIP model...</span>
+    <span id="modelText" style="font-size:13px">Checking Gemini API key...</span>
   </div>
 </div>
-<p><small>Custom AI vision solver · No external APIs · Pure CPU inference</small></p>
+<p><small>Gemini Vision API solver · No local AI models · Pixel fallback if no key</small></p>
 
 <div class="card">
   <h3>📊 Solver Stats</h3>
@@ -269,7 +284,7 @@ button{font-size:14px;padding:10px 18px;border-radius:9px;border:0;cursor:pointe
 
 <div class="card">
   <h3>🤖 Discord Automation</h3>
-  <p style="font-size:13px;color:#94a3b8;margin-bottom:8px">Email: <strong>alistra742@gmail.com</strong> · Manual start</p>
+  <p style="font-size:13px;color:#94a3b8;margin-bottom:8px">Email: <strong id="emailLabel">auto (incognitomail.co)</strong> · Manual start</p>
   <div class="btn-group">
     <button class="btn-primary" onclick="start()">▶ Start</button>
     <button class="btn-stop" onclick="stop()">■ Stop</button>
@@ -280,7 +295,7 @@ button{font-size:14px;padding:10px 18px;border-radius:9px;border:0;cursor:pointe
     <img id="shot" alt="Live view" style="display:none">
   </div>
   <h2 style="margin-top:12px;font-size:12px;color:#94a3b8;font-weight:600">📝 Activity Log</h2>
-  <div id="log"><div class="entry"><span class="time">--:--:--</span><span class="info">Starting CLIP Vision AI...</span></div></div>
+  <div id="log"><div class="entry"><span class="time">--:--:--</span><span class="info">Starting Gemini Vision AI...</span></div></div>
 </div>
 
 <script>
@@ -299,6 +314,7 @@ async function refresh(){
   try{
     let r=await api('/status');let x=await r.json();
     let s=document.getElementById('status');
+    if(x.email) document.getElementById('emailLabel').textContent=x.email;
     if(x.running){
       s.textContent=x.screenshots?'▶ Running · '+x.screenshots+' screenshot(s)':'▶ Running';
       s.style.color='#a7f3d0';
@@ -327,7 +343,7 @@ async function refreshLog(){
     for(let e of recent){
       let cls=e.level||'info';
       let msg=e.message||'';
-      if(msg.includes('[Vision')||msg.includes('CLIP')) cls='vision';
+      if(msg.includes('[Vision')||msg.includes('Gemini')) cls='vision';
       html+='<div class="entry"><span class="time">'+e.time+'</span><span class="'+cls+'">'+msg+'</span></div>';
     }
     document.getElementById('log').innerHTML=html;
@@ -344,15 +360,18 @@ async function checkModel(){
     let r=await api('/status');let x=await r.json();
     // Model status from activity log
     let logR=await api('/activity');let logs=await logR.json();
-    if(logs.some(l=>l.message&&l.message.includes('CLIP model loaded'))){
-      document.getElementById('modelDot').className='model-dot loaded';
-      document.getElementById('modelText').textContent='CLIP model loaded ✅';
-      document.getElementById('modelText').style.color='#22c55e';
-    } else if(logs.some(l=>l.message&&l.message.includes('CLIP model failed'))){
-      document.getElementById('modelDot').className='model-dot error';
-      document.getElementById('modelText').textContent='CLIP model failed ❌';
-      document.getElementById('modelText').style.color='#ef4444';
-    }
+    try{
+      let r=await api('/api_status');let st=await r.json();
+      if(st.api_key_set){
+        document.getElementById('modelDot').className='model-dot loaded';
+        document.getElementById('modelText').textContent='Gemini API key set ✅';
+        document.getElementById('modelText').style.color='#22c55e';
+      } else {
+        document.getElementById('modelDot').className='model-dot error';
+        document.getElementById('modelText').textContent='No API_KEY — pixel fallback';
+        document.getElementById('modelText').style.color='#ef4444';
+      }
+    }catch(e){}
   }catch(e){}
 }
 

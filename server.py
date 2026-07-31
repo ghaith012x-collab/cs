@@ -9,6 +9,7 @@ from typing import Optional
 from playwright.async_api import async_playwright
 
 from captcha_solver import VisionSolver
+from incognito_mail import IncognitoMail
 
 
 # ── TOR Control ───────────────────────────────────────────
@@ -50,11 +51,8 @@ USER_AGENTS = [
 ]
 
 
-AUTO_EMAIL = "alistra742@gmail.com"
-
-
 class DiscordAutomation:
-    def __init__(self, headless: bool = False):
+    def __init__(self, headless: bool = False, email: str = ""):
         self.headless = headless
         self._playwright = None
         self._browser = None
@@ -62,10 +60,11 @@ class DiscordAutomation:
         self._page = None
         self._screenshots: list = []
         self._activity_log: list = []
-        self._email = AUTO_EMAIL
+        self._email = (email or os.environ.get("ACCOUNT_EMAIL", "")).strip()
         self._username = ""
         self._password = ""
         self._vision = VisionSolver(log=self._log)
+        self._mail: Optional[IncognitoMail] = None
 
     def _log(self, message: str, level: str = "info") -> None:
         import time as _time
@@ -141,6 +140,20 @@ class DiscordAutomation:
         if not self._page:
             await self.initialize()
 
+        # No hardcoded email — get a fresh incognitomail.co address if none configured.
+        if not self._email:
+            self._log("[Mail] No email configured — creating incognitomail.co inbox...")
+            try:
+                self._mail = IncognitoMail(self._context, log=self._log)
+                self._email = await self._mail.create_inbox()
+            except Exception as e:
+                self._log(f"[Mail] inbox creation error: {e}", level="error")
+                self._email = ""
+
+        if not self._email:
+            self._log("✗ No email available — aborting signup", level="error")
+            return False
+
         self._log("=" * 40)
         self._log(f"Starting Discord signup with email: {self._email}")
         self._log("=" * 40)
@@ -154,10 +167,12 @@ class DiscordAutomation:
             # Fill the form
             form_ok = await self._fill_registration_form()
             if form_ok:
-                self._log("✓ Form filled — now solving captcha with AI Vision...")
+                self._log("✓ Form filled — now solving captcha with Gemini Vision...")
                 success = await self._solve_hcaptcha_if_present()
                 if success:
                     self._log("✓ CAPTCHA SOLVED! Registration submitted.")
+                    # Best effort: complete email verification via incognitomail.co
+                    await self._verify_account_email()
                 else:
                     self._log("✗ Captcha solving failed", level="error")
             else:
@@ -173,8 +188,27 @@ class DiscordAutomation:
         await self.capture_screenshot()
         return success
 
+    async def _verify_account_email(self) -> bool:
+        """Wait for the Discord verification email and open its link (best effort)."""
+        if not self._mail:
+            return False
+        try:
+            link = await self._mail.wait_for_verification_link(timeout=180)
+            if not link:
+                self._log("[Mail] No verification link found yet — account may still be created", level="warn")
+                return False
+            self._log(f"[Mail] Opening verification link: {link[:80]}...")
+            await self._page.goto(link, wait_until='domcontentloaded', timeout=20000)
+            await asyncio.sleep(4)
+            await self.capture_screenshot()
+            self._log("[Mail] ✓ Verification link opened")
+            return True
+        except Exception as e:
+            self._log(f"[Mail] verification error: {e}", level="warn")
+            return False
+
     async def _solve_hcaptcha_if_present(self) -> bool:
-        """Detect and solve hCaptcha using CLIP vision AI (no APIs)."""
+        """Detect and solve hCaptcha using Gemini Vision API (no local models)."""
         try:
             self._log("[Vision AI] Checking for hCaptcha...")
 
@@ -248,14 +282,15 @@ class DiscordAutomation:
             except:
                 pass
 
-            # Solve using CLIP vision AI with timeout
-            self._log("[Vision AI] Solving with CLIP (no APIs)...")
+            # Solve using Gemini Vision API with timeout
+            self._log("[Vision AI] Solving with Gemini Vision API...")
 
             try:
-                await asyncio.wait_for(self._vision.ensure_model_loaded(), timeout=30.0)
-            except:
-                self._log("[Vision AI] CLIP model timed out — skipping captcha", level="warn")
-                return False
+                await asyncio.wait_for(self._vision.ensure_model_loaded(), timeout=10.0)
+            except asyncio.TimeoutError:
+                self._log("[Vision AI] Gemini key check timed out — continuing anyway", level="warn")
+            except Exception:
+                self._log("[Vision AI] Gemini key check failed — continuing anyway", level="warn")
 
             # The solver handles: click checkbox → extract text → classify tiles → click → verify
             try:
@@ -675,6 +710,12 @@ class DiscordAutomation:
             await asyncio.sleep(interval)
 
     async def close(self) -> None:
+        if self._mail:
+            try:
+                await self._mail.close()
+            except Exception:
+                pass
+            self._mail = None
         if self._page:
             try:
                 await self._page.close()

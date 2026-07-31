@@ -1,8 +1,9 @@
 #!/bin/bash
 set -e
 
-echo "Starting CLIP Vision AI Captcha Solver..."
-echo "Email: alistra742@gmail.com"
+echo "Starting Gemini Vision AI Captcha Solver..."
+echo "Email: auto-generated via incognitomail.co (or config.json)"
+echo "Gemini API key: $([ -n "$API_KEY" ] && echo 'set' || echo 'NOT SET - pixel fallback only')"
 
 # Start TOR for IP rotation (optional)
 echo "Starting TOR..."

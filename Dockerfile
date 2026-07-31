@@ -22,7 +22,7 @@ RUN pip install --no-cache-dir \
 RUN python -m playwright install chromium
 
 # Copy application files
-COPY app.py server.py captcha_solver.py database.py config.json requirements.txt ./
+COPY app.py server.py captcha_solver.py incognito_mail.py database.py config.json requirements.txt ./
 COPY torrc /etc/tor/torrc
 COPY start.sh .
 RUN chmod +x start.sh
