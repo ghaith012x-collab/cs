@@ -9,7 +9,7 @@ from typing import Optional
 from flask import Flask, jsonify, request, Response
 
 from server import DiscordAutomation
-from captcha_solver import NopeCHA
+from captcha_solver import NoCaptchaAI
 
 # ── Global state (shared between the Flask thread and the asyncio thread) ──
 
@@ -182,14 +182,11 @@ def handle_status():
     email = auto._email if auto else (load_config().get('email') or "")
     username = auto._username if auto else ""
     mail_provider = auto._mail.provider if auto and auto._mail else ""
-    stats = {}
-    if auto and hasattr(auto, '_vision'):
-        stats = auto._vision.get_stats()
-    nopecha = {"configured": False}
-    if auto and hasattr(auto, '_nopecha'):
-        nopecha = {
-            "configured": auto._nopecha.configured,
-            "stats": auto._nopecha.stats,
+    solver = {"configured": False, "stats": {}}
+    if auto and hasattr(auto, '_solver'):
+        solver = {
+            "configured": auto._solver.configured,
+            "stats": auto._solver.stats,
         }
     return jsonify({
         "running": _running,
@@ -197,8 +194,7 @@ def handle_status():
         "email": email,
         "username": username,
         "mail_provider": mail_provider,
-        "stats": stats,
-        "nopecha": nopecha,
+        "solver": solver,
     })
 
 
@@ -223,33 +219,24 @@ def handle_activity_log():
 
 @app.route('/api_status')
 def handle_api_status():
-    auto = _automation
-    key_set = False
-    if auto and hasattr(auto, '_vision'):
-        stats = auto._vision.get_stats()
-        key_set = bool(stats.get('api_key_set'))
-    nopecha_key_set = bool((os.environ.get("NOPECHA_KEY") or os.environ.get("NOPECHA_API_KEY") or "").strip())
+    solver_key_set = bool((os.environ.get("API_KEY") or "").strip())
     return jsonify({
-        "api_key_set": key_set,
-        "nopecha_key_set": nopecha_key_set,
+        "api_key_set": solver_key_set,
     })
 
 
 @app.route('/credits')
 def handle_credits():
-    """NopeCHA free-tier credit balance."""
-    n = NopeCHA()
-    if not n.configured:
+    """NoCaptchaAI account balance."""
+    s = NoCaptchaAI()
+    if not s.configured:
         return jsonify({"configured": False})
-    result = _run_in_loop(n.get_credit())
+    result = _run_in_loop(s.get_balance())
     if result is None:
         return jsonify({"configured": True, "error": "unreachable"})
     return jsonify({
         "configured": True,
-        "plan": result.get("plan", ""),
-        "credit": result.get("credit", 0),
-        "quota": result.get("quota", 0),
-        "ttl": result.get("ttl", 0),
+        "balance": result.get("balance", 0),
     })
 
 
@@ -273,16 +260,11 @@ def main() -> None:
     t.start()
 
     api_key = os.environ.get('API_KEY', '').strip()
-    nopecha_key = os.environ.get('NOPECHA_KEY', '') or os.environ.get('NOPECHA_API_KEY', '')
     print("=" * 56, flush=True)
-    if nopecha_key:
-        print("  NopeCHA solver: READY (100 free credits/day) — click Start", flush=True)
-    else:
-        print("  NopeCHA solver: NOPECHA_KEY not set — Gemini/pixel fallback", flush=True)
     if api_key:
-        print("  Gemini Vision API: ready (fallback solver)", flush=True)
+        print("  NoCaptchaAI solver: READY — click Start", flush=True)
     else:
-        print("  Gemini Vision API: not set (pixel fallback only)", flush=True)
+        print("  NoCaptchaAI solver: API_KEY not set — FunCAPTCHA offline solver only", flush=True)
     print("  Email: config.json or duckmail.sbs (auto)", flush=True)
     print(f"  Dashboard: http://0.0.0.0:{web_port}", flush=True)
     print("=" * 56, flush=True)
@@ -297,7 +279,7 @@ def main() -> None:
 
 DASHBOARD_HTML = """<!doctype html><html><head>
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>NopeCHA + Gemini — Discord GEN Control</title>
+<title>NoCaptchaAI — Discord GEN Control</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:system-ui;background:#0a0e1a;color:#e2e8f0;max-width:960px;margin:0 auto;padding:20px}
@@ -341,23 +323,23 @@ input[type=text],input[type=email]{background:#0f172a;border:1px solid #1e293b;c
 .mt8{margin-top:8px}
 </style></head><body>
 <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:4px">
-  <h1>⚡ NopeCHA + Gemini GEN</h1>
+  <h1>⚡ NoCaptchaAI GEN</h1>
   <div class="model-status" id="modelStatus">
     <span class="model-dot loading" id="modelDot"></span>
-    <span id="modelText">Checking solvers...</span>
+    <span id="modelText">Checking solver...</span>
   </div>
 </div>
-<p class="small">Discord account generator · NopeCHA token solving (primary) · Gemini Vision (fallback) · duckmail.sbs auto-verify</p>
+<p class="small">Discord account generator · NoCaptchaAI solving (primary) · offline FunCAPTCHA solver · duckmail.sbs auto-verify</p>
 
 <div class="card">
   <h3>🧪 Solver Status</h3>
   <div class="stats-grid">
-    <div class="stat-card"><div class="num cyan" id="statChallenges">0</div><div class="label">Challenges</div></div>
+    <div class="stat-card"><div class="num cyan" id="statChallenges">0</div><div class="label">Tasks</div></div>
     <div class="stat-card"><div class="num green" id="statSolved">0</div><div class="label">Solved</div></div>
     <div class="stat-card"><div class="num red" id="statFailed">0</div><div class="label">Failed</div></div>
-    <div class="stat-card"><div class="num cyan" id="statNopechaCalls">0</div><div class="label">NopeCHA Calls</div></div>
+    <div class="stat-card"><div class="num cyan" id="statSolverCalls">0</div><div class="label">API Calls</div></div>
   </div>
-  <div id="creditLine" class="small mt8">Free credits: --</div>
+  <div id="creditLine" class="small mt8">Balance: --</div>
 </div>
 
 <div class="card">
@@ -383,7 +365,7 @@ input[type=text],input[type=email]{background:#0f172a;border:1px solid #1e293b;c
     <img id="shot" alt="Live view" style="display:none">
   </div>
   <h2 style="margin-top:12px;font-size:12px;color:#94a3b8;font-weight:600">📝 Activity Log</h2>
-  <div id="log"><div class="entry"><span class="time">--:--:--</span><span class="info">Ready — set a NOPECHA_KEY to enable fast solving.</span></div></div>
+  <div id="log"><div class="entry"><span class="time">--:--:--</span><span class="info">Ready — set an API_KEY (nocaptchaai.com) to enable fast solving.</span></div></div>
 </div>
 
 <script>
@@ -423,12 +405,12 @@ async function refresh(){
       s.textContent='■ Stopped';
       s.style.color='#fca5a5';
     }
-    let stats=x.stats||{};
-    document.getElementById('statChallenges').textContent=stats.total_challenges||0;
-    document.getElementById('statSolved').textContent=stats.solved||0;
-    document.getElementById('statFailed').textContent=stats.failed||0;
-    let nop=x.nopecha||{};
-    document.getElementById('statNopechaCalls').textContent=(nop.stats&&nop.stats.calls)||0;
+    let sol=x.solver||{};
+    let st=sol.stats||{};
+    document.getElementById('statChallenges').textContent=st.calls||0;
+    document.getElementById('statSolved').textContent=st.ok||0;
+    document.getElementById('statFailed').textContent=st.failed||0;
+    document.getElementById('statSolverCalls').textContent=st.calls||0;
     let img=document.getElementById('shot');let ph=document.getElementById('camPlaceholder');
     if(x.screenshots&&x.screenshots>0){
       img.src='/latest?'+Date.now();
@@ -450,8 +432,8 @@ async function refreshLog(){
     for(let e of recent){
       let cls=e.level||'info';
       let msg=e.message||'';
-      if(msg.includes('[NopeCHA]')) cls='vision';
-      if(msg.includes('[Vision')||msg.includes('Gemini')) cls='vision';
+      if(msg.includes('[NoCaptchaAI]')) cls='vision';
+      if(msg.includes('[FunCAPTCHA]')||msg.includes('[Captcha]')) cls='vision';
       if(msg.includes('SOLVED')||msg.includes('✓')) cls='info';
       html+='<div class="entry"><span class="time">'+e.time+'</span><span class="'+cls+'">'+msg+'</span></div>';
     }
@@ -462,17 +444,13 @@ async function refreshLog(){
 async function checkModel(){
   try{
     let r=await api('/api_status');let st=await r.json();
-    if(st.nopecha_key_set){
+    if(st.api_key_set){
       document.getElementById('modelDot').className='model-dot loaded';
-      document.getElementById('modelText').textContent='NopeCHA ready ⚡ (100 free/day)';
-      document.getElementById('modelText').style.color='#22c55e';
-    } else if(st.api_key_set){
-      document.getElementById('modelDot').className='model-dot loaded';
-      document.getElementById('modelText').textContent='Gemini fallback ready ✅';
+      document.getElementById('modelText').textContent='NoCaptchaAI ready ⚡';
       document.getElementById('modelText').style.color='#22c55e';
     } else {
       document.getElementById('modelDot').className='model-dot error';
-      document.getElementById('modelText').textContent='No solver key — pixel fallback';
+      document.getElementById('modelText').textContent='No solver key — set API_KEY (nocaptchaai.com)';
       document.getElementById('modelText').style.color='#ef4444';
     }
   }catch(e){}
@@ -482,8 +460,9 @@ async function loadCredits(){
   try{
     let r=await api('/credits');let x=await r.json();
     if(x.configured){
-      let line='NopeCHA free credits: <b>'+x.credit+'</b>/'+x.quota+' remaining'+(x.plan?' · plan: '+x.plan:'');
-      document.getElementById('creditLine').innerHTML=line;
+      document.getElementById('creditLine').innerHTML='NoCaptchaAI balance: <b>$'+Number(x.balance||0).toFixed(2)+'</b>';
+    } else {
+      document.getElementById('creditLine').textContent='Set API_KEY (nocaptchaai.com) to see balance';
     }
   }catch(e){}
 }

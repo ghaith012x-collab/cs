@@ -1,9 +1,9 @@
 #!/bin/bash
 set -e
 
-echo "Starting Gemini Vision AI Captcha Solver..."
+echo "Starting NoCaptchaAI Captcha Solver..."
 echo "Email: auto-generated via duckmail.sbs (or config.json)"
-echo "Gemini API key: $([ -n "$API_KEY" ] && echo 'set' || echo 'NOT SET - pixel fallback only')"
+echo "NoCaptchaAI API key: $([ -n "$API_KEY" ] && echo 'set' || echo 'NOT SET - FunCAPTCHA offline solver only')"
 
 # Start TOR for IP rotation (optional)
 echo "Starting TOR..."
