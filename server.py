@@ -60,6 +60,16 @@ USER_AGENTS = [
 
 PAST_CAPTCHA_KEYWORDS = ['/channels', '/verify', '/welcome', '/login', '@me', 'discord.com/app']
 
+INIT_SCRIPT = """
+    Object.defineProperty(navigator, 'webdriver', { get: () => false, configurable: true });
+    Object.defineProperty(navigator, 'languages', { get: () => Object.freeze(['en-US', 'en']) });
+    Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8 });
+    Object.defineProperty(navigator, 'platform', { get: () => 'Win32' });
+    Object.defineProperty(navigator, 'vendor', { get: () => 'Google Inc.' });
+"""
+
+NAV_TIMEOUT_MS = 45000
+
 
 class DiscordAutomation:
     def __init__(self, headless: bool = False, email: str = ""):
@@ -68,6 +78,8 @@ class DiscordAutomation:
         self._browser = None
         self._context = None
         self._page = None
+        self._ua = ""
+        self._tor_enabled = False
         self._screenshots: list = []
         self._activity_log: list = []
         self._email = (email or os.environ.get("ACCOUNT_EMAIL", "")).strip()
@@ -112,28 +124,80 @@ class DiscordAutomation:
             '--disable-features=IsolateOrigins,site-per-process',
         ]
 
-        ua = random.choice(USER_AGENTS)
+        self._ua = random.choice(USER_AGENTS)
         self._browser = await self._playwright.chromium.launch(headless=self.headless, args=args)
 
+        self._tor_enabled = _tor_check()
         ctx_opts = {
             'viewport': {'width': 1920, 'height': 1080},
-            'user_agent': ua,
+            'user_agent': self._ua,
         }
-        if _tor_check():
+        if self._tor_enabled:
             ctx_opts['proxy'] = {'server': 'socks5://127.0.0.1:9050'}
 
         self._context = await self._browser.new_context(**ctx_opts)
-        self._log(f"User-Agent: {ua[:60]}...")
+        self._log(f"User-Agent: {self._ua[:60]}...")
 
-        await self._context.add_init_script("""
-            Object.defineProperty(navigator, 'webdriver', { get: () => false, configurable: true });
-            Object.defineProperty(navigator, 'languages', { get: () => Object.freeze(['en-US', 'en']) });
-            Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8 });
-            Object.defineProperty(navigator, 'platform', { get: () => 'Win32' });
-            Object.defineProperty(navigator, 'vendor', { get: () => 'Google Inc.' });
-        """)
-
+        await self._context.add_init_script(INIT_SCRIPT)
         self._page = await self._context.new_page()
+
+    async def _rebuild_context_without_tor(self) -> bool:
+        """Close the proxied context and reopen with a direct connection."""
+        try:
+            if self._page:
+                await self._page.close()
+            if self._context:
+                await self._context.close()
+        except Exception:
+            pass
+        try:
+            self._tor_enabled = False
+            self._context = await self._browser.new_context(
+                viewport={'width': 1920, 'height': 1080},
+                user_agent=self._ua,
+            )
+            await self._context.add_init_script(INIT_SCRIPT)
+            self._page = await self._context.new_page()
+            self._log("[Nav] Rebuilt browser context WITHOUT TOR proxy")
+            return True
+        except Exception as e:
+            self._log(f"[Nav] context rebuild failed: {e}", level="error")
+            return False
+
+    async def _goto_register(self) -> bool:
+        """Navigate to Discord registration with retries and TOR fallback.
+
+        Discord can hang under the TOR proxy or load slowly, so we use a long
+        timeout, keep going if the page is already usable, and drop the proxy
+        if navigation keeps failing.
+        """
+        for attempt in range(1, 4):
+            try:
+                self._log(f"[Nav] Opening https://discord.com/register (attempt {attempt})...")
+                await self._page.goto('https://discord.com/register',
+                                      wait_until='domcontentloaded',
+                                      timeout=NAV_TIMEOUT_MS)
+                self._log("[Nav] Page loaded")
+                return True
+            except Exception as e:
+                self._log(f"[Nav] goto attempt {attempt} error: {str(e)[:110]}", level="warn")
+                # A timeout may still leave us with a usable page
+                try:
+                    cnt = await asyncio.wait_for(
+                        self._page.locator('input[name="email"]').count(), timeout=3.0)
+                    if cnt > 0:
+                        self._log("[Nav] Page usable despite timeout - continuing")
+                        return True
+                except Exception:
+                    pass
+                if self._tor_enabled and attempt == 2:
+                    self._log("[Nav] TOR proxy likely blocking - switching to direct connection",
+                              level="warn")
+                    if not await self._rebuild_context_without_tor():
+                        return False
+                await asyncio.sleep(3)
+        self._log("[Nav] Could not reach Discord registration", level="error")
+        return False
 
     async def capture_screenshot(self) -> str:
         if not self._page:
@@ -169,8 +233,9 @@ class DiscordAutomation:
         self._log("=" * 40)
 
         try:
-            self._log("Navigating to Discord registration...")
-            await self._page.goto('https://discord.com/register', wait_until='domcontentloaded', timeout=20000)
+            if not await self._goto_register():
+                self._log("[FAIL] Could not navigate to Discord registration", level="error")
+                return False
             await asyncio.sleep(5)
             await self.capture_screenshot()
 
@@ -208,7 +273,7 @@ class DiscordAutomation:
                 self._log("[Mail] No verification link found yet - account may still be created", level="warn")
                 return False
             self._log(f"[Mail] Opening verification link: {link[:80]}...")
-            await self._page.goto(link, wait_until='domcontentloaded', timeout=20000)
+            await self._page.goto(link, wait_until='domcontentloaded', timeout=NAV_TIMEOUT_MS)
             await asyncio.sleep(5)
             # Discord shows a verification success page (or redirects to login)
             try:
