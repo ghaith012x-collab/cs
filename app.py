@@ -55,6 +55,15 @@ def _log(msg: str, level: str = "info"):
     print(f"[{level.upper()}] {msg}", flush=True)
 
 
+def _is_auto_email(email: str) -> bool:
+    """True when the saved email is empty or an auto-generated temp address."""
+    e = (email or "").lower().strip()
+    if not e:
+        return True
+    return (e.startswith("dm") or "@duckmail.sbs" in e
+            or "@web-library.net" in e or "@mail.tm" in e)
+
+
 # ── Automation control (runs inside the asyncio thread) ──
 
 async def _start_automation_async(config: dict) -> None:
@@ -62,9 +71,14 @@ async def _start_automation_async(config: dict) -> None:
     if _automation and _running:
         _log("Automation already running")
         return
+    # Always generate a fresh duckmail inbox per Start click. Only keep a
+    # deliberately custom (non-auto-generated) email from config.
+    email = (config.get('email', '') or '').strip()
+    if _is_auto_email(email):
+        email = ''
     _automation = DiscordAutomation(
         headless=config.get('headless', True),
-        email=config.get('email', ''),
+        email=email,
     )
     _running = True
     try:
@@ -101,24 +115,26 @@ async def _capture_periodic_screenshots(interval: int) -> None:
 
 
 async def _stop_automation_async() -> None:
-    global _running
+    global _running, _automation
     _running = False
     if _automation:
         try:
             await _automation.close()
         except Exception as e:
             _log(f"[STOP] close error (non-fatal): {e}")
+        _automation = None
     _log("Automation stopped")
 
 
 async def _cleanup_async() -> None:
-    global _running
+    global _running, _automation
     _running = False
     if _automation:
         try:
             await _automation.close()
         except Exception as e:
             _log(f"[CLEANUP] close error (non-fatal): {e}")
+        _automation = None
 
 
 def _run_in_loop(coro):
@@ -265,7 +281,7 @@ def main() -> None:
         print("  NoCaptchaAI solver: READY - click Start", flush=True)
     else:
         print("  NoCaptchaAI solver: API_KEY not set - FunCAPTCHA offline solver only", flush=True)
-    print("  Email: config.json or duckmail.sbs (auto)", flush=True)
+    print("  Email: fresh duckmail.sbs inbox on every Start (or custom config email)", flush=True)
     print(f"  Dashboard: http://0.0.0.0:{web_port}", flush=True)
     print("=" * 56, flush=True)
 
@@ -329,7 +345,7 @@ input[type=text],input[type=email]{background:#0f172a;border:1px solid #1e293b;c
     <span id="modelText">Checking solver...</span>
   </div>
 </div>
-<p class="small">Discord account generator | NoCaptchaAI solving (primary) | offline FunCAPTCHA solver | duckmail.sbs auto-verify</p>
+<p class="small">Discord account generator | NoCaptchaAI solving (primary) | offline FunCAPTCHA solver | fresh duckmail.sbs inbox per run</p>
 
 <div class="card">
   <h3>Solver Status</h3>
@@ -344,10 +360,11 @@ input[type=text],input[type=email]{background:#0f172a;border:1px solid #1e293b;c
 
 <div class="card">
   <h3>Signup Email</h3>
-  <p class="small">Leave empty to auto-generate via duckmail.sbs (mail.tm fallback). Set your own email to skip the mail service.</p>
+  <p class="small">Leave empty for a fresh duckmail.sbs inbox on every Start. Set a custom email to use it instead.</p>
   <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px;align-items:center">
     <input type="email" id="emailInput" placeholder="your@email.com (optional)">
     <button class="btn-primary" onclick="saveEmail()">Save</button>
+    <button class="btn-stop" onclick="clearEmail()">Clear (fresh each Start)</button>
   </div>
   <div id="emailSaved" class="small mt8" style="color:#22c55e;display:none">Email saved</div>
 </div>
@@ -388,6 +405,17 @@ async function saveEmail(){
     document.getElementById('emailSaved').style.display='block';
     setTimeout(()=>document.getElementById('emailSaved').style.display='none',2500);
     document.getElementById('emailLabel').textContent=email||'auto (duckmail.sbs)';
+  }
+}
+
+async function clearEmail(){
+  document.getElementById('emailInput').value='';
+  let r=await api('/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email:''})});
+  if(r.ok){
+    document.getElementById('emailSaved').style.display='block';
+    document.getElementById('emailSaved').textContent='Fresh duckmail inbox on next Start';
+    setTimeout(()=>{document.getElementById('emailSaved').style.display='none';document.getElementById('emailSaved').textContent='Email saved';},2500);
+    document.getElementById('emailLabel').textContent='auto (fresh each Start)';
   }
 }
 
@@ -471,7 +499,7 @@ async function loadEmail(){
   try{
     let r=await api('/config');let x=await r.json();
     if(x.email) document.getElementById('emailInput').value=x.email;
-    document.getElementById('emailLabel').textContent=x.email||'auto (duckmail.sbs)';
+    document.getElementById('emailLabel').textContent=x.email||'auto (fresh duckmail per Start)';
   }catch(e){}
 }
 
