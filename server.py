@@ -68,7 +68,7 @@ INIT_SCRIPT = """
     Object.defineProperty(navigator, 'vendor', { get: () => 'Google Inc.' });
 """
 
-NAV_TIMEOUT_MS = 45000
+NAV_TIMEOUT_MS = 30000
 
 
 class DiscordAutomation:
@@ -190,11 +190,13 @@ class DiscordAutomation:
                         return True
                 except Exception:
                     pass
-                if self._tor_enabled and attempt == 2:
-                    self._log("[Nav] TOR proxy likely blocking - switching to direct connection",
+                if self._tor_enabled:
+                    self._log("[Nav] TOR proxy blocking Discord - switching to direct connection",
                               level="warn")
                     if not await self._rebuild_context_without_tor():
                         return False
+                    # Direct retry immediately (no need to wait)
+                    continue
                 await asyncio.sleep(3)
         self._log("[Nav] Could not reach Discord registration", level="error")
         return False
