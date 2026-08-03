@@ -321,9 +321,8 @@ class DiscordAutomation:
             self._log(f"[Captcha] Sitekey not ready yet (attempt {attempts}) - "
                       f"retrying in {int(min(poll, remaining))}s", level="warn")
             await asyncio.sleep(min(poll, remaining))
-        self._log("[Captcha] Sitekey never appeared - using known Discord register sitekey",
-                  level="warn")
-        return "f5561ba9-8f1e-40ca-9b8b-a0bce722149b"
+        self._log("[Captcha] Sitekey never appeared after retries", level="error")
+        return ""
 
     async def _click_form_submit(self) -> bool:
         """Click Create Account / Continue after the captcha token is in place."""

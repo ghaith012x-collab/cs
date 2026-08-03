@@ -151,7 +151,23 @@ class NoCaptchaAI:
 # ── hCaptcha sitekey extraction (DOM, no extensions) ──────
 
 async def extract_hcaptcha_sitekey(page) -> str:
-    """Pull the hCaptcha sitekey from the iframe src or data-sitekey attrs."""
+    """Pull the hCaptcha sitekey from every possible source.
+
+    Discord sets a data-sitekey attribute immediately, so we check that first.
+    Fall back to iframe src hash fragments, a full iframe scan, and the
+    hcaptcha JS global object if it exists.
+    """
+    # Strategy 1: [data-sitekey] on the parent page (Discord always has this)
+    try:
+        sk = await page.evaluate("""() => {
+            const el = document.querySelector('[data-sitekey]');
+            return el ? el.getAttribute('data-sitekey') : '';
+        }""")
+        if sk and len(str(sk).strip()) > 5:
+            return str(sk).strip()
+    except Exception:
+        pass
+    # Strategy 2: sitekey in any hcaptcha iframe src hash fragment
     try:
         src = await page.evaluate("""() => {
             const f = document.querySelector('iframe[src*="hcaptcha.com"]');
@@ -162,10 +178,28 @@ async def extract_hcaptcha_sitekey(page) -> str:
             return m.group(1)
     except Exception:
         pass
+    # Strategy 3: scan every iframe for a sitekey in the src
+    try:
+        sitekey = await page.evaluate("""() => {
+            const iframes = document.querySelectorAll('iframe');
+            for (const f of iframes) {
+                const src = f.src || '';
+                const m = src.match(/sitekey=([^&#]+)/);
+                if (m) return m[1];
+            }
+            return '';
+        }""")
+        if sitekey:
+            return sitekey.strip()
+    except Exception:
+        pass
+    # Strategy 4: check the hcaptcha JS global object
     try:
         sk = await page.evaluate("""() => {
-            const el = document.querySelector('[data-sitekey]');
-            return el ? el.getAttribute('data-sitekey') : '';
+            if (window.hcaptcha && window.hcaptcha.getSitekey) {
+                try { return window.hcaptcha.getSitekey(); } catch(e) {}
+            }
+            return '';
         }""")
         if sk and len(str(sk).strip()) > 5:
             return str(sk).strip()
