@@ -11,19 +11,14 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Python dependencies
-RUN pip install --no-cache-dir \
-    playwright==1.40.0 \
-    aiohttp==3.9.1 \
-    Pillow==10.2.0 \
-    asyncpg>=0.29.0 \
-    requests>=2.31.0 \
-    flask>=3.0.0
+COPY requirements.txt ./
+RUN pip install --no-cache-dir -r requirements.txt
 
 # Install Chromium for Playwright
 RUN python -m playwright install chromium
 
 # Copy application files
-COPY app.py server.py captcha_solver.py incognito_mail.py database.py config.json requirements.txt ./
+COPY app.py server.py captcha_solver.py duckmail.py database.py config.json ./
 COPY torrc /etc/tor/torrc
 COPY start.sh .
 RUN chmod +x start.sh
