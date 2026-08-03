@@ -2,7 +2,7 @@
 set -e
 
 echo "Starting Gemini Vision AI Captcha Solver..."
-echo "Email: auto-generated via incognitomail.co (or config.json)"
+echo "Email: auto-generated via duckmail.sbs (or config.json)"
 echo "Gemini API key: $([ -n "$API_KEY" ] && echo 'set' || echo 'NOT SET - pixel fallback only')"
 
 # Start TOR for IP rotation (optional)

@@ -8,8 +8,13 @@ from typing import Optional
 
 from playwright.async_api import async_playwright
 
-from captcha_solver import VisionSolver
-from incognito_mail import IncognitoMail
+from captcha_solver import (
+    VisionSolver,
+    NopeCHA,
+    extract_hcaptcha_sitekey,
+    extract_funcaptcha_task,
+)
+from duckmail import TempMail
 
 
 # ── TOR Control ───────────────────────────────────────────
@@ -50,6 +55,8 @@ USER_AGENTS = [
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.0.0 Safari/537.36',
 ]
 
+PAST_CAPTCHA_KEYWORDS = ['/channels', '/verify', '/welcome', '/login', '@me', 'discord.com/app']
+
 
 class DiscordAutomation:
     def __init__(self, headless: bool = False, email: str = ""):
@@ -64,7 +71,8 @@ class DiscordAutomation:
         self._username = ""
         self._password = ""
         self._vision = VisionSolver(log=self._log)
-        self._mail: Optional[IncognitoMail] = None
+        self._nopecha = NopeCHA(log=self._log)
+        self._mail: Optional[TempMail] = None
 
     def _log(self, message: str, level: str = "info") -> None:
         import time as _time
@@ -140,11 +148,12 @@ class DiscordAutomation:
         if not self._page:
             await self.initialize()
 
-        # No hardcoded email — get a fresh incognitomail.co address if none configured.
+        # No hardcoded email — use the configured email, or fall back to a
+        # fresh duckmail.sbs address (mail.tm fallback) when none is provided.
         if not self._email:
-            self._log("[Mail] No email configured — creating incognitomail.co inbox...")
+            self._log("[Mail] No email configured — creating duckmail.sbs inbox...")
             try:
-                self._mail = IncognitoMail(self._context, log=self._log)
+                self._mail = TempMail(log=self._log)
                 self._email = await self._mail.create_inbox()
             except Exception as e:
                 self._log(f"[Mail] inbox creation error: {e}", level="error")
@@ -167,11 +176,11 @@ class DiscordAutomation:
             # Fill the form
             form_ok = await self._fill_registration_form()
             if form_ok:
-                self._log("✓ Form filled — now solving captcha with Gemini Vision...")
+                self._log("✓ Form filled — now solving captcha...")
                 success = await self._solve_hcaptcha_if_present()
                 if success:
                     self._log("✓ CAPTCHA SOLVED! Registration submitted.")
-                    # Best effort: complete email verification via incognitomail.co
+                    # Auto-verify: complete Discord email verification via duckmail.sbs
                     await self._verify_account_email()
                 else:
                     self._log("✗ Captcha solving failed", level="error")
@@ -193,13 +202,22 @@ class DiscordAutomation:
         if not self._mail:
             return False
         try:
-            link = await self._mail.wait_for_verification_link(timeout=180)
+            link = await self._mail.wait_for_verification_link(timeout=240)
             if not link:
                 self._log("[Mail] No verification link found yet — account may still be created", level="warn")
                 return False
             self._log(f"[Mail] Opening verification link: {link[:80]}...")
             await self._page.goto(link, wait_until='domcontentloaded', timeout=20000)
-            await asyncio.sleep(4)
+            await asyncio.sleep(5)
+            # Discord shows a verification success page (or redirects to login)
+            try:
+                page_text = await self._page.evaluate(
+                    "() => document.body.innerText.substring(0, 300)")
+            except Exception:
+                page_text = ""
+            if any(w in (page_text or "").lower()
+                   for w in ('verified', 'success', 'confirmation', 'you\'re all set')):
+                self._log("[Mail] ✓ Email verification completed")
             await self.capture_screenshot()
             self._log("[Mail] ✓ Verification link opened")
             return True
@@ -207,19 +225,80 @@ class DiscordAutomation:
             self._log(f"[Mail] verification error: {e}", level="warn")
             return False
 
-    async def _solve_hcaptcha_if_present(self) -> bool:
-        """Detect and solve hCaptcha using Gemini Vision API (no local models)."""
+    async def _past_captcha(self) -> bool:
+        """True when the page has moved past the captcha into Discord."""
         try:
-            self._log("[Vision AI] Checking for hCaptcha...")
+            cur_url = self._page.url
+            return any(k in cur_url for k in PAST_CAPTCHA_KEYWORDS)
+        except:
+            return False
 
-            # Check if we already navigated past captcha
-            try:
-                cur_url = self._page.url
-                if any(k in cur_url for k in ['/channels', '/verify', '/welcome', '/login', '@me']):
-                    self._log(f"[Vision AI] Already past captcha — at {cur_url[:50]}")
-                    return True
-            except:
-                pass
+    async def _set_hcaptcha_token(self, token: str) -> bool:
+        """Inject a solved hCaptcha token into the response textarea."""
+        try:
+            ok = await self._page.evaluate(f"""() => {{
+                const ta = document.querySelector('textarea[name="h-captcha-response"]');
+                if (ta) {{
+                    ta.value = '{token}';
+                    ta.dispatchEvent(new Event('input', {{bubbles: true}}));
+                    ta.dispatchEvent(new Event('change', {{bubbles: true}}));
+                    return true;
+                }}
+                return false;
+            }}""")
+            if ok:
+                self._log("[Captcha] ✓ Token injected into form")
+                return True
+        except Exception as e:
+            self._log(f"[Captcha] token inject error: {e}", level="warn")
+        return False
+
+    async def _click_form_submit(self) -> bool:
+        """Click Create Account / Continue after the captcha token is in place."""
+        try:
+            result = await self._page.evaluate("""() => {
+                const btns = document.querySelectorAll('button');
+                for (const btn of btns) {
+                    if (btn.offsetParent === null) continue;
+                    const t = btn.textContent.toLowerCase().trim();
+                    if (t.includes('create account') || t.includes('continue') || t.includes('sign up')) {
+                        btn.scrollIntoView({block: 'center'});
+                        btn.click();
+                        return t.slice(0, 24);
+                    }
+                }
+                const submit = document.querySelector('[type="submit"]');
+                if (submit && submit.offsetParent !== null) {
+                    submit.click();
+                    return 'submit_btn';
+                }
+                const form = document.querySelector('form');
+                if (form) {
+                    if (form.requestSubmit) { form.requestSubmit(); return 'requestSubmit'; }
+                    form.submit();
+                    return 'form_submit';
+                }
+                return '';
+            }""")
+            if result:
+                self._log(f"[Captcha] ✓ Submit clicked: {result}")
+                return True
+        except Exception as e:
+            self._log(f"[Captcha] submit click error: {e}", level="warn")
+        return False
+
+    async def _solve_hcaptcha_if_present(self) -> bool:
+        """Detect and solve hCaptcha.
+
+        Primary path: NopeCHA Token API (sitekey + pageurl -> token, ~15s).
+        Fallback:    Gemini Vision solver + pixel similarity (no NOPECHA_KEY).
+        """
+        try:
+            self._log("[Captcha] Checking for hCaptcha...")
+
+            if await self._past_captcha():
+                self._log(f"[Captcha] Already past captcha — at {self._page.url[:50]}")
+                return True
 
             # Find the captcha iframe
             iframe = None
@@ -232,48 +311,31 @@ class DiscordAutomation:
                 except:
                     iframe_el = None
                 if iframe_el:
-                    self._log(f"[Vision AI] hCaptcha iframe found (attempt {attempt+1})")
+                    self._log(f"[Captcha] hCaptcha iframe found (attempt {attempt+1})")
                     iframe = iframe_el
                     break
-                try:
-                    cur_url = self._page.url
-                    if any(k in cur_url for k in ['/channels', '/verify', '/welcome', '/login', '@me']):
-                        self._log(f"[Vision AI] Page navigated to {cur_url[:50]} — no captcha needed")
-                        return True
-                except:
-                    pass
+                if await self._past_captcha():
+                    self._log(f"[Captcha] Page navigated to {self._page.url[:50]} — no captcha needed")
+                    return True
                 await asyncio.sleep(0.5)
 
             if not iframe:
-                # No hCaptcha iframe — try detecting a drag/jigsaw captcha (Arkose Labs Funcaptcha)
+                # No hCaptcha iframe — check for FunCAPTCHA (Arkose) instead
                 try:
-                    cur_url = self._page.url
-                    page_text = await self._page.evaluate("() => document.body.innerText.substring(0, 500)")
-                    
-                    # Check if already past captcha
-                    if any(k in cur_url for k in ['/verify', '/welcome', '/channels', '@me', '/login', 'discord.com/app']):
-                        self._log(f"[Vision AI] Registration went through — at {cur_url[:50]}")
+                    if await self._past_captcha():
+                        self._log(f"[Captcha] Registration went through — at {self._page.url[:50]}")
                         return True
-                    
-                    # Check for captcha indicators
-                    has_captcha_text = 'captcha' in page_text.lower() or 'security' in page_text.lower()
-                    
+                    page_text = await self._page.evaluate(
+                        "() => document.body.innerText.substring(0, 500)")
+                    has_captcha_text = ('captcha' in page_text.lower()
+                                        or 'security' in page_text.lower()
+                                        or 'verify' in page_text.lower())
                     if has_captcha_text:
-                        self._log("[Vision AI] Page has captcha text — trying drag/jigsaw solver...")
-                        # Try the drag solver
-                        self._log("[Vision AI] Using drag/jigsaw puzzle solver...")
-                        drag_result = await self._vision.solve_drag_captcha(self._page, iframe=None)
-                        if drag_result:
-                            self._log("✓ Drag captcha solved!")
-                            return True
-                        else:
-                            self._log("[Vision AI] Drag solver failed — could not solve captcha", level="error")
-                            return False
-                    else:
-                        self._log(f"[Vision AI] No captcha indicators on page: {cur_url[:40]}")
+                        self._log("[Captcha] FunCAPTCHA detected — trying NopeCHA recognition...")
+                        return await self._solve_funcaptcha()
+                    self._log(f"[Captcha] No captcha indicators on page: {self._page.url[:40]}")
                 except Exception as e:
-                    self._log(f"[Vision AI] Captcha check error: {e}", level="warn")
-                
+                    self._log(f"[Captcha] Captcha check error: {e}", level="warn")
                 return True
 
             await asyncio.sleep(1)
@@ -282,7 +344,48 @@ class DiscordAutomation:
             except:
                 pass
 
-            # Solve using Gemini Vision API with timeout
+            # ── Path 1: NopeCHA Token API (fast + stealth) ──
+            if self._nopecha.configured:
+                sitekey = await extract_hcaptcha_sitekey(self._page)
+                if not sitekey:
+                    self._log("[NopeCHA] Could not extract sitekey from iframe", level="warn")
+                else:
+                    self._log(f"[NopeCHA] Submitting token job (sitekey {sitekey[:16]}...)")
+                    token = None
+                    for attempt in range(2):
+                        try:
+                            token = await asyncio.wait_for(
+                                self._nopecha.solve_hcaptcha_token(sitekey, self._page.url),
+                                timeout=110.0,
+                            )
+                        except asyncio.TimeoutError:
+                            token = None
+                            self._log("[NopeCHA] Token job timed out", level="warn")
+
+                        if not token:
+                            break
+
+                        await self._set_hcaptcha_token(token)
+                        await self._click_form_submit()
+                        await asyncio.sleep(3)
+                        if await self._past_captcha():
+                            self._log("[NopeCHA] ✓ Captcha passed — Discord accepted the token")
+                            return True
+                        # Token may have been accepted without navigation; re-check hcaptcha state
+                        token_check = await self._vision._try_extract_token(self._page)
+                        if token_check:
+                            self._log("[NopeCHA] ✓ Token verified on page")
+                            await self._click_form_submit()
+                            return True
+                        self._log(f"[NopeCHA] Token attempt {attempt+1} did not advance — retrying",
+                                  level="warn")
+                        await asyncio.sleep(2)
+                    if not token:
+                        self._log("[NopeCHA] Token solve failed — trying Gemini fallback", level="warn")
+            else:
+                self._log("[Captcha] No NOPECHA_KEY — using Gemini Vision fallback", level="warn")
+
+            # ── Path 2: Gemini Vision fallback ──
             self._log("[Vision AI] Solving with Gemini Vision API...")
 
             try:
@@ -292,7 +395,6 @@ class DiscordAutomation:
             except Exception:
                 self._log("[Vision AI] Gemini key check failed — continuing anyway", level="warn")
 
-            # The solver handles: click checkbox → extract text → classify tiles → click → verify
             try:
                 token = await asyncio.wait_for(
                     self._vision.solve_captcha(self._page, iframe),
@@ -313,16 +415,127 @@ class DiscordAutomation:
                     await self._vision.set_token_on_page(self._page, token)
                 except:
                     pass
+                await self._click_form_submit()
                 return True
             else:
                 self._log("[Vision AI] ✗ Could not solve captcha", level="error")
                 return False
 
         except Exception as e:
-            self._log(f"[Vision AI] Captcha flow error: {e}", level="error")
+            self._log(f"[Captcha] Flow error: {e}", level="error")
             import traceback
             traceback.print_exc()
             return False
+
+    async def _solve_funcaptcha(self) -> bool:
+        """Solve FunCAPTCHA tile challenges via NopeCHA recognition (fast, no drags)."""
+        try:
+            iframe = None
+            for sel in [
+                'iframe[src*="funcaptcha"]', 'iframe[src*="arkose"]',
+                'iframe[title*="captcha"]', 'iframe[src*="captcha"]',
+                '[id*="funcaptcha"]', '[class*="funcaptcha"]',
+                '[class*="Challenge"]',
+            ]:
+                try:
+                    el = await self._page.query_selector(sel)
+                    if el:
+                        iframe = el
+                        break
+                except:
+                    pass
+                await asyncio.sleep(0.3)
+
+            if not iframe:
+                self._log("[FunCAPTCHA] No challenge element found", level="warn")
+                return False
+
+            await asyncio.sleep(1)
+            try:
+                box = await iframe.bounding_box()
+            except:
+                box = None
+            if not box or box['width'] < 100:
+                self._log("[FunCAPTCHA] Could not get challenge box", level="warn")
+                return False
+
+            # Grab the challenge task text
+            task = await extract_funcaptcha_task(self._page, iframe)
+            if not task:
+                self._log("[FunCAPTCHA] No task text extracted", level="warn")
+
+            # Screenshot the challenge
+            try:
+                clip = {'x': box['x'], 'y': box['y'], 'width': box['width'], 'height': box['height']}
+                shot = await self._page.screenshot(clip=clip)
+            except:
+                shot = await iframe.screenshot()
+            if not shot or len(shot) < 1000:
+                self._log("[FunCAPTCHA] Screenshot too small", level="warn")
+                return False
+            shot_b64 = base64.b64encode(shot).decode('utf-8')
+
+            if self._nopecha.configured:
+                indices = await asyncio.wait_for(
+                    self._nopecha.solve_funcaptcha_tiles(task or "Select all matching tiles", shot_b64),
+                    timeout=60.0,
+                )
+                if indices:
+                    # 3x2 grid — click tile centers
+                    grid_cols, grid_rows = 3, 2
+                    tile_w = box['width'] / grid_cols
+                    tile_h = box['height'] / grid_rows
+                    for idx in indices:
+                        if idx >= grid_rows * grid_cols:
+                            continue
+                        row, col = divmod(idx, grid_cols)
+                        x = box['x'] + col * tile_w + tile_w / 2
+                        y = box['y'] + row * tile_h + tile_h / 2
+                        await self._page.mouse.click(x, y)
+                        await asyncio.sleep(0.3)
+                    self._log("[FunCAPTCHA] ✓ Tiles clicked — submitting")
+                    # Click the submit/verify button
+                    try:
+                        await iframe.evaluate("""() => {
+                            const btns = document.querySelectorAll('button, [role="button"]');
+                            for (const b of btns) {
+                                const t = (b.textContent || '').toLowerCase();
+                                if (b.offsetParent !== null &&
+                                    (t.includes('verify') || t.includes('submit') ||
+                                     t.includes('continue') || t.includes('done'))) {
+                                    b.click();
+                                    return;
+                                }
+                            }
+                        }""")
+                    except:
+                        pass
+                    await asyncio.sleep(2)
+                    fc_token = await self._page.evaluate("""() => {
+                        const ta = document.querySelector('textarea[name="fc-token"]');
+                        if (ta && ta.value && ta.value.length > 10) return ta.value;
+                        return '';
+                    }""")
+                    if fc_token:
+                        self._log("[FunCAPTCHA] ✓ SOLVED (fc-token present)")
+                        await self._click_form_submit()
+                        return True
+                    self._log("[FunCAPTCHA] Token not found after click — continuing anyway", level="warn")
+                    await self._click_form_submit()
+                    return True
+            else:
+                self._log("[FunCAPTCHA] No NOPECHA_KEY — using drag fallback", level="warn")
+
+            # Fallback: old drag/jigsaw solver
+            return await self._vision.solve_drag_captcha(self._page, iframe)
+
+        except asyncio.TimeoutError:
+            self._log("[FunCAPTCHA] Recognition timed out", level="warn")
+        except Exception as e:
+            self._log(f"[FunCAPTCHA] Error: {e}", level="error")
+            import traceback
+            traceback.print_exc()
+        return False
 
     async def _select_dob(self, label: str, option_text: str) -> bool:
         """Select DOB dropdown. Discord uses custom React-Select components."""

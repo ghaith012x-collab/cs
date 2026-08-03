@@ -1,17 +1,14 @@
 """
-CAPTCHA SOLVER — Gemini Vision API solver with pixel fallback.
-No local AI models (no CLIP, no torch, no YOLO). Visual understanding is
-delegated to Google AI Studio (Gemini) using the API_KEY environment
-variable. Pure pixel analysis is kept only as an offline fallback.
+CAPTCHA SOLVER — NopeCHA-first solver with Gemini Vision + pixel fallbacks.
+No local AI models (no CLIP, no torch, no YOLO).
 
 Strategy Flow (tried in order):
-  0. Click checkbox, wait for auto-pass (token appears without grid)
-  1. Extract challenge text — only proceed if it's a real grid instruction
-  2. Extract tiles from iframe (DOM first, then screenshot split)
-  3a. Gemini Vision: numbered contact sheet -> which tiles to click
-  3b. Pixel-similarity fallback (works without an API key)
-  4. Click matching tiles, submit, check for token
-  5. If all fails, return None (no crash)
+  NopeCHA Token API (primary): submit sitekey + pageurl -> hCaptcha token in
+      ~15s. Spoofs human activity (no email/phone verification needed).
+  NopeCHA Recognition API: FunCAPTCHA tile grids (task text + screenshot).
+  Gemini Vision API: numbered contact sheet -> which tiles to click
+      (used only when no NOPECHA_KEY is configured).
+  Pixel-similarity fallback: works with no API key at all.
 """
 
 import asyncio
@@ -123,6 +120,197 @@ class GeminiVision:
         self.stats["failed"] += 1
         self._log(f"[Gemini] All models failed — {last_err}", level="error")
         return None
+
+
+# ── NopeCHA Configuration ──────────────────────────────────
+
+NOPECHA_BASE = "https://api.nopecha.com"
+# Incomplete-job error code returned while a job is still being processed.
+NOPECHA_INCOMPLETE = 14
+
+
+def _nopecha_key() -> str:
+    """NopeCHA API key from the environment (NOPECHA_KEY, fallback NOPECHA_API_KEY)."""
+    return (os.environ.get("NOPECHA_KEY") or os.environ.get("NOPECHA_API_KEY") or "").strip()
+
+
+class NopeCHA:
+    """Async client for the NopeCHA API (token + recognition jobs).
+
+    Free tier gives 100 credits/day (hCaptcha token = 20 credits, recognition = 1).
+    Token jobs spoof human activity, so generated Discord accounts usually
+    skip email/phone verification entirely.
+
+    Auth: `Authorization: Basic <API_KEY>` (or a `key` field in body/query).
+    """
+
+    def __init__(self, log: Optional[Callable] = None):
+        self._log = log or (lambda msg, level="info": None)
+        self._key = _nopecha_key()
+        self.stats = {"calls": 0, "ok": 0, "failed": 0}
+
+    @property
+    def configured(self) -> bool:
+        return bool(self._key)
+
+    def _headers(self) -> dict:
+        return {
+            "Content-Type": "application/json",
+            "Authorization": f"Basic {self._key}",
+        }
+
+    async def _submit(self, endpoint: str, payload: dict,
+                      timeout: float = 30.0) -> Optional[str]:
+        """Submit a job. Returns the job id (string) or None on failure."""
+        if not self._key:
+            self._log("[NopeCHA] No NOPECHA_KEY set", level="warn")
+            return None
+        url = f"{NOPECHA_BASE}/v1/{endpoint}"
+        payload = dict(payload)
+        payload.setdefault("key", self._key)
+        self.stats["calls"] += 1
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    url, json=payload, headers=self._headers(),
+                    timeout=aiohttp.ClientTimeout(total=timeout)
+                ) as resp:
+                    data = await resp.json(content_type=None)
+                    job_id = data.get("data")
+                    if resp.status == 200 and isinstance(job_id, str) and job_id:
+                        self.stats["ok"] += 1
+                        return job_id
+                    self._log(f"[NopeCHA] submit {endpoint} failed: {resp.status} {data}",
+                              level="error")
+                    self.stats["failed"] += 1
+                    return None
+        except Exception as e:
+            self._log(f"[NopeCHA] submit {endpoint} error: {e}", level="error")
+            self.stats["failed"] += 1
+            return None
+
+    async def _retrieve(self, endpoint: str, job_id: str,
+                        timeout: float = 90.0, poll: float = 1.0) -> Optional[dict]:
+        """Poll a job until it resolves. Returns the full response body or None."""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            url = f"{NOPECHA_BASE}/v1/{endpoint}?id={job_id}&key={self._key}"
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(
+                        url, headers=self._headers(),
+                        timeout=aiohttp.ClientTimeout(total=15)
+                    ) as resp:
+                        data = await resp.json(content_type=None)
+                        if resp.status == 200 and data.get("data") not in (None, ""):
+                            self.stats["ok"] += 1
+                            return data
+                        err = data.get("error", {})
+                        code = err.get("code") if isinstance(err, dict) else None
+                        if code is not None and code != NOPECHA_INCOMPLETE:
+                            self._log(f"[NopeCHA] job {job_id} error code {code}: {err}",
+                                      level="error")
+                            self.stats["failed"] += 1
+                            return None
+            except Exception as e:
+                self._log(f"[NopeCHA] retrieve error: {e}", level="warn")
+            await asyncio.sleep(poll)
+        self._log(f"[NopeCHA] job {job_id} timed out after {int(timeout)}s", level="warn")
+        self.stats["failed"] += 1
+        return None
+
+    async def solve_hcaptcha_token(self, sitekey: str, pageurl: str,
+                                   timeout: float = 90.0) -> Optional[str]:
+        """Solve hCaptcha via the Token API. Returns the h-captcha-response token."""
+        self._log(f"[NopeCHA] hCaptcha token job (sitekey {sitekey[:12]}...)")
+        job_id = await self._submit("token/hcaptcha",
+                                    {"sitekey": sitekey, "url": pageurl})
+        if not job_id:
+            return None
+        data = await self._retrieve("token/hcaptcha", job_id, timeout=timeout)
+        token = data.get("data") if data else None
+        if isinstance(token, str) and len(token) > 20:
+            self._log(f"[NopeCHA] ✓ hCaptcha token obtained ({len(token)} chars)")
+            return token
+        self._log("[NopeCHA] hCaptcha token solve failed", level="error")
+        self.stats["failed"] += 1
+        return None
+
+    async def solve_funcaptcha_tiles(self, task: str, image_b64: str,
+                                     timeout: float = 45.0) -> Optional[list[int]]:
+        """Solve a FunCAPTCHA 3x2 tile challenge. Returns 0-based indices to click."""
+        self._log(f"[NopeCHA] FunCAPTCHA recognition job: {task[:60]}")
+        job_id = await self._submit("recognition/funcaptcha",
+                                    {"task": task, "image_data": [image_b64]})
+        if not job_id:
+            return None
+        data = await self._retrieve("recognition/funcaptcha", job_id, timeout=timeout)
+        flags = data.get("data") if data else None
+        if isinstance(flags, list) and flags:
+            indices = [i for i, f in enumerate(flags) if f]
+            self._log(f"[NopeCHA] ✓ FunCAPTCHA tiles: {indices}")
+            return indices
+        self._log("[NopeCHA] FunCAPTCHA solve failed", level="error")
+        self.stats["failed"] += 1
+        return None
+
+    async def get_credit(self) -> Optional[dict]:
+        """Fetch free-tier credit status (plan, credit remaining, ttl)."""
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    f"{NOPECHA_BASE}/v1/status?key={self._key}",
+                    headers=self._headers(),
+                    timeout=aiohttp.ClientTimeout(total=10)
+                ) as resp:
+                    return await resp.json(content_type=None)
+        except Exception:
+            return None
+
+
+# ── hCaptcha sitekey / params extraction (DOM, no extensions) ──
+
+async def extract_hcaptcha_sitekey(page) -> str:
+    """Pull the hCaptcha sitekey out of the captcha iframe src."""
+    try:
+        src = await page.evaluate("""() => {
+            const f = document.querySelector('iframe[src*="hcaptcha.com"]');
+            return f ? f.src : '';
+        }""")
+        m = re.search(r"sitekey=([^&]+)", src or "")
+        if m:
+            return m.group(1)
+    except Exception:
+        pass
+    return ""
+
+
+async def extract_funcaptcha_task(page, iframe=None) -> str:
+    """Read the FunCAPTCHA challenge instruction text from the page."""
+    try:
+        if iframe:
+            text = await iframe.evaluate("""() => {
+                const els = document.querySelectorAll('[class*="challenge"], [class*="prompt"], [class*="instruction"], [class*="header"], h1, h2, [class*="title"]');
+                for (const el of els) {
+                    const t = (el.textContent || '').trim();
+                    if (t.length > 6 && t.length < 200) return t;
+                }
+                return document.body ? document.body.innerText.slice(0, 300) : '';
+            }""")
+            if text and len(str(text).strip()) > 5:
+                return str(text).strip()
+    except Exception:
+        pass
+    try:
+        text = await page.evaluate("""() => {
+            const el = document.querySelector('[class*="challenge"], [class*="prompt"], [class*="instruction"], [class*="header"]');
+            return el ? el.textContent.trim().slice(0, 200) : '';
+        }""")
+        if text and len(str(text).strip()) > 5:
+            return str(text).strip()
+    except Exception:
+        pass
+    return ""
 
 
 # ── Pixel Similarity (offline fallback, no ML) ───────────

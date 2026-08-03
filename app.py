@@ -3,218 +3,292 @@ import base64
 import json
 import os
 import sys
+import threading
 from typing import Optional
 
-from aiohttp import web
+from flask import Flask, jsonify, request, Response
+
 from server import DiscordAutomation
-from captcha_solver import VisionSolver
+from captcha_solver import NopeCHA
+
+# ── Global state (shared between the Flask thread and the asyncio thread) ──
+
+_loop: Optional[asyncio.AbstractEventLoop] = None
+_automation: Optional[DiscordAutomation] = None
+_running = False
+_config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+
+DEFAULT_CONFIG = {
+    "email": "",
+    "headless": True,
+    "web_port": 8080,
+    "camera_interval": 3,
+    "run_automation": False,
+}
 
 
-class AppHost:
-    def __init__(self):
-        self._automation: Optional[DiscordAutomation] = None
-        self._running = False
-        self._config_path = "config.json"
-        self._web_port = 8080
-
-    def load_config(self, path: str = "config.json") -> dict:
-        default_config = {
-            "email": "",
-            "headless": True,
-            "web_port": 8080,
-            "run_automation": False,
-        }
-        if os.path.exists(path):
+def load_config(path: str = _config_path) -> dict:
+    config = dict(DEFAULT_CONFIG)
+    if os.path.exists(path):
+        try:
             with open(path, 'r') as f:
-                config = json.load(f)
-                for key, value in default_config.items():
-                    if key not in config:
-                        config[key] = value
-                return config
-        return default_config
+                saved = json.load(f)
+                for key, value in DEFAULT_CONFIG.items():
+                    if key in saved:
+                        config[key] = saved[key]
+        except Exception:
+            pass
+    # Environment always wins for the port
+    config["web_port"] = int(os.environ.get("PORT", config.get("web_port", 8080)))
+    return config
 
-    def save_config(self, config: dict, path: str = "config.json") -> None:
+
+def save_config(config: dict, path: str = _config_path) -> None:
+    try:
         with open(path, 'w') as f:
             json.dump(config, f, indent=2)
+    except Exception:
+        pass
 
-    def _log(self, msg: str, level: str = "info"):
-        print(f"[{level.upper()}] {msg}", flush=True)
 
-    async def start_automation(self) -> None:
-        if self._automation and self._running:
-            self._log("Automation already running")
-            return
-        config = self.load_config(self._config_path)
-        # Create fresh automation object (email comes from config or incognitomail.co)
-        self._automation = DiscordAutomation(
-            headless=config.get('headless', True),
-            email=config.get('email', ''),
+def _log(msg: str, level: str = "info"):
+    print(f"[{level.upper()}] {msg}", flush=True)
+
+
+# ── Automation control (runs inside the asyncio thread) ──
+
+async def _start_automation_async(config: dict) -> None:
+    global _automation, _running
+    if _automation and _running:
+        _log("Automation already running")
+        return
+    _automation = DiscordAutomation(
+        headless=config.get('headless', True),
+        email=config.get('email', ''),
+    )
+    _running = True
+    try:
+        await _automation.initialize()
+        screenshot_task = asyncio.create_task(
+            _capture_periodic_screenshots(config.get('camera_interval', 3))
         )
-        self._running = True
+        _log("Starting Discord signup "
+             "(email from config — auto-generated via duckmail.sbs if empty)")
+        success = await _automation.start_discord_signup()
+        if success:
+            _log("✓ Automation completed successfully")
+        else:
+            _log("✗ Automation failed", level="error")
+        screenshot_task.cancel()
+    except Exception as e:
+        _log(f"Error during automation: {e}", level="error")
+        import traceback
+        traceback.print_exc()
+    finally:
+        await _cleanup_async()
+
+
+async def _capture_periodic_screenshots(interval: int) -> None:
+    global _running
+    while _running:
         try:
-            await self._automation.initialize()
-            screenshot_task = asyncio.create_task(
-                self._capture_periodic_screenshots(config.get('camera_interval', 3))
-            )
-            self._log("Auto-starting signup (email auto-generated via incognitomail.co if not configured)")
-            success = await self._automation.start_discord_signup()
-            if success:
-                self._log("✓ Automation completed successfully")
-            else:
-                self._log("✗ Automation failed", level="error")
-            screenshot_task.cancel()
+            await _automation.capture_screenshot()
+            await asyncio.sleep(interval)
+        except asyncio.CancelledError:
+            break
+        except Exception:
+            await asyncio.sleep(interval)
+
+
+async def _stop_automation_async() -> None:
+    global _running
+    _running = False
+    if _automation:
+        try:
+            await _automation.close()
         except Exception as e:
-            self._log(f"Error during automation: {e}", level="error")
-            import traceback
-            traceback.print_exc()
-        finally:
-            await self._cleanup()
+            _log(f"[STOP] close error (non-fatal): {e}")
+    _log("Automation stopped")
 
-    async def _capture_periodic_screenshots(self, interval: int) -> None:
-        while self._running:
+
+async def _cleanup_async() -> None:
+    global _running
+    _running = False
+    if _automation:
+        try:
+            await _automation.close()
+        except Exception as e:
+            _log(f"[CLEANUP] close error (non-fatal): {e}")
+
+
+def _run_in_loop(coro):
+    """Schedule a coroutine on the background event loop and wait for it."""
+    if not _loop:
+        return None
+    fut = asyncio.run_coroutine_threadsafe(coro, _loop)
+    return fut.result(timeout=120)
+
+
+# ── Flask app ─────────────────────────────────────────────
+
+app = Flask(__name__)
+
+
+@app.route('/')
+def handle_root():
+    return Response(DASHBOARD_HTML, content_type='text/html')
+
+
+@app.route('/start', methods=['POST'])
+def handle_start():
+    if _running:
+        return "Already running"
+    config = load_config()
+    threading.Thread(
+        target=lambda: _run_in_loop(_start_automation_async(config)),
+        daemon=True,
+    ).start()
+    return "Started"
+
+
+@app.route('/stop', methods=['POST'])
+def handle_stop():
+    _run_in_loop(_stop_automation_async())
+    return "Stopped"
+
+
+@app.route('/config', methods=['GET', 'POST'])
+def handle_config():
+    if request.method == 'POST':
+        data = request.get_json(silent=True) or {}
+        config = load_config()
+        if 'email' in data:
+            config['email'] = str(data['email'] or '').strip()
+        if 'headless' in data:
+            config['headless'] = bool(data['headless'])
+        save_config(config)
+        return jsonify({"ok": True, "config": config})
+    config = load_config()
+    return jsonify({
+        "email": config.get('email', ''),
+        "headless": config.get('headless', True),
+    })
+
+
+@app.route('/status')
+def handle_status():
+    auto = _automation
+    screenshots = len(auto.get_screenshots()) if auto else 0
+    email = auto._email if auto else (load_config().get('email') or "")
+    username = auto._username if auto else ""
+    mail_provider = auto._mail.provider if auto and auto._mail else ""
+    stats = {}
+    if auto and hasattr(auto, '_vision'):
+        stats = auto._vision.get_stats()
+    nopecha = {"configured": False}
+    if auto and hasattr(auto, '_nopecha'):
+        nopecha = {
+            "configured": auto._nopecha.configured,
+            "stats": auto._nopecha.stats,
+        }
+    return jsonify({
+        "running": _running,
+        "screenshots": screenshots,
+        "email": email,
+        "username": username,
+        "mail_provider": mail_provider,
+        "stats": stats,
+        "nopecha": nopecha,
+    })
+
+
+@app.route('/latest')
+def handle_latest_screenshot():
+    if _automation:
+        b64 = _automation.get_latest_screenshot()
+        if b64:
             try:
-                await self._automation.capture_screenshot()
-                await asyncio.sleep(interval)
-            except asyncio.CancelledError:
-                break
-            except:
-                await asyncio.sleep(interval)
-
-    async def stop_automation(self) -> None:
-        self._running = False
-        if self._automation:
-            try:
-                await self._automation.close()
-            except Exception as e:
-                print(f"[STOP] close error (non-fatal): {e}", flush=True)
-            # Keep automation object for logs/screenshots
-            # Don't set to None: self._automation = None
-        self._log("Automation stopped")
-
-    async def _cleanup(self) -> None:
-        self._running = False
-        if self._automation:
-            try:
-                await self._automation.close()
-            except Exception as e:
-                print(f"[CLEANUP] close error (non-fatal): {e}", flush=True)
-            # Keep automation object so logs/screenshots survive
-            # self._automation = None  — DON'T SET TO NONE
-
-    async def start_web_server(self, port: int = 8080) -> None:
-        self._web_port = port
-
-        async def handle_status(request):
-            auto = self._automation
-            screenshots = len(auto.get_screenshots()) if auto else 0
-            email = auto._email if auto else ""
-            username = auto._username if auto else ""
-            # Check if there are stats from the solver
-            stats = {}
-            if auto and hasattr(auto, '_vision'):
-                stats = auto._vision.get_stats()
-            return web.json_response({
-                "running": self._running,
-                "screenshots": screenshots,
-                "email": email,
-                "username": username,
-                "stats": stats,
-            })
-
-        async def handle_latest_screenshot(request):
-            if self._automation:
-                b64 = self._automation.get_latest_screenshot()
-                if b64:
-                    try:
-                        return web.Response(body=base64.b64decode(b64), content_type='image/png')
-                    except:
-                        pass
-            return web.Response(status=404)
-
-        async def handle_activity_log(request):
-            auto = self._automation
-            if auto:
-                return web.json_response(auto.get_activity_log())
-            return web.json_response([])
-
-        async def handle_root(request):
-            return web.Response(text=DASHBOARD_HTML, content_type='text/html')
-
-        async def handle_api_status(request):
-            auto = self._automation
-            key_set = False
-            if auto and hasattr(auto, '_vision'):
-                stats = auto._vision.get_stats()
-                key_set = bool(stats.get('api_key_set'))
-            return web.json_response({"api_key_set": key_set})
-
-        async def handle_start(request):
-            if self._running:
-                return web.Response(text="Already running")
-            asyncio.create_task(self.start_automation())
-            return web.Response(text="Started")
-
-        async def handle_stop(request):
-            await self.stop_automation()
-            return web.Response(text="Stopped")
-
-        # Router
-        app = web.Application()
-        app.router.add_get('/', handle_root)
-        app.router.add_post('/start', handle_start)
-        app.router.add_post('/stop', handle_stop)
-        app.router.add_get('/status', handle_status)
-        app.router.add_get('/latest', handle_latest_screenshot)
-        app.router.add_get('/activity', handle_activity_log)
-        app.router.add_get('/api_status', handle_api_status)
-
-        runner = web.AppRunner(app)
-        await runner.setup()
-        site = web.TCPSite(runner, '0.0.0.0', port)
-        await site.start()
-        self._log(f"Web server on 0.0.0.0:{port}")
-        return runner
+                return Response(base64.b64decode(b64), content_type='image/png')
+            except Exception:
+                pass
+    return Response(status=404)
 
 
-async def main():
-    config = {}
-    try:
-        with open("config.json", 'r') as f:
-            config = json.load(f)
-    except:
-        pass
+@app.route('/activity')
+def handle_activity_log():
+    if _automation:
+        return jsonify(_automation.get_activity_log())
+    return jsonify([])
 
-    web_port = int(os.environ.get('PORT', config.get('web_port', 8080)))
-    host = AppHost()
 
-    # Auto-create config with email
-    if not os.path.exists("config.json"):
-        with open("config.json", 'w') as f:
-            json.dump({
-                "email": "",
-                "headless": True,
-                "web_port": web_port,
-                "run_automation": False,
-            }, f, indent=2)
-        print("Created config.json (email auto-generated via incognitomail.co)", flush=True)
+@app.route('/api_status')
+def handle_api_status():
+    auto = _automation
+    key_set = False
+    if auto and hasattr(auto, '_vision'):
+        stats = auto._vision.get_stats()
+        key_set = bool(stats.get('api_key_set'))
+    nopecha_key_set = bool((os.environ.get("NOPECHA_KEY") or os.environ.get("NOPECHA_API_KEY") or "").strip())
+    return jsonify({
+        "api_key_set": key_set,
+        "nopecha_key_set": nopecha_key_set,
+    })
 
-    await host.start_web_server(web_port)
 
-    # Manual start only — user clicks Start in dashboard
+@app.route('/credits')
+def handle_credits():
+    """NopeCHA free-tier credit balance."""
+    n = NopeCHA()
+    if not n.configured:
+        return jsonify({"configured": False})
+    result = _run_in_loop(n.get_credit())
+    if result is None:
+        return jsonify({"configured": True, "error": "unreachable"})
+    return jsonify({
+        "configured": True,
+        "plan": result.get("plan", ""),
+        "credit": result.get("credit", 0),
+        "quota": result.get("quota", 0),
+        "ttl": result.get("ttl", 0),
+    })
+
+
+# ── Background event loop ─────────────────────────────────
+
+def _run_event_loop(loop: asyncio.AbstractEventLoop) -> None:
+    asyncio.set_event_loop(loop)
+    loop.run_forever()
+
+
+def main() -> None:
+    global _loop
+    config = load_config()
+    web_port = config.get("web_port", 8080)
+
+    if not os.path.exists(_config_path):
+        save_config(config)
+
+    _loop = asyncio.new_event_loop()
+    t = threading.Thread(target=_run_event_loop, args=(_loop,), daemon=True)
+    t.start()
+
     api_key = os.environ.get('API_KEY', '').strip()
-    print("=" * 50, flush=True)
-    if api_key:
-        print("  Gemini Vision API ready — click Start in dashboard", flush=True)
+    nopecha_key = os.environ.get('NOPECHA_KEY', '') or os.environ.get('NOPECHA_API_KEY', '')
+    print("=" * 56, flush=True)
+    if nopecha_key:
+        print("  NopeCHA solver: READY (100 free credits/day) — click Start", flush=True)
     else:
-        print("  WARNING: API_KEY not set — Gemini disabled, pixel fallback only", flush=True)
-    print("  Email: auto-generated via incognitomail.co (or config.json)", flush=True)
-    print("=" * 50, flush=True)
+        print("  NopeCHA solver: NOPECHA_KEY not set — Gemini/pixel fallback", flush=True)
+    if api_key:
+        print("  Gemini Vision API: ready (fallback solver)", flush=True)
+    else:
+        print("  Gemini Vision API: not set (pixel fallback only)", flush=True)
+    print("  Email: config.json or duckmail.sbs (auto)", flush=True)
+    print(f"  Dashboard: http://0.0.0.0:{web_port}", flush=True)
+    print("=" * 56, flush=True)
 
-    try:
-        while True:
-            await asyncio.sleep(3600)
-    except asyncio.CancelledError:
-        pass
+    # Flask dev server on 0.0.0.0 — no debug/reloader (threads + asyncio don't mix with it)
+    app.run(host='0.0.0.0', port=web_port, debug=False, use_reloader=False, threaded=True)
 
 
 # ═══════════════════════════════════════════════════════════
@@ -223,7 +297,7 @@ async def main():
 
 DASHBOARD_HTML = """<!doctype html><html><head>
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Gemini Vision AI - Captcha Solver</title>
+<title>NopeCHA + Gemini — Discord GEN Control</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:system-ui;background:#0a0e1a;color:#e2e8f0;max-width:960px;margin:0 auto;padding:20px}
@@ -237,6 +311,7 @@ button{font-size:14px;padding:10px 18px;border-radius:9px;border:0;cursor:pointe
 .btn-primary:hover{background:#4f46e5}
 .btn-stop{background:#ef4444;color:white}
 .btn-stop:hover{background:#dc2626}
+input[type=text],input[type=email]{background:#0f172a;border:1px solid #1e293b;color:#e2e8f0;border-radius:8px;padding:9px 12px;font-size:14px;width:100%;max-width:420px}
 #status{margin:10px 0;color:#a7f3d0;font-size:14px;font-weight:500}
 .cam-wrap{background:#000;border-radius:12px;overflow:hidden;min-height:200px;position:relative}
 .cam-wrap img{width:100%;display:block;min-height:180px;object-fit:contain}
@@ -256,46 +331,59 @@ button{font-size:14px;padding:10px 18px;border-radius:9px;border:0;cursor:pointe
 .stat-card .num.green{color:#22c55e}
 .stat-card .num.red{color:#ef4444}
 .stat-card .label{font-size:11px;color:#64748b;text-transform:uppercase;margin-top:2px}
-.model-status{display:flex;align-items:center;gap:8px;padding:8px 12px;background:#0f172a;border-radius:8px;margin:8px 0}
+.model-status{display:flex;align-items:center;gap:8px;padding:8px 12px;background:#0f172a;border-radius:8px;margin:8px 0;font-size:13px}
 .model-dot{width:10px;height:10px;border-radius:50%;display:inline-block}
 .model-dot.loading{background:#f59e0b;animation:pulse 1s infinite}
 .model-dot.loaded{background:#22c55e}
 .model-dot.error{background:#ef4444}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
+.small{font-size:12px;color:#64748b}
+.mt8{margin-top:8px}
 </style></head><body>
 <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:4px">
-  <h1>✨ Gemini Vision AI</h1>
+  <h1>⚡ NopeCHA + Gemini GEN</h1>
   <div class="model-status" id="modelStatus">
     <span class="model-dot loading" id="modelDot"></span>
-    <span id="modelText" style="font-size:13px">Checking Gemini API key...</span>
+    <span id="modelText">Checking solvers...</span>
   </div>
 </div>
-<p><small>Gemini Vision API solver · No local AI models · Pixel fallback if no key</small></p>
+<p class="small">Discord account generator · NopeCHA token solving (primary) · Gemini Vision (fallback) · duckmail.sbs auto-verify</p>
 
 <div class="card">
-  <h3>📊 Solver Stats</h3>
+  <h3>🧪 Solver Status</h3>
   <div class="stats-grid">
     <div class="stat-card"><div class="num cyan" id="statChallenges">0</div><div class="label">Challenges</div></div>
     <div class="stat-card"><div class="num green" id="statSolved">0</div><div class="label">Solved</div></div>
     <div class="stat-card"><div class="num red" id="statFailed">0</div><div class="label">Failed</div></div>
-    <div class="stat-card"><div class="num cyan" id="statTiles">0</div><div class="label">Tiles Classified</div></div>
+    <div class="stat-card"><div class="num cyan" id="statNopechaCalls">0</div><div class="label">NopeCHA Calls</div></div>
   </div>
+  <div id="creditLine" class="small mt8">Free credits: --</div>
+</div>
+
+<div class="card">
+  <h3>📧 Signup Email</h3>
+  <p class="small">Leave empty to auto-generate via duckmail.sbs (mail.tm fallback). Set your own email to skip the mail service.</p>
+  <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px;align-items:center">
+    <input type="email" id="emailInput" placeholder="your@email.com (optional)">
+    <button class="btn-primary" onclick="saveEmail()">Save</button>
+  </div>
+  <div id="emailSaved" class="small mt8" style="color:#22c55e;display:none">✓ Email saved</div>
 </div>
 
 <div class="card">
   <h3>🤖 Discord Automation</h3>
-  <p style="font-size:13px;color:#94a3b8;margin-bottom:8px">Email: <strong id="emailLabel">auto (incognitomail.co)</strong> · Manual start</p>
+  <p class="small">Email: <strong id="emailLabel">loading...</strong></p>
   <div class="btn-group">
     <button class="btn-primary" onclick="start()">▶ Start</button>
     <button class="btn-stop" onclick="stop()">■ Stop</button>
   </div>
-  <div id="status">Starting...</div>
+  <div id="status">Idle</div>
   <div class="cam-wrap">
     <div class="cam-placeholder" id="camPlaceholder">Waiting for screenshot...</div>
     <img id="shot" alt="Live view" style="display:none">
   </div>
   <h2 style="margin-top:12px;font-size:12px;color:#94a3b8;font-weight:600">📝 Activity Log</h2>
-  <div id="log"><div class="entry"><span class="time">--:--:--</span><span class="info">Starting Gemini Vision AI...</span></div></div>
+  <div id="log"><div class="entry"><span class="time">--:--:--</span><span class="info">Ready — set a NOPECHA_KEY to enable fast solving.</span></div></div>
 </div>
 
 <script>
@@ -310,11 +398,24 @@ async function stop(){
   document.getElementById('status').textContent=await r.text();
 }
 
+async function saveEmail(){
+  let email=document.getElementById('emailInput').value.trim();
+  let r=await api('/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email})});
+  let x=await r.json();
+  if(x.ok){
+    document.getElementById('emailSaved').style.display='block';
+    setTimeout(()=>document.getElementById('emailSaved').style.display='none',2500);
+    document.getElementById('emailLabel').textContent=email||'auto (duckmail.sbs)';
+  }
+}
+
 async function refresh(){
   try{
     let r=await api('/status');let x=await r.json();
     let s=document.getElementById('status');
     if(x.email) document.getElementById('emailLabel').textContent=x.email;
+    if(x.mail_provider) document.getElementById('emailLabel').textContent+=' ('+x.mail_provider+')';
+    if(x.username) document.getElementById('emailLabel').textContent+=' · @'+x.username;
     if(x.running){
       s.textContent=x.screenshots?'▶ Running · '+x.screenshots+' screenshot(s)':'▶ Running';
       s.style.color='#a7f3d0';
@@ -322,6 +423,12 @@ async function refresh(){
       s.textContent='■ Stopped';
       s.style.color='#fca5a5';
     }
+    let stats=x.stats||{};
+    document.getElementById('statChallenges').textContent=stats.total_challenges||0;
+    document.getElementById('statSolved').textContent=stats.solved||0;
+    document.getElementById('statFailed').textContent=stats.failed||0;
+    let nop=x.nopecha||{};
+    document.getElementById('statNopechaCalls').textContent=(nop.stats&&nop.stats.calls)||0;
     let img=document.getElementById('shot');let ph=document.getElementById('camPlaceholder');
     if(x.screenshots&&x.screenshots>0){
       img.src='/latest?'+Date.now();
@@ -343,46 +450,63 @@ async function refreshLog(){
     for(let e of recent){
       let cls=e.level||'info';
       let msg=e.message||'';
+      if(msg.includes('[NopeCHA]')) cls='vision';
       if(msg.includes('[Vision')||msg.includes('Gemini')) cls='vision';
+      if(msg.includes('SOLVED')||msg.includes('✓')) cls='info';
       html+='<div class="entry"><span class="time">'+e.time+'</span><span class="'+cls+'">'+msg+'</span></div>';
     }
     document.getElementById('log').innerHTML=html;
-    // Check for success message
-    if(logs.some(l=>l.message&&l.message.includes('SOLVED'))) {
-      document.getElementById('status').textContent='✅ SOLVED!';
-      document.getElementById('status').style.color='#22c55e';
-    }
   }catch(e){}
 }
 
 async function checkModel(){
   try{
-    let r=await api('/status');let x=await r.json();
-    // Model status from activity log
-    let logR=await api('/activity');let logs=await logR.json();
-    try{
-      let r=await api('/api_status');let st=await r.json();
-      if(st.api_key_set){
-        document.getElementById('modelDot').className='model-dot loaded';
-        document.getElementById('modelText').textContent='Gemini API key set ✅';
-        document.getElementById('modelText').style.color='#22c55e';
-      } else {
-        document.getElementById('modelDot').className='model-dot error';
-        document.getElementById('modelText').textContent='No API_KEY — pixel fallback';
-        document.getElementById('modelText').style.color='#ef4444';
-      }
-    }catch(e){}
+    let r=await api('/api_status');let st=await r.json();
+    if(st.nopecha_key_set){
+      document.getElementById('modelDot').className='model-dot loaded';
+      document.getElementById('modelText').textContent='NopeCHA ready ⚡ (100 free/day)';
+      document.getElementById('modelText').style.color='#22c55e';
+    } else if(st.api_key_set){
+      document.getElementById('modelDot').className='model-dot loaded';
+      document.getElementById('modelText').textContent='Gemini fallback ready ✅';
+      document.getElementById('modelText').style.color='#22c55e';
+    } else {
+      document.getElementById('modelDot').className='model-dot error';
+      document.getElementById('modelText').textContent='No solver key — pixel fallback';
+      document.getElementById('modelText').style.color='#ef4444';
+    }
+  }catch(e){}
+}
+
+async function loadCredits(){
+  try{
+    let r=await api('/credits');let x=await r.json();
+    if(x.configured){
+      let line='NopeCHA free credits: <b>'+x.credit+'</b>/'+x.quota+' remaining'+(x.plan?' · plan: '+x.plan:'');
+      document.getElementById('creditLine').innerHTML=line;
+    }
+  }catch(e){}
+}
+
+async function loadEmail(){
+  try{
+    let r=await api('/config');let x=await r.json();
+    if(x.email) document.getElementById('emailInput').value=x.email;
+    document.getElementById('emailLabel').textContent=x.email||'auto (duckmail.sbs)';
   }catch(e){}
 }
 
 setInterval(refresh,3000);
 setInterval(refreshLog,2000);
 setInterval(checkModel,5000);
+setInterval(loadCredits,30000);
 refresh();
 refreshLog();
 checkModel();
+loadCredits();
+loadEmail();
 </script></body></html>"""
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()

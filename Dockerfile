@@ -16,7 +16,8 @@ RUN pip install --no-cache-dir \
     aiohttp==3.9.1 \
     Pillow==10.2.0 \
     asyncpg>=0.29.0 \
-    requests>=2.31.0
+    requests>=2.31.0 \
+    flask>=3.0.0
 
 # Install Chromium for Playwright
 RUN python -m playwright install chromium
