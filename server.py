@@ -319,13 +319,14 @@ class DiscordAutomation:
             self._log(f"[Captcha] Widget wait: {str(e)[:80]}", level="warn")
         return False
 
-    async def _extract_sitekey_with_retry(self, timeout: float = 20.0,
+    async def _extract_sitekey_with_retry(self, timeout: float = 15.0,
                                           poll: float = 3.0) -> str:
-        """Wait for the hCaptcha widget, polling for its sitekey.
+        """Extract the hCaptcha sitekey, polling until it is valid.
 
-        The captcha iframe mounts before its src URL carries the sitekey, so
-        extracting too early fails. Poll every `poll` seconds for up to
-        `timeout` seconds. Last resort: Discord's well-known register sitekey.
+        The captcha iframe mounts before its src carries the sitekey, so
+        extracting too early returns a partial/garbage value. Poll every
+        `poll` seconds for up to `timeout` seconds and only accept a
+        well-formed UUID sitekey (extraction is validated upstream).
         """
         deadline = time.time() + timeout
         attempts = 0
@@ -428,7 +429,16 @@ class DiscordAutomation:
                     self._log(f"[Captcha] Captcha check error: {e}", level="warn")
                 return True
 
-            await asyncio.sleep(1)
+            # Let the widget fully mount before touching it: the iframe appears
+            # before its src carries the sitekey, so a fixed 10s wait is the
+            # most reliable way to get a valid sitekey on the first try.
+            self._log("[Captcha] Widget detected - waiting 10s for full load...")
+            await asyncio.sleep(10)
+
+            if await self._past_captcha():
+                self._log(f"[Captcha] Page moved on during wait - at {self._page.url[:50]}")
+                return True
+
             try:
                 await self.capture_screenshot()
             except:
@@ -439,32 +449,32 @@ class DiscordAutomation:
                           "(set API_KEY to your nocaptchaai.com key)", level="error")
                 return False
 
-            # Wait for the hCaptcha widget to finish loading, then extract the
-            # sitekey. The iframe appears before its src carries the sitekey,
-            # so retry every 3s for up to 20s instead of failing immediately.
-            sitekey = await self._extract_sitekey_with_retry(timeout=20.0, poll=3.0)
+            sitekey = await self._extract_sitekey_with_retry(timeout=15.0, poll=3.0)
             if not sitekey:
                 self._log("[Captcha] Could not extract sitekey from iframe", level="error")
                 return False
 
-            # Wait for the hCaptcha widget to render inside the iframe
-            # (checkbox must be visible or NoCaptchaAI may not be able to solve)
+            # Ensure the checkbox is visible before solving (extra safety).
             await self._wait_for_hcaptcha_ready(iframe)
 
             self._log(f"[NoCaptchaAI] Solving hCaptcha (sitekey {sitekey[:16]}...)")
-            for attempt in range(3):
+            token = None
+            for attempt in range(1, 4):
                 try:
-                    token = await asyncio.wait_for(
-                        self._solver.solve_hcaptcha(sitekey, self._page.url),
-                        timeout=140.0,
-                    )
+                    token = await self._solver.solve_hcaptcha(sitekey, self._page.url)
                 except asyncio.TimeoutError:
                     token = None
-                    self._log("[NoCaptchaAI] Solve timed out", level="warn")
-                    if attempt < 2:
-                        self._log("[NoCaptchaAI] Creating a fresh solve task...")
+                    self._log(f"[NoCaptchaAI] Attempt {attempt} timed out", level="warn")
+                except Exception as e:
+                    token = None
+                    self._log(f"[NoCaptchaAI] Attempt {attempt} error: {e}", level="error")
 
                 if not token:
+                    if attempt < 3:
+                        self._log(f"[NoCaptchaAI] Attempt {attempt} failed - "
+                                  f"fresh task on attempt {attempt+1}/3...", level="warn")
+                        await asyncio.sleep(1)
+                        continue
                     break
 
                 await set_hcaptcha_token_on_page(self._page, token)
@@ -477,8 +487,9 @@ class DiscordAutomation:
                     self._log("[NoCaptchaAI] [OK] Token verified on page")
                     await self._click_form_submit()
                     return True
-                self._log(f"[NoCaptchaAI] Token attempt {attempt+1} did not advance - retrying",
+                self._log(f"[NoCaptchaAI] Token attempt {attempt} did not advance - retrying",
                           level="warn")
+                token = None
                 await asyncio.sleep(2)
 
             self._log("[NoCaptchaAI] [FAIL] Could not solve hCaptcha", level="error")

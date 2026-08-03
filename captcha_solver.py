@@ -47,6 +47,7 @@ class NoCaptchaAI:
         self._log = log or (lambda msg, level="info": None)
         self._key = _api_key()
         self.stats = {"calls": 0, "ok": 0, "failed": 0}
+        self._session: Optional[aiohttp.ClientSession] = None
 
     @property
     def configured(self) -> bool:
@@ -58,13 +59,16 @@ class NoCaptchaAI:
         body = dict(payload)
         body.setdefault("clientKey", self._key)
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    url, json=body,
-                    headers={"Content-Type": "application/json"},
-                    timeout=aiohttp.ClientTimeout(total=timeout),
-                ) as resp:
-                    return await resp.json(content_type=None)
+            # Reuse one session: a fresh TLS handshake per poll adds real
+            # latency to the getTaskResult loop.
+            if self._session is None or self._session.closed:
+                self._session = aiohttp.ClientSession()
+            async with self._session.post(
+                url, json=body,
+                headers={"Content-Type": "application/json"},
+                timeout=aiohttp.ClientTimeout(total=timeout),
+            ) as resp:
+                return await resp.json(content_type=None)
         except Exception as e:
             self._log(f"[NoCaptchaAI] {endpoint} error: {e}", level="error")
             return {}
@@ -99,9 +103,13 @@ class NoCaptchaAI:
         return data
 
     async def solve_hcaptcha(self, sitekey: str, pageurl: str,
-                             timeout: float = 120.0,
-                             poll: float = 2.0) -> Optional[str]:
-        """Solve hCaptcha. Returns the h-captcha-response token or None."""
+                             timeout: float = 85.0,
+                             poll: float = 1.0) -> Optional[str]:
+        """Solve hCaptcha. Returns the h-captcha-response token or None.
+
+        Polls every second and logs a heartbeat every 15s so a slow solve
+        never looks frozen. Most hCaptcha tokens solve in under 10s.
+        """
         self._log(f"[NoCaptchaAI] hCaptcha task (sitekey {sitekey[:12]}...)")
         task = {
             "type": "HCaptchaTaskProxyless",
@@ -112,8 +120,11 @@ class NoCaptchaAI:
         task_id = await self.create_task(task)
         if not task_id:
             return None
+        self._log(f"[NoCaptchaAI] Task created (id {task_id}) - polling for solution...")
 
-        deadline = time.time() + timeout
+        started = time.time()
+        deadline = started + timeout
+        last_heartbeat = started
         while time.time() < deadline:
             await asyncio.sleep(poll)
             result = await self.get_task_result(task_id)
@@ -126,7 +137,9 @@ class NoCaptchaAI:
                          or solution.get("token") or "")
                 if isinstance(token, str) and len(token) > 20:
                     self.stats["ok"] += 1
-                    self._log(f"[NoCaptchaAI] [OK] hCaptcha token ({len(token)} chars)")
+                    elapsed = int(time.time() - started)
+                    self._log(f"[NoCaptchaAI] [OK] hCaptcha token after {elapsed}s "
+                              f"({len(token)} chars)")
                     return token
                 self._log("[NoCaptchaAI] ready but empty solution", level="error")
                 self.stats["failed"] += 1
@@ -135,6 +148,10 @@ class NoCaptchaAI:
                 self._log(f"[NoCaptchaAI] task failed: {result}", level="error")
                 self.stats["failed"] += 1
                 return None
+            if time.time() - last_heartbeat >= 15:
+                last_heartbeat = time.time()
+                self._log(f"[NoCaptchaAI] Still solving (task {task_id}, "
+                          f"{int(time.time() - started)}s elapsed)...")
         self._log(f"[NoCaptchaAI] hCaptcha task timed out after {int(timeout)}s",
                   level="warn")
         self.stats["failed"] += 1
@@ -150,12 +167,30 @@ class NoCaptchaAI:
 
 # ── hCaptcha sitekey extraction (DOM, no extensions) ──────
 
+_SITEKEY_RE = re.compile(
+    r"^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$",
+    re.IGNORECASE,
+)
+
+
+def _is_valid_sitekey(value: str) -> bool:
+    """hCaptcha sitekeys are UUIDs - reject partial or garbage extractions.
+
+    A mid-load iframe src or an empty hash can produce values like 'a9b5fb0'
+    which would hang the solving API forever. Only full UUIDs are accepted.
+    """
+    v = (value or "").strip()
+    return bool(_SITEKEY_RE.match(v))
+
+
 async def extract_hcaptcha_sitekey(page) -> str:
     """Pull the hCaptcha sitekey from every possible source.
 
     Discord sets a data-sitekey attribute immediately, so we check that first.
     Fall back to iframe src hash fragments, a full iframe scan, and the
-    hcaptcha JS global object if it exists.
+    hcaptcha JS global object. Only well-formed UUID sitekeys are accepted -
+    partial/garbage extractions are skipped so a bad sitekey never reaches
+    the solving API.
     """
     # Strategy 1: [data-sitekey] on the parent page (Discord always has this)
     try:
@@ -163,7 +198,7 @@ async def extract_hcaptcha_sitekey(page) -> str:
             const el = document.querySelector('[data-sitekey]');
             return el ? el.getAttribute('data-sitekey') : '';
         }""")
-        if sk and len(str(sk).strip()) > 5:
+        if _is_valid_sitekey(str(sk)):
             return str(sk).strip()
     except Exception:
         pass
@@ -174,7 +209,7 @@ async def extract_hcaptcha_sitekey(page) -> str:
             return f ? f.src : '';
         }""")
         m = re.search(r"sitekey=([^&]+)", src or "")
-        if m:
+        if m and _is_valid_sitekey(m.group(1)):
             return m.group(1)
     except Exception:
         pass
@@ -189,7 +224,7 @@ async def extract_hcaptcha_sitekey(page) -> str:
             }
             return '';
         }""")
-        if sitekey:
+        if _is_valid_sitekey(sitekey):
             return sitekey.strip()
     except Exception:
         pass
@@ -201,7 +236,7 @@ async def extract_hcaptcha_sitekey(page) -> str:
             }
             return '';
         }""")
-        if sk and len(str(sk).strip()) > 5:
+        if _is_valid_sitekey(str(sk)):
             return str(sk).strip()
     except Exception:
         pass
