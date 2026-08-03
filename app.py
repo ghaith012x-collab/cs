@@ -73,12 +73,12 @@ async def _start_automation_async(config: dict) -> None:
             _capture_periodic_screenshots(config.get('camera_interval', 3))
         )
         _log("Starting Discord signup "
-             "(email from config — auto-generated via duckmail.sbs if empty)")
+             "(email from config - auto-generated via duckmail.sbs if empty)")
         success = await _automation.start_discord_signup()
         if success:
-            _log("✓ Automation completed successfully")
+            _log("[OK] Automation completed successfully")
         else:
-            _log("✗ Automation failed", level="error")
+            _log("[FAIL] Automation failed", level="error")
         screenshot_task.cancel()
     except Exception as e:
         _log(f"Error during automation: {e}", level="error")
@@ -262,9 +262,9 @@ def main() -> None:
     api_key = os.environ.get('API_KEY', '').strip()
     print("=" * 56, flush=True)
     if api_key:
-        print("  NoCaptchaAI solver: READY — click Start", flush=True)
+        print("  NoCaptchaAI solver: READY - click Start", flush=True)
     else:
-        print("  NoCaptchaAI solver: API_KEY not set — FunCAPTCHA offline solver only", flush=True)
+        print("  NoCaptchaAI solver: API_KEY not set - FunCAPTCHA offline solver only", flush=True)
     print("  Email: config.json or duckmail.sbs (auto)", flush=True)
     print(f"  Dashboard: http://0.0.0.0:{web_port}", flush=True)
     print("=" * 56, flush=True)
@@ -279,7 +279,7 @@ def main() -> None:
 
 DASHBOARD_HTML = """<!doctype html><html><head>
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>NoCaptchaAI — Discord GEN Control</title>
+<title>NoCaptchaAI - Discord GEN Control</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:system-ui;background:#0a0e1a;color:#e2e8f0;max-width:960px;margin:0 auto;padding:20px}
@@ -323,16 +323,16 @@ input[type=text],input[type=email]{background:#0f172a;border:1px solid #1e293b;c
 .mt8{margin-top:8px}
 </style></head><body>
 <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:4px">
-  <h1>⚡ NoCaptchaAI GEN</h1>
+  <h1>NoCaptchaAI GEN</h1>
   <div class="model-status" id="modelStatus">
     <span class="model-dot loading" id="modelDot"></span>
     <span id="modelText">Checking solver...</span>
   </div>
 </div>
-<p class="small">Discord account generator · NoCaptchaAI solving (primary) · offline FunCAPTCHA solver · duckmail.sbs auto-verify</p>
+<p class="small">Discord account generator | NoCaptchaAI solving (primary) | offline FunCAPTCHA solver | duckmail.sbs auto-verify</p>
 
 <div class="card">
-  <h3>🧪 Solver Status</h3>
+  <h3>Solver Status</h3>
   <div class="stats-grid">
     <div class="stat-card"><div class="num cyan" id="statChallenges">0</div><div class="label">Tasks</div></div>
     <div class="stat-card"><div class="num green" id="statSolved">0</div><div class="label">Solved</div></div>
@@ -343,29 +343,29 @@ input[type=text],input[type=email]{background:#0f172a;border:1px solid #1e293b;c
 </div>
 
 <div class="card">
-  <h3>📧 Signup Email</h3>
+  <h3>Signup Email</h3>
   <p class="small">Leave empty to auto-generate via duckmail.sbs (mail.tm fallback). Set your own email to skip the mail service.</p>
   <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px;align-items:center">
     <input type="email" id="emailInput" placeholder="your@email.com (optional)">
     <button class="btn-primary" onclick="saveEmail()">Save</button>
   </div>
-  <div id="emailSaved" class="small mt8" style="color:#22c55e;display:none">✓ Email saved</div>
+  <div id="emailSaved" class="small mt8" style="color:#22c55e;display:none">Email saved</div>
 </div>
 
 <div class="card">
-  <h3>🤖 Discord Automation</h3>
+  <h3>Discord Automation</h3>
   <p class="small">Email: <strong id="emailLabel">loading...</strong></p>
   <div class="btn-group">
-    <button class="btn-primary" onclick="start()">▶ Start</button>
-    <button class="btn-stop" onclick="stop()">■ Stop</button>
+    <button class="btn-primary" onclick="start()">Start</button>
+    <button class="btn-stop" onclick="stop()">Stop</button>
   </div>
   <div id="status">Idle</div>
   <div class="cam-wrap">
     <div class="cam-placeholder" id="camPlaceholder">Waiting for screenshot...</div>
     <img id="shot" alt="Live view" style="display:none">
   </div>
-  <h2 style="margin-top:12px;font-size:12px;color:#94a3b8;font-weight:600">📝 Activity Log</h2>
-  <div id="log"><div class="entry"><span class="time">--:--:--</span><span class="info">Ready — set an API_KEY (nocaptchaai.com) to enable fast solving.</span></div></div>
+  <h2 style="margin-top:12px;font-size:12px;color:#94a3b8;font-weight:600">Activity Log</h2>
+  <div id="log"><div class="entry"><span class="time">--:--:--</span><span class="info">Ready - set an API_KEY (nocaptchaai.com) to enable fast solving.</span></div></div>
 </div>
 
 <script>
@@ -397,12 +397,12 @@ async function refresh(){
     let s=document.getElementById('status');
     if(x.email) document.getElementById('emailLabel').textContent=x.email;
     if(x.mail_provider) document.getElementById('emailLabel').textContent+=' ('+x.mail_provider+')';
-    if(x.username) document.getElementById('emailLabel').textContent+=' · @'+x.username;
+    if(x.username) document.getElementById('emailLabel').textContent+=' @'+x.username;
     if(x.running){
-      s.textContent=x.screenshots?'▶ Running · '+x.screenshots+' screenshot(s)':'▶ Running';
+      s.textContent=x.screenshots?'> Running ('+x.screenshots+' screenshots)':'> Running';
       s.style.color='#a7f3d0';
     }else{
-      s.textContent='■ Stopped';
+      s.textContent='Stopped';
       s.style.color='#fca5a5';
     }
     let sol=x.solver||{};
@@ -434,7 +434,7 @@ async function refreshLog(){
       let msg=e.message||'';
       if(msg.includes('[NoCaptchaAI]')) cls='vision';
       if(msg.includes('[FunCAPTCHA]')||msg.includes('[Captcha]')) cls='vision';
-      if(msg.includes('SOLVED')||msg.includes('✓')) cls='info';
+      if(msg.includes('SOLVED')) cls='info';
       html+='<div class="entry"><span class="time">'+e.time+'</span><span class="'+cls+'">'+msg+'</span></div>';
     }
     document.getElementById('log').innerHTML=html;
@@ -446,11 +446,11 @@ async function checkModel(){
     let r=await api('/api_status');let st=await r.json();
     if(st.api_key_set){
       document.getElementById('modelDot').className='model-dot loaded';
-      document.getElementById('modelText').textContent='NoCaptchaAI ready ⚡';
+      document.getElementById('modelText').textContent='NoCaptchaAI ready';
       document.getElementById('modelText').style.color='#22c55e';
     } else {
       document.getElementById('modelDot').className='model-dot error';
-      document.getElementById('modelText').textContent='No solver key — set API_KEY (nocaptchaai.com)';
+      document.getElementById('modelText').textContent='No solver key - set API_KEY (nocaptchaai.com)';
       document.getElementById('modelText').style.color='#ef4444';
     }
   }catch(e){}

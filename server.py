@@ -4,6 +4,7 @@ import json
 import os
 import random
 import socket
+import time
 from typing import Optional
 
 from playwright.async_api import async_playwright
@@ -76,10 +77,9 @@ class DiscordAutomation:
         self._mail: Optional[TempMail] = None
 
     def _log(self, message: str, level: str = "info") -> None:
-        import time as _time
         entry = {
-            "time": _time.strftime("%H:%M:%S"),
-            "timestamp": _time.time(),
+            "time": time.strftime("%H:%M:%S"),
+            "timestamp": time.time(),
             "level": level,
             "message": message
         }
@@ -149,10 +149,10 @@ class DiscordAutomation:
         if not self._page:
             await self.initialize()
 
-        # No hardcoded email — use the configured email, or fall back to a
+        # No hardcoded email - use the configured email, or fall back to a
         # fresh duckmail.sbs address (mail.tm fallback) when none is provided.
         if not self._email:
-            self._log("[Mail] No email configured — creating duckmail.sbs inbox...")
+            self._log("[Mail] No email configured - creating duckmail.sbs inbox...")
             try:
                 self._mail = TempMail(log=self._log)
                 self._email = await self._mail.create_inbox()
@@ -161,7 +161,7 @@ class DiscordAutomation:
                 self._email = ""
 
         if not self._email:
-            self._log("✗ No email available — aborting signup", level="error")
+            self._log("[FAIL] No email available - aborting signup", level="error")
             return False
 
         self._log("=" * 40)
@@ -177,16 +177,16 @@ class DiscordAutomation:
             # Fill the form
             form_ok = await self._fill_registration_form()
             if form_ok:
-                self._log("✓ Form filled — now solving captcha...")
+                self._log("[OK] Form filled - now solving captcha...")
                 success = await self._solve_hcaptcha_if_present()
                 if success:
-                    self._log("✓ CAPTCHA SOLVED! Registration submitted.")
+                    self._log("[OK] CAPTCHA SOLVED! Registration submitted.")
                     # Auto-verify: complete Discord email verification via duckmail.sbs
                     await self._verify_account_email()
                 else:
-                    self._log("✗ Captcha solving failed", level="error")
+                    self._log("[FAIL] Captcha solving failed", level="error")
             else:
-                self._log("✗ Form filling failed", level="error")
+                self._log("[FAIL] Form filling failed", level="error")
                 success = False
 
         except Exception as e:
@@ -205,7 +205,7 @@ class DiscordAutomation:
         try:
             link = await self._mail.wait_for_verification_link(timeout=240)
             if not link:
-                self._log("[Mail] No verification link found yet — account may still be created", level="warn")
+                self._log("[Mail] No verification link found yet - account may still be created", level="warn")
                 return False
             self._log(f"[Mail] Opening verification link: {link[:80]}...")
             await self._page.goto(link, wait_until='domcontentloaded', timeout=20000)
@@ -218,9 +218,9 @@ class DiscordAutomation:
                 page_text = ""
             if any(w in (page_text or "").lower()
                    for w in ('verified', 'success', 'confirmation', 'you\'re all set')):
-                self._log("[Mail] ✓ Email verification completed")
+                self._log("[Mail] [OK] Email verification completed")
             await self.capture_screenshot()
-            self._log("[Mail] ✓ Verification link opened")
+            self._log("[Mail] [OK] Verification link opened")
             return True
         except Exception as e:
             self._log(f"[Mail] verification error: {e}", level="warn")
@@ -233,6 +233,32 @@ class DiscordAutomation:
             return any(k in cur_url for k in PAST_CAPTCHA_KEYWORDS)
         except:
             return False
+
+    async def _extract_sitekey_with_retry(self, timeout: float = 20.0,
+                                          poll: float = 3.0) -> str:
+        """Wait for the hCaptcha widget, polling for its sitekey.
+
+        The captcha iframe mounts before its src URL carries the sitekey, so
+        extracting too early fails. Poll every `poll` seconds for up to
+        `timeout` seconds. Last resort: Discord's well-known register sitekey.
+        """
+        deadline = time.time() + timeout
+        attempts = 0
+        while True:
+            attempts += 1
+            sitekey = await extract_hcaptcha_sitekey(self._page)
+            if sitekey:
+                self._log(f"[Captcha] Sitekey ready (attempt {attempts}): {sitekey[:16]}...")
+                return sitekey
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                break
+            self._log(f"[Captcha] Sitekey not ready yet (attempt {attempts}) - "
+                      f"retrying in {int(min(poll, remaining))}s", level="warn")
+            await asyncio.sleep(min(poll, remaining))
+        self._log("[Captcha] Sitekey never appeared - using known Discord register sitekey",
+                  level="warn")
+        return "f5561ba9-8f1e-40ca-9b8b-a0bce722149b"
 
     async def _click_form_submit(self) -> bool:
         """Click Create Account / Continue after the captcha token is in place."""
@@ -262,7 +288,7 @@ class DiscordAutomation:
                 return '';
             }""")
             if result:
-                self._log(f"[Captcha] ✓ Submit clicked: {result}")
+                self._log(f"[Captcha] [OK] Submit clicked: {result}")
                 return True
         except Exception as e:
             self._log(f"[Captcha] submit click error: {e}", level="warn")
@@ -277,7 +303,7 @@ class DiscordAutomation:
             self._log("[Captcha] Checking for hCaptcha...")
 
             if await self._past_captcha():
-                self._log(f"[Captcha] Already past captcha — at {self._page.url[:50]}")
+                self._log(f"[Captcha] Already past captcha - at {self._page.url[:50]}")
                 return True
 
             # Find the captcha iframe
@@ -295,15 +321,15 @@ class DiscordAutomation:
                     iframe = iframe_el
                     break
                 if await self._past_captcha():
-                    self._log(f"[Captcha] Page navigated to {self._page.url[:50]} — no captcha needed")
+                    self._log(f"[Captcha] Page navigated to {self._page.url[:50]} - no captcha needed")
                     return True
                 await asyncio.sleep(0.5)
 
             if not iframe:
-                # No hCaptcha iframe — check for FunCAPTCHA (Arkose) instead
+                # No hCaptcha iframe - check for FunCAPTCHA (Arkose) instead
                 try:
                     if await self._past_captcha():
-                        self._log(f"[Captcha] Registration went through — at {self._page.url[:50]}")
+                        self._log(f"[Captcha] Registration went through - at {self._page.url[:50]}")
                         return True
                     page_text = await self._page.evaluate(
                         "() => document.body.innerText.substring(0, 500)")
@@ -311,7 +337,7 @@ class DiscordAutomation:
                                         or 'security' in page_text.lower()
                                         or 'verify' in page_text.lower())
                     if has_captcha_text:
-                        self._log("[Captcha] FunCAPTCHA detected — pixel tile solver...")
+                        self._log("[Captcha] FunCAPTCHA detected - pixel tile solver...")
                         return await self._solve_funcaptcha()
                     self._log(f"[Captcha] No captcha indicators on page: {self._page.url[:40]}")
                 except Exception as e:
@@ -325,13 +351,16 @@ class DiscordAutomation:
                 pass
 
             if not self._solver.configured:
-                self._log("[Captcha] ✗ No API_KEY set — NoCaptchaAI unavailable "
+                self._log("[Captcha] [FAIL] No API_KEY set - NoCaptchaAI unavailable "
                           "(set API_KEY to your nocaptchaai.com key)", level="error")
                 return False
 
-            sitekey = await extract_hcaptcha_sitekey(self._page)
+            # Wait for the hCaptcha widget to finish loading, then extract the
+            # sitekey. The iframe appears before its src carries the sitekey,
+            # so retry every 3s for up to 20s instead of failing immediately.
+            sitekey = await self._extract_sitekey_with_retry(timeout=20.0, poll=3.0)
             if not sitekey:
-                self._log("[Captcha] Could not extract sitekey from iframe", level="warn")
+                self._log("[Captcha] Could not extract sitekey from iframe", level="error")
                 return False
 
             self._log(f"[NoCaptchaAI] Solving hCaptcha (sitekey {sitekey[:16]}...)")
@@ -352,17 +381,17 @@ class DiscordAutomation:
                 await self._click_form_submit()
                 await asyncio.sleep(3)
                 if await self._past_captcha():
-                    self._log("[NoCaptchaAI] ✓ Captcha passed — Discord accepted the token")
+                    self._log("[NoCaptchaAI] [OK] Captcha passed - Discord accepted the token")
                     return True
                 if await read_hcaptcha_token(self._page):
-                    self._log("[NoCaptchaAI] ✓ Token verified on page")
+                    self._log("[NoCaptchaAI] [OK] Token verified on page")
                     await self._click_form_submit()
                     return True
-                self._log(f"[NoCaptchaAI] Token attempt {attempt+1} did not advance — retrying",
+                self._log(f"[NoCaptchaAI] Token attempt {attempt+1} did not advance - retrying",
                           level="warn")
                 await asyncio.sleep(2)
 
-            self._log("[NoCaptchaAI] ✗ Could not solve hCaptcha", level="error")
+            self._log("[NoCaptchaAI] [FAIL] Could not solve hCaptcha", level="error")
             return False
 
         except Exception as e:
@@ -381,7 +410,7 @@ class DiscordAutomation:
             if solved:
                 await self._click_form_submit()
                 return True
-            self._log("[FunCAPTCHA] ✗ Could not solve challenge", level="error")
+            self._log("[FunCAPTCHA] [FAIL] Could not solve challenge", level="error")
             return False
         except Exception as e:
             self._log(f"[FunCAPTCHA] Error: {e}", level="error")
@@ -672,18 +701,18 @@ class DiscordAutomation:
                     return 'not_found';
                 }""")
                 if tos_checked and tos_checked != 'not_found':
-                    self._log(f"✓ ToS checked via JS: {tos_checked}")
+                    self._log(f"[OK] ToS checked via JS: {tos_checked}")
                 else:
-                    self._log("ToS checkbox not found by JS — proceeding")
+                    self._log("ToS checkbox not found by JS - proceeding")
                     tos_checked = False
             except Exception as e:
                 self._log(f"ToS JS evaluate error: {e}")
 
             if tos_checked:
-                self._log("✓ ToS checkbox checked")
+                self._log("[OK] ToS checkbox checked")
                 await asyncio.sleep(0.3)
             else:
-                self._log("No ToS checkbox found — proceeding anyway")
+                self._log("No ToS checkbox found - proceeding anyway")
 
             # ── Create Account Button (PURE JS evaluate) ────────
             self._log("Clicking Create Account...")
@@ -736,7 +765,7 @@ class DiscordAutomation:
                 }""")
                 if result and result != 'failed':
                     create_clicked = True
-                    self._log(f"✓ Account button clicked: {result}")
+                    self._log(f"[OK] Account button clicked: {result}")
                 else:
                     self._log("Could not find Create Account button via JS", level="warn")
                     # Last resort: Press Enter on password field
@@ -751,7 +780,7 @@ class DiscordAutomation:
                 self._log(f"Create Account JS error: {e}", level="warn")
 
             if create_clicked:
-                self._log("Create Account clicked — waiting...")
+                self._log("Create Account clicked - waiting...")
             else:
                 self._log("WARNING: Could not click Create Account!", level="error")
 
@@ -821,9 +850,9 @@ async def run_discord_automation():
         await bot.initialize()
         success = await bot.start_discord_signup()
         if success:
-            print("✓ Discord automation completed")
+            print("[OK] Discord automation completed")
         else:
-            print("✗ Discord automation failed")
+            print("[FAIL] Discord automation failed")
         await asyncio.sleep(5)
     finally:
         await bot.close()

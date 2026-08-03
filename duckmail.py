@@ -91,7 +91,7 @@ class TempMail:
         """
         if await self._create_on(DUCKMAIL_BASE, "duckmail", timeout):
             return self._address
-        self._log("[Mail] duckmail.sbs unavailable — falling back to mail.tm",
+        self._log("[Mail] duckmail.sbs unavailable - falling back to mail.tm",
                   level="warn")
         if await self._create_on(MAILTM_BASE, "mailtm", timeout):
             return self._address
@@ -105,7 +105,7 @@ class TempMail:
         """Poll the inbox until a matching message arrives, then return its
         Discord verification URL (or None on timeout)."""
         if not self._token:
-            self._log("[Mail] No inbox token — cannot poll", level="warn")
+            self._log("[Mail] No inbox token - cannot poll", level="warn")
             return None
         deadline = time.time() + timeout
         self._log(f"[Mail] Waiting for {keyword} verification email "
@@ -118,10 +118,10 @@ class TempMail:
                         continue
                     link = self._extract_verify_link(msg)
                     if link:
-                        self._log(f"[Mail] ✓ Verification link found: {link[:90]}...")
+                        self._log(f"[Mail] [OK] Verification link found: {link[:90]}...")
                         return link
                     self._log("[Mail] Matching message but no verify link in body "
-                              "— keeping polling", level="warn")
+                              "- keeping polling", level="warn")
             except Exception as e:
                 self._log(f"[Mail] poll error: {e}", level="warn")
                 # token may have expired — try to refresh once
@@ -170,11 +170,11 @@ class TempMail:
                 self._address = address
                 self._password = password
                 self._token = ""
-                self._log(f"[Mail] ✓ Inbox ready: {address} ({provider})")
+                self._log(f"[Mail] [OK] Inbox ready: {address} ({provider})")
                 await self._login()
                 return True
             if status == 422:
-                self._log(f"[Mail] {address} taken — retrying", level="warn")
+                self._log(f"[Mail] {address} taken - retrying", level="warn")
             else:
                 self._log(f"[Mail] {provider} create -> {status} "
                           f"{data.get('message', '')}", level="warn")

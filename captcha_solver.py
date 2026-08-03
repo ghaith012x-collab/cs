@@ -126,7 +126,7 @@ class NoCaptchaAI:
                          or solution.get("token") or "")
                 if isinstance(token, str) and len(token) > 20:
                     self.stats["ok"] += 1
-                    self._log(f"[NoCaptchaAI] ✓ hCaptcha token ({len(token)} chars)")
+                    self._log(f"[NoCaptchaAI] [OK] hCaptcha token ({len(token)} chars)")
                     return token
                 self._log("[NoCaptchaAI] ready but empty solution", level="error")
                 self.stats["failed"] += 1
@@ -151,7 +151,7 @@ class NoCaptchaAI:
 # ── hCaptcha sitekey extraction (DOM, no extensions) ──────
 
 async def extract_hcaptcha_sitekey(page) -> str:
-    """Pull the hCaptcha sitekey out of the captcha iframe src."""
+    """Pull the hCaptcha sitekey from the iframe src or data-sitekey attrs."""
     try:
         src = await page.evaluate("""() => {
             const f = document.querySelector('iframe[src*="hcaptcha.com"]');
@@ -160,6 +160,15 @@ async def extract_hcaptcha_sitekey(page) -> str:
         m = re.search(r"sitekey=([^&]+)", src or "")
         if m:
             return m.group(1)
+    except Exception:
+        pass
+    try:
+        sk = await page.evaluate("""() => {
+            const el = document.querySelector('[data-sitekey]');
+            return el ? el.getAttribute('data-sitekey') : '';
+        }""")
+        if sk and len(str(sk).strip()) > 5:
+            return str(sk).strip()
     except Exception:
         pass
     return ""
@@ -382,7 +391,7 @@ async def solve_funcaptcha_pixels(page, iframe=None,
             local = find_matching_tiles_by_similarity(sig_tiles)
             matching = [valid[i] for i in local] if local else []
             if not matching:
-                log("[FunCAPTCHA] No standout tiles — clicking all", level="warn")
+                log("[FunCAPTCHA] No standout tiles - clicking all", level="warn")
                 matching = valid
             for idx in matching:
                 b = tile_boxes[idx]
@@ -465,7 +474,7 @@ async def solve_funcaptcha_pixels(page, iframe=None,
         solved = ""
 
     if solved:
-        log(f"[FunCAPTCHA] ✓ SOLVED ({solved})")
+        log(f"[FunCAPTCHA] SOLVED ({solved})")
         return True
-    log("[FunCAPTCHA] No token after click — challenge may still be up", level="warn")
+    log("[FunCAPTCHA] No token after click - challenge may still be up", level="warn")
     return False
