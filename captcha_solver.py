@@ -99,7 +99,7 @@ class NoCaptchaAI:
         return data
 
     async def solve_hcaptcha(self, sitekey: str, pageurl: str,
-                             timeout: float = 90.0,
+                             timeout: float = 120.0,
                              poll: float = 2.0) -> Optional[str]:
         """Solve hCaptcha. Returns the h-captcha-response token or None."""
         self._log(f"[NoCaptchaAI] hCaptcha task (sitekey {sitekey[:12]}...)")

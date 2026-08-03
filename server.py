@@ -299,6 +299,24 @@ class DiscordAutomation:
         except:
             return False
 
+    async def _wait_for_hcaptcha_ready(self, iframe_element) -> bool:
+        """Wait until the hCaptcha widget inside the iframe is fully loaded.
+
+        The checkbox must be visible before external solvers can generate a
+        valid token. We access the iframe's content frame and wait for
+        '#checkbox' (hCaptcha's main element) to appear.
+        """
+        try:
+            frame = await iframe_element.content_frame()
+            if frame:
+                self._log("[Captcha] Waiting for hCaptcha widget to render...")
+                await frame.wait_for_selector('#checkbox', state='visible', timeout=20000)
+                self._log("[Captcha] hCaptcha widget ready (checkbox visible)")
+                return True
+        except Exception as e:
+            self._log(f"[Captcha] Widget wait: {str(e)[:80]}", level="warn")
+        return False
+
     async def _extract_sitekey_with_retry(self, timeout: float = 20.0,
                                           poll: float = 3.0) -> str:
         """Wait for the hCaptcha widget, polling for its sitekey.
@@ -427,16 +445,22 @@ class DiscordAutomation:
                 self._log("[Captcha] Could not extract sitekey from iframe", level="error")
                 return False
 
+            # Wait for the hCaptcha widget to render inside the iframe
+            # (checkbox must be visible or NoCaptchaAI may not be able to solve)
+            await self._wait_for_hcaptcha_ready(iframe)
+
             self._log(f"[NoCaptchaAI] Solving hCaptcha (sitekey {sitekey[:16]}...)")
             for attempt in range(3):
                 try:
                     token = await asyncio.wait_for(
                         self._solver.solve_hcaptcha(sitekey, self._page.url),
-                        timeout=100.0,
+                        timeout=140.0,
                     )
                 except asyncio.TimeoutError:
                     token = None
                     self._log("[NoCaptchaAI] Solve timed out", level="warn")
+                    if attempt < 2:
+                        self._log("[NoCaptchaAI] Creating a fresh solve task...")
 
                 if not token:
                     break
