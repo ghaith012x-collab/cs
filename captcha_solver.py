@@ -107,11 +107,14 @@ class NoCaptchaAI:
 
     async def solve_hcaptcha(self, sitekey: str, pageurl: str,
                              timeout: float = 85.0,
-                             poll: float = 1.0) -> Optional[str]:
+                             poll: float = 1.0,
+                             rqdata: Optional[str] = None) -> Optional[str]:
         """Solve hCaptcha. Returns the h-captcha-response token or None.
 
         Polls every second and logs a heartbeat every 15s so a slow solve
         never looks frozen. Most hCaptcha tokens solve in under 10s.
+        Discord uses ENTERPRISE hCaptcha: without rqdata the worker cannot
+        load the widget and the task hangs forever - pass rqdata when found.
         """
         self._log(f"[NoCaptchaAI] hCaptcha task (sitekey {sitekey[:12]}...)")
         task = {
@@ -120,6 +123,9 @@ class NoCaptchaAI:
             "websiteKey": sitekey,
             "userAgent": SOLVER_UA,
         }
+        if rqdata:
+            task["enterprisePayload"] = {"rqdata": rqdata}
+            self._log("[NoCaptchaAI] enterprise rqdata attached to task")
         task_id = await self.create_task(task)
         if not task_id:
             return None
@@ -241,6 +247,44 @@ async def extract_hcaptcha_sitekey(page) -> str:
         }""")
         if _is_valid_sitekey(str(sk)):
             return str(sk).strip()
+    except Exception:
+        pass
+    return ""
+
+
+async def extract_hcaptcha_rqdata(page) -> str:
+    """Pull the hCaptcha Enterprise rqdata value from the page (best effort).
+
+    Discord serves rqdata with the register-page config; API solvers need it
+    for enterprise hCaptcha (without it tasks hang forever). We scan DOM
+    attributes, inline scripts and the hcaptcha internal config. Returns ''
+    when it is not present.
+    """
+    try:
+        val = await page.evaluate("""() => {
+            const el = document.querySelector('[data-sitekey]');
+            if (el) {
+                const v = el.getAttribute('data-rqdata') || el.getAttribute('rqdata');
+                if (v && v.length > 8) return v;
+            }
+            for (const s of document.querySelectorAll('script')) {
+                const t = s.textContent || '';
+                const m = t.match(/"rqdata"\s*:\s*"([^"]{8,})"/) ||
+                          t.match(/'rqdata'\s*:\s*'([^']{8,})'/) ||
+                          t.match(/rqdata\s*[:=]\s*["']([^"']{8,})["']/);
+                if (m) return m[1];
+            }
+            try {
+                if (window.hcaptcha) {
+                    const s = JSON.stringify(window.hcaptcha._cfg || {});
+                    const m = s.match(/"rqdata"\s*:\s*"([^"]{8,})"/);
+                    if (m) return m[1];
+                }
+            } catch (e) {}
+            return '';
+        }""")
+        if val:
+            return str(val).strip()
     except Exception:
         pass
     return ""
@@ -737,23 +781,38 @@ async def _probe_drag_dom(iframe) -> dict:
         if not frame:
             return {}
         handle = await frame.evaluate("""() => {
+            const cands = [];
+            const ch = window.innerHeight || 400;
             for (const el of document.querySelectorAll('*')) {
                 if (el.children.length > 4) continue;
                 const cs = getComputedStyle(el);
                 const r = el.getBoundingClientRect();
-                if (r.width < 20 || r.width > 600 || r.height < 12 || r.height > 140) continue;
-                if (['grab', 'grabbing', 'move', 'ew-resize'].includes(cs.cursor)) {
-                    return {x: r.x + r.width / 2, y: r.y + r.height / 2};
-                }
+                if (r.width < 18 || r.width > 700 || r.height < 12 || r.height > 200) continue;
+                const isKnob = ['grab', 'grabbing', 'move', 'ew-resize', 'col-resize', 'pointer'].includes(cs.cursor) ||
+                               el.getAttribute('role') === 'slider' ||
+                               el.getAttribute('aria-valuenow') !== null;
+                if (!isKnob) continue;
+                cands.push({x: r.x + r.width / 2, y: r.y + r.height / 2, area: r.width * r.height, y0: r.y});
             }
-            return null;
+            if (!cands.length) return null;
+            // The slider handle sits in the lower part of the challenge - prefer
+            // the bottom-most knob-like element, then the smallest one.
+            const bottom = cands.filter(c => c.y0 > ch * 0.55);
+            const pool = bottom.length ? bottom : cands;
+            pool.sort((a, b) => b.y0 - a.y0 || a.area - b.area);
+            return {x: pool[0].x, y: pool[0].y};
         }""")
         area = await frame.evaluate("""() => {
-            const el = document.querySelector('canvas, img[src], [class*="puzzle"], [class*="task-image"]');
-            if (!el) return null;
-            const r = el.getBoundingClientRect();
-            if (r.width < 40 || r.height < 40) return null;
-            return {x: r.x, y: r.y, w: r.width, h: r.height};
+            let best = null, bestArea = 0;
+            for (const el of document.querySelectorAll('canvas, img[src], [class*="puzzle" i], [class*="task-image" i], [style*="background-image"]')) {
+                const r = el.getBoundingClientRect();
+                const a = r.width * r.height;
+                if (r.width >= 80 && r.height >= 80 && a > bestArea) {
+                    bestArea = a;
+                    best = {x: r.x, y: r.y, w: r.width, h: r.height};
+                }
+            }
+            return best;
         }""")
         return {"handle": handle, "area": area}
     except Exception:
@@ -777,6 +836,13 @@ async def solve_hcaptcha_drag(page, iframe, log=None,
 
         probe = await _probe_drag_dom(iframe)
         area = probe.get("area")
+        handle = probe.get("handle")
+        if not handle and not area:
+            # Nothing puzzle-like here (still loading / not a drag challenge).
+            # Fast-fail so the caller can fall back to the token API quickly.
+            log("[Drag] No slider handle or puzzle image found - not a drag puzzle",
+                level="warn")
+            return False
         if area and area.get("w", 0) >= 40:
             shot_box = {
                 'x': iframe_box['x'] + area['x'],
@@ -787,7 +853,6 @@ async def solve_hcaptcha_drag(page, iframe, log=None,
         else:
             shot_box = iframe_box
 
-        handle = probe.get("handle")
         if handle:
             hx = iframe_box['x'] + handle['x']
             hy = iframe_box['y'] + handle['y']

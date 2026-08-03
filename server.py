@@ -12,11 +12,13 @@ from playwright.async_api import async_playwright
 from captcha_solver import (
     NoCaptchaAI,
     extract_hcaptcha_sitekey,
+    extract_hcaptcha_rqdata,
     extract_funcaptcha_task,
     read_hcaptcha_token,
     set_hcaptcha_token_on_page,
     solve_funcaptcha_pixels,
     solve_hcaptcha_drag,
+    _probe_drag_dom,
 )
 from duckmail import TempMail
 
@@ -303,35 +305,47 @@ class DiscordAutomation:
             return False
 
     async def _detect_challenge_mode(self, iframe_element) -> str:
-        """Identify the hCaptcha state: 'checkbox', 'drag', or 'unknown'.
+        """Identify the hCaptcha state: 'checkbox' or 'drag'.
 
         A checkbox widget is solvable via the NoCaptchaAI token API. A drag
         puzzle (piece to position) must be solved in-browser with the mouse.
+        When there is no checkbox, an active challenge is showing - classify
+        it as a drag puzzle so the in-browser solver gets a chance (it
+        self-verifies and fast-fails back to the API if nothing is found).
         """
         try:
             frame = await iframe_element.content_frame()
             if not frame:
-                return "unknown"
+                return "drag"
             try:
-                await frame.wait_for_selector('#checkbox', state='visible', timeout=3000)
+                await frame.wait_for_selector('#checkbox', state='visible', timeout=1500)
                 return "checkbox"
             except Exception:
-                pass
-            drag = await frame.evaluate("""() => {
-                for (const el of document.querySelectorAll('*')) {
-                    if (el.children.length > 4) continue;
-                    const cs = getComputedStyle(el);
-                    const r = el.getBoundingClientRect();
-                    if (r.width < 20 || r.width > 600 || r.height < 12 || r.height > 140) continue;
-                    if (['grab', 'grabbing', 'move', 'ew-resize'].includes(cs.cursor)) {
-                        return true;
-                    }
-                }
-                return false;
-            }""")
-            return "drag" if drag else "unknown"
+                return "drag"
         except Exception:
-            return "unknown"
+            return "drag"
+
+    async def _try_solve_drag(self, iframe) -> Optional[bool]:
+        """Try the in-browser drag solver.
+
+        Returns True on a verified solve, False when a real drag puzzle was
+        found but could not be solved, and None when nothing puzzle-like was
+        present (widget still loading / not a drag challenge at all).
+        """
+        probe = await _probe_drag_dom(iframe)
+        if not probe.get("handle") and not probe.get("area"):
+            self._log("[Captcha] No puzzle found yet - will re-check after load",
+                      level="warn")
+            return None
+        solved = await solve_hcaptcha_drag(self._page, iframe, log=self._log)
+        if solved:
+            self._log("[Captcha] [OK] Drag puzzle solved!")
+            await self._click_form_submit()
+            await asyncio.sleep(3)
+            return True
+        self._log("[Captcha] Drag solve failed - falling back to NoCaptchaAI API",
+                  level="warn")
+        return False
 
     async def _extract_sitekey_with_retry(self, timeout: float = 15.0,
                                           poll: float = 3.0) -> str:
@@ -449,25 +463,21 @@ class DiscordAutomation:
             mode = await self._detect_challenge_mode(iframe)
             self._log(f"[Captcha] Challenge mode: {mode}")
 
+            drag_result = None
             if mode == "drag":
                 self._log("[Captcha] Drag puzzle detected - solving in-browser...")
-                solved = await solve_hcaptcha_drag(self._page, iframe, log=self._log)
-                if solved:
-                    self._log("[Captcha] [OK] Drag puzzle solved!")
-                    await self._click_form_submit()
-                    await asyncio.sleep(3)
+                drag_result = await self._try_solve_drag(iframe)
+                if drag_result is True:
                     return True
-                self._log("[Captcha] Drag solve failed - falling back to NoCaptchaAI API",
-                          level="warn")
 
             if not self._solver.configured:
                 self._log("[Captcha] [FAIL] No API_KEY set - NoCaptchaAI unavailable "
                           "(set API_KEY to your nocaptchaai.com key)", level="error")
                 return False
 
-            if mode != "drag":
-                # Freshly-mounted widget: let the sitekey settle before
-                # extraction (the iframe appears before its src carries it).
+            if mode != "drag" or drag_result is None:
+                # Freshly-mounted widget (or one still loading when the drag
+                # solver looked): let it settle before re-checking/extracting.
                 self._log("[Captcha] Widget detected - waiting 10s for full load...")
                 await asyncio.sleep(10)
 
@@ -480,16 +490,34 @@ class DiscordAutomation:
             except:
                 pass
 
+            # If the first attempt found nothing puzzle-like (widget was still
+            # loading) and it has since settled into a drag puzzle, try again
+            # instead of sending a doomed API task.
+            if drag_result is None and await self._detect_challenge_mode(iframe) == "drag":
+                self._log("[Captcha] Drag puzzle ready now - solving in-browser...")
+                if await self._try_solve_drag(iframe):
+                    return True
+
             sitekey = await self._extract_sitekey_with_retry(timeout=15.0, poll=3.0)
             if not sitekey:
                 self._log("[Captcha] Could not extract sitekey from iframe", level="error")
                 return False
 
+            # Discord uses ENTERPRISE hCaptcha: API tasks need the rqdata
+            # payload or they hang forever in "processing".
+            rqdata = await extract_hcaptcha_rqdata(self._page)
+            if rqdata:
+                self._log("[NoCaptchaAI] Enterprise rqdata found - attaching to task")
+            else:
+                self._log("[NoCaptchaAI] No rqdata found - enterprise solve may hang",
+                          level="warn")
+
             self._log(f"[NoCaptchaAI] Solving hCaptcha (sitekey {sitekey[:16]}...)")
             token = None
             for attempt in range(1, 4):
                 try:
-                    token = await self._solver.solve_hcaptcha(sitekey, self._page.url)
+                    token = await self._solver.solve_hcaptcha(sitekey, self._page.url,
+                                                              rqdata=rqdata)
                 except asyncio.TimeoutError:
                     token = None
                     self._log(f"[NoCaptchaAI] Attempt {attempt} timed out", level="warn")
