@@ -6,6 +6,8 @@ Strategy Flow:
   hCaptcha (Discord): NoCaptchaAI HCaptchaTaskProxyless token API —
       sitekey + pageurl -> hCaptcha token (typically < 5s).
       API key comes from the API_KEY environment variable.
+  hCaptcha drag puzzle: solved IN-BROWSER by dragging the slider (the token
+      APIs hang forever on this challenge type).
   FunCAPTCHA (Arkose): offline pixel-similarity tile solver (no API needed).
 
 NoCaptchaAI is 2captcha-compatible:
@@ -18,6 +20,7 @@ import asyncio
 import io
 import json
 import os
+import random
 import re
 import time
 from math import sqrt
@@ -547,3 +550,288 @@ async def solve_funcaptcha_pixels(page, iframe=None,
         return True
     log("[FunCAPTCHA] No token after click - challenge may still be up", level="warn")
     return False
+
+
+# ── hCaptcha puzzle (drag) in-browser solver ───────────────
+#
+# Discord sometimes shows hCaptcha's PUZZLE challenge: a scene image with a
+# cutout hole and a floating piece that you drag into place with a slider.
+# External token APIs often hang forever on this challenge type, so we solve
+# it directly in the browser: screenshot the puzzle, locate the piece/hole
+# outlines with edge analysis, then drag the slider until the challenge
+# passes. Never faked - success is verified against the real hCaptcha token.
+
+
+def _puzzle_edge_profile(img: Image.Image) -> list[float]:
+    """Column-wise edge strength for the puzzle band of a screenshot."""
+    gray = img.convert('L')
+    w, h = gray.size
+    px = gray.load()
+    best: list[float] = []
+    for band_top, band_bot in ((int(h * 0.08), int(h * 0.85)),
+                               (int(h * 0.05), int(h * 0.95))):
+        prof = [0.0] * w
+        for y in range(band_top, band_bot):
+            prev = px[0, y]
+            for x in range(1, w):
+                cur = px[x, y]
+                prof[x] += abs(cur - prev)
+                prev = cur
+        n = max(1, band_bot - band_top)
+        prof = [p / n for p in prof]
+        if not best or max(prof) > max(best):
+            best = prof
+    return best
+
+
+def _find_outline_pairs(img: Image.Image,
+                        max_pairs: int = 16) -> list[tuple]:
+    """Locate all plausible rectangular outline pairs (left, right, strength)
+    for the puzzle piece and its hole. Pure PIL edge analysis, O(w*h).
+
+    Thresholds relax in steps so faint hole outlines are still found on
+    noisy scene backgrounds. Returns the full candidate set (no dedupe) so
+    the caller can cluster by width and pick the piece/hole pair.
+    """
+    prof = _puzzle_edge_profile(img)
+    w = len(prof)
+    if w < 40:
+        return []
+    mean = sum(prof) / len(prof)
+    peaks = []
+    for threshold in (mean * 2.0 + 1.5, mean * 1.3 + 0.8, mean * 1.05 + 0.4):
+        found = []
+        for x in range(1, w - 1):
+            if prof[x] >= threshold and prof[x] >= prof[x - 1] and prof[x] >= prof[x + 1]:
+                found.append((x, prof[x]))
+        if len(found) >= 2:
+            peaks = found
+            break
+    if not peaks:
+        return []
+    peaks.sort(key=lambda p: -p[1])
+    kept = []
+    for x, s in peaks:
+        if all(abs(x - kx) > 3 for kx, _ in kept):
+            kept.append((x, s))
+        if len(kept) >= 12:
+            break
+    kept.sort()
+    min_w = int(w * 0.22)
+    max_w = int(w * 0.85)
+    pairs = []
+    for i in range(len(kept)):
+        for j in range(i + 1, len(kept)):
+            lx, ls = kept[i]
+            rx, rs = kept[j]
+            if min_w <= rx - lx <= max_w:
+                pairs.append((lx, rx, ls + rs))
+    pairs.sort(key=lambda p: -p[2])
+    return pairs[:max_pairs]
+
+
+def _puzzle_deltas(img: Image.Image) -> list[int]:
+    """Candidate horizontal drag distances (px), most likely first.
+
+    The piece and its hole have the SAME width (it is a cutout), so pairs are
+    clustered by width and the largest cluster is taken - it contains both the
+    piece and the hole. The strongest edge-separated pair in the cluster is
+    assumed to be the piece (brighter border + drop shadow), giving the
+    correct drag direction first; other assignments stay as fallbacks.
+    """
+    w = img.size[0]
+    pairs = _find_outline_pairs(img)
+    if len(pairs) < 2:
+        return []
+
+    # 1) Cluster pairs by similar width.
+    clusters = []
+    for p in pairs:
+        pw = p[1] - p[0]
+        for cl in clusters:
+            if abs(cl['w'] - pw) <= int(w * 0.05):
+                cl['pairs'].append(p)
+                n = len(cl['pairs'])
+                cl['w'] = (cl['w'] * (n - 1) + pw) / n
+                break
+        else:
+            clusters.append({'w': float(pw), 'pairs': [p]})
+    clusters.sort(key=lambda c: (-len(c['pairs']), -max(p[2] for p in c['pairs'])))
+    members = sorted(clusters[0]['pairs'], key=lambda p: -p[2])
+
+    # 2) From the cluster, keep the strongest pairs with separated edges.
+    keep = []
+    for p in members:
+        if all(abs(p[0] - k[0]) > 15 and abs(p[1] - k[1]) > 15 for k in keep):
+            keep.append(p)
+        if len(keep) >= 3:
+            break
+    if len(keep) < 2:
+        return []
+
+    # 3) Deltas between the kept outlines (piece assumed = strongest).
+    cands = []
+    for i in range(len(keep)):
+        for j in range(len(keep)):
+            if i == j:
+                continue
+            d = keep[j][0] - keep[i][0]
+            if d != 0 and abs(d) < w * 0.8:
+                cands.append((-keep[i][2], abs(d), d))
+    cands.sort()
+    seen, out = set(), []
+    for _s, _a, d in cands:
+        if d not in seen:
+            seen.add(d)
+            out.append(d)
+        if len(out) >= 5:
+            break
+    return out
+
+
+async def _drag_handle(page, start_x: float, start_y: float, delta: int,
+                       steps: int = 16) -> None:
+    """Humanized mouse drag on the slider handle."""
+    await page.mouse.move(start_x, start_y)
+    await asyncio.sleep(random.uniform(0.06, 0.14))
+    await page.mouse.down()
+    await asyncio.sleep(random.uniform(0.05, 0.10))
+    for i in range(1, steps + 1):
+        await page.mouse.move(
+            start_x + delta * i / steps,
+            start_y + random.uniform(-0.8, 0.8),
+            steps=2,
+        )
+        await asyncio.sleep(random.uniform(0.004, 0.02))
+    await asyncio.sleep(random.uniform(0.06, 0.14))
+    await page.mouse.up()
+
+
+async def _challenge_solved(page, iframe) -> bool:
+    """True once hCaptcha accepted the solve (token present / UI hidden)."""
+    try:
+        if await read_hcaptcha_token(page):
+            return True
+    except Exception:
+        pass
+    try:
+        frame = await iframe.content_frame()
+        if frame:
+            hidden = await frame.evaluate("""() => {
+                const chal = document.querySelector('[class*="challenge"], [class*="Challenge"]');
+                if (!chal) return false;
+                const cs = getComputedStyle(chal);
+                return cs.display === 'none' || cs.visibility === 'hidden';
+            }""")
+            if hidden:
+                return True
+    except Exception:
+        pass
+    return False
+
+
+async def _probe_drag_dom(iframe) -> dict:
+    """Find the slider handle (iframe-relative center) and puzzle area box."""
+    try:
+        frame = await iframe.content_frame()
+        if not frame:
+            return {}
+        handle = await frame.evaluate("""() => {
+            for (const el of document.querySelectorAll('*')) {
+                if (el.children.length > 4) continue;
+                const cs = getComputedStyle(el);
+                const r = el.getBoundingClientRect();
+                if (r.width < 20 || r.width > 600 || r.height < 12 || r.height > 140) continue;
+                if (['grab', 'grabbing', 'move', 'ew-resize'].includes(cs.cursor)) {
+                    return {x: r.x + r.width / 2, y: r.y + r.height / 2};
+                }
+            }
+            return null;
+        }""")
+        area = await frame.evaluate("""() => {
+            const el = document.querySelector('canvas, img[src], [class*="puzzle"], [class*="task-image"]');
+            if (!el) return null;
+            const r = el.getBoundingClientRect();
+            if (r.width < 40 || r.height < 40) return null;
+            return {x: r.x, y: r.y, w: r.width, h: r.height};
+        }""")
+        return {"handle": handle, "area": area}
+    except Exception:
+        return {}
+
+
+async def solve_hcaptcha_drag(page, iframe, log=None,
+                              max_attempts: int = 6) -> bool:
+    """Solve the hCaptcha puzzle drag challenge directly in the browser.
+
+    Screenshots the puzzle, computes the drag offset from the piece/hole
+    outlines, then drags the slider. Verified against the real token - no
+    faking. Returns True only when hCaptcha actually accepted the solve.
+    """
+    log = log or (lambda msg, level="info": None)
+    try:
+        iframe_box = await iframe.bounding_box()
+        if not iframe_box or iframe_box['width'] < 60 or iframe_box['height'] < 60:
+            log("[Drag] Challenge iframe too small to solve", level="error")
+            return False
+
+        probe = await _probe_drag_dom(iframe)
+        area = probe.get("area")
+        if area and area.get("w", 0) >= 40:
+            shot_box = {
+                'x': iframe_box['x'] + area['x'],
+                'y': iframe_box['y'] + area['y'],
+                'width': area['w'],
+                'height': area['h'],
+            }
+        else:
+            shot_box = iframe_box
+
+        handle = probe.get("handle")
+        if handle:
+            hx = iframe_box['x'] + handle['x']
+            hy = iframe_box['y'] + handle['y']
+        else:
+            hx = iframe_box['x'] + iframe_box['width'] * 0.85
+            hy = iframe_box['y'] + iframe_box['height'] * 0.85
+            log("[Drag] Slider handle not found - dragging from slider area", level="warn")
+
+        for attempt in range(1, max_attempts + 1):
+            shot = await page.screenshot(clip=shot_box)
+            img = Image.open(io.BytesIO(shot))
+            deltas = _puzzle_deltas(img)
+            if not deltas:
+                log(f"[Drag] Attempt {attempt}: no piece/hole outlines found - retrying",
+                    level="warn")
+                await asyncio.sleep(1.2)
+                continue
+            delta = deltas[0]
+            log(f"[Drag] Attempt {attempt}/{max_attempts}: offset {delta:+d}px "
+                f"(candidates {deltas})")
+            # Drag the estimate, then fine-tune around it: outline detection
+            # can land on the inner vs outer border edge (+/- a few px).
+            for adjust in (0, -4, 4):
+                d = delta + adjust
+                if d == 0:
+                    continue
+                await _drag_handle(page, hx, hy, d)
+                for check in range(2):
+                    await asyncio.sleep(1.0)
+                    if await _challenge_solved(page, iframe):
+                        log("[Drag] [OK] Puzzle solved - hCaptcha passed!")
+                        return True
+            log(f"[Drag] Attempt {attempt} did not pass - retrying", level="warn")
+            probe = await _probe_drag_dom(iframe)
+            handle = probe.get("handle")
+            if handle:
+                hx = iframe_box['x'] + handle['x']
+                hy = iframe_box['y'] + handle['y']
+            await asyncio.sleep(0.8)
+
+        log("[Drag] [FAIL] Could not solve puzzle after retries", level="error")
+        return False
+    except Exception as e:
+        log(f"[Drag] solver error: {e}", level="error")
+        import traceback
+        traceback.print_exc()
+        return False

@@ -16,6 +16,7 @@ from captcha_solver import (
     read_hcaptcha_token,
     set_hcaptcha_token_on_page,
     solve_funcaptcha_pixels,
+    solve_hcaptcha_drag,
 )
 from duckmail import TempMail
 
@@ -301,23 +302,36 @@ class DiscordAutomation:
         except:
             return False
 
-    async def _wait_for_hcaptcha_ready(self, iframe_element) -> bool:
-        """Wait until the hCaptcha widget inside the iframe is fully loaded.
+    async def _detect_challenge_mode(self, iframe_element) -> str:
+        """Identify the hCaptcha state: 'checkbox', 'drag', or 'unknown'.
 
-        The checkbox must be visible before external solvers can generate a
-        valid token. We access the iframe's content frame and wait for
-        '#checkbox' (hCaptcha's main element) to appear.
+        A checkbox widget is solvable via the NoCaptchaAI token API. A drag
+        puzzle (piece to position) must be solved in-browser with the mouse.
         """
         try:
             frame = await iframe_element.content_frame()
-            if frame:
-                self._log("[Captcha] Waiting for hCaptcha widget to render...")
-                await frame.wait_for_selector('#checkbox', state='visible', timeout=20000)
-                self._log("[Captcha] hCaptcha widget ready (checkbox visible)")
-                return True
-        except Exception as e:
-            self._log(f"[Captcha] Widget wait: {str(e)[:80]}", level="warn")
-        return False
+            if not frame:
+                return "unknown"
+            try:
+                await frame.wait_for_selector('#checkbox', state='visible', timeout=3000)
+                return "checkbox"
+            except Exception:
+                pass
+            drag = await frame.evaluate("""() => {
+                for (const el of document.querySelectorAll('*')) {
+                    if (el.children.length > 4) continue;
+                    const cs = getComputedStyle(el);
+                    const r = el.getBoundingClientRect();
+                    if (r.width < 20 || r.width > 600 || r.height < 12 || r.height > 140) continue;
+                    if (['grab', 'grabbing', 'move', 'ew-resize'].includes(cs.cursor)) {
+                        return true;
+                    }
+                }
+                return false;
+            }""")
+            return "drag" if drag else "unknown"
+        except Exception:
+            return "unknown"
 
     async def _extract_sitekey_with_retry(self, timeout: float = 15.0,
                                           poll: float = 3.0) -> str:
@@ -380,9 +394,10 @@ class DiscordAutomation:
         return False
 
     async def _solve_hcaptcha_if_present(self) -> bool:
-        """Detect and solve hCaptcha via NoCaptchaAI (nocaptchaai.com).
+        """Detect and solve the hCaptcha challenge.
 
-        Token API: sitekey + pageurl -> hCaptcha token (usually < 5s).
+        Drag puzzles are solved in-browser with real mouse movement. Checkbox
+        widgets are solved via the NoCaptchaAI token API (sitekey + pageurl).
         """
         try:
             self._log("[Captcha] Checking for hCaptcha...")
@@ -429,14 +444,35 @@ class DiscordAutomation:
                     self._log(f"[Captcha] Captcha check error: {e}", level="warn")
                 return True
 
-            # Let the widget fully mount before touching it: the iframe appears
-            # before its src carries the sitekey, so a fixed 10s wait is the
-            # most reliable way to get a valid sitekey on the first try.
-            self._log("[Captcha] Widget detected - waiting 10s for full load...")
-            await asyncio.sleep(10)
+            # Which challenge is showing? A checkbox widget is solvable via the
+            # NoCaptchaAI token API; a drag puzzle must be dragged in-browser.
+            mode = await self._detect_challenge_mode(iframe)
+            self._log(f"[Captcha] Challenge mode: {mode}")
+
+            if mode == "drag":
+                self._log("[Captcha] Drag puzzle detected - solving in-browser...")
+                solved = await solve_hcaptcha_drag(self._page, iframe, log=self._log)
+                if solved:
+                    self._log("[Captcha] [OK] Drag puzzle solved!")
+                    await self._click_form_submit()
+                    await asyncio.sleep(3)
+                    return True
+                self._log("[Captcha] Drag solve failed - falling back to NoCaptchaAI API",
+                          level="warn")
+
+            if not self._solver.configured:
+                self._log("[Captcha] [FAIL] No API_KEY set - NoCaptchaAI unavailable "
+                          "(set API_KEY to your nocaptchaai.com key)", level="error")
+                return False
+
+            if mode != "drag":
+                # Freshly-mounted widget: let the sitekey settle before
+                # extraction (the iframe appears before its src carries it).
+                self._log("[Captcha] Widget detected - waiting 10s for full load...")
+                await asyncio.sleep(10)
 
             if await self._past_captcha():
-                self._log(f"[Captcha] Page moved on during wait - at {self._page.url[:50]}")
+                self._log(f"[Captcha] Page moved on - at {self._page.url[:50]}")
                 return True
 
             try:
@@ -444,18 +480,10 @@ class DiscordAutomation:
             except:
                 pass
 
-            if not self._solver.configured:
-                self._log("[Captcha] [FAIL] No API_KEY set - NoCaptchaAI unavailable "
-                          "(set API_KEY to your nocaptchaai.com key)", level="error")
-                return False
-
             sitekey = await self._extract_sitekey_with_retry(timeout=15.0, poll=3.0)
             if not sitekey:
                 self._log("[Captcha] Could not extract sitekey from iframe", level="error")
                 return False
-
-            # Ensure the checkbox is visible before solving (extra safety).
-            await self._wait_for_hcaptcha_ready(iframe)
 
             self._log(f"[NoCaptchaAI] Solving hCaptcha (sitekey {sitekey[:16]}...)")
             token = None
