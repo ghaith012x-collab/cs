@@ -305,6 +305,8 @@ class HSWGenerator:
                 "args": [
                     "--no-sandbox", "--disable-dev-shm-usage",
                     "--disable-blink-features=AutomationControlled",
+                    # Disable CSP enforcement entirely so hsw.js WASM runs
+                    "--disable-web-security",
                     "--window-size=1920,1080",
                 ],
             }
@@ -327,11 +329,11 @@ class HSWGenerator:
 
         try:
             # Navigate to a BLANK page on the target host.
-            # Intercept the request and serve empty HTML so Discord's
-            # Content-Security-Policy (which blocks WebAssembly via
-            # 'unsafe-eval') never applies. hsw.js needs WASM.
+            # Intercept EVERY request (Discord redirects / → /login, so a
+            # single-path pattern misses) and serve empty HTML. Combined with
+            # --disable-web-security, this guarantees no CSP blocks hsw.js.
             await page.route(
-                f"https://{self.host}/",
+                "**/*",
                 lambda route: route.fulfill(
                     status=200,
                     content_type="text/html",
