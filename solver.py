@@ -326,7 +326,18 @@ class HSWGenerator:
         page = await self._context.new_page()
 
         try:
-            # Navigate to a blank page on the target host
+            # Navigate to a BLANK page on the target host.
+            # Intercept the request and serve empty HTML so Discord's
+            # Content-Security-Policy (which blocks WebAssembly via
+            # 'unsafe-eval') never applies. hsw.js needs WASM.
+            await page.route(
+                f"https://{self.host}/",
+                lambda route: route.fulfill(
+                    status=200,
+                    content_type="text/html",
+                    body="<html><head></head><body></body></html>",
+                ),
+            )
             await page.goto(f"https://{self.host}/", wait_until="domcontentloaded", timeout=10000)
 
             # Inject hsw.js
