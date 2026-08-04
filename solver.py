@@ -378,9 +378,19 @@ class TileClassifier:
             try:
                 import torch
                 from torchvision import models, transforms
+                raw = torch.load(model_path, map_location="cpu", weights_only=False)
+                # Support both raw state_dict and the mega-trainer's
+                # {"state_dict": ..., "classes": [...]} wrapped format
+                if isinstance(raw, dict) and "state_dict" in raw:
+                    state = raw["state_dict"]
+                    saved_classes = raw.get("classes")
+                    if saved_classes:
+                        self.CLASSES = list(saved_classes)
+                else:
+                    state = raw
                 self.model = models.resnet18(weights=None)
                 self.model.fc = torch.nn.Linear(self.model.fc.in_features, len(self.CLASSES))
-                self.model.load_state_dict(torch.load(model_path, map_location="cpu"))
+                self.model.load_state_dict(state)
                 self.model.eval()
                 self.transform = transforms.Compose([
                     transforms.Resize(256),
@@ -389,7 +399,7 @@ class TileClassifier:
                     transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
                 ])
                 self.use_model = True
-                print(f"  Loaded model from {model_path}")
+                print(f"  Loaded model from {model_path} ({len(self.CLASSES)} classes)")
             except Exception as e:
                 print(f"  Model load failed ({e}) — using heuristic fallback")
 
