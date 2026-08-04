@@ -27,7 +27,7 @@ from math import sqrt
 from typing import Callable, Optional
 
 import aiohttp
-from PIL import Image
+from PIL import Image, ImageChops
 
 NOCAPTCHAAI_BASE = "https://api.nocaptchaai.com"
 
@@ -269,15 +269,15 @@ async def extract_hcaptcha_rqdata(page) -> str:
             }
             for (const s of document.querySelectorAll('script')) {
                 const t = s.textContent || '';
-                const m = t.match(/"rqdata"\s*:\s*"([^"]{8,})"/) ||
-                          t.match(/'rqdata'\s*:\s*'([^']{8,})'/) ||
-                          t.match(/rqdata\s*[:=]\s*["']([^"']{8,})["']/);
+                const m = t.match(/"rqdata"\\s*:\\s*"([^"]{8,})"/) ||
+                          t.match(/'rqdata'\\s*:\\s*'([^']{8,})'/) ||
+                          t.match(/rqdata\\s*[:=]\\s*["']([^"']{8,})["']/);
                 if (m) return m[1];
             }
             try {
                 if (window.hcaptcha) {
                     const s = JSON.stringify(window.hcaptcha._cfg || {});
-                    const m = s.match(/"rqdata"\s*:\s*"([^"]{8,})"/);
+                    const m = s.match(/"rqdata"\\s*:\\s*"([^"]{8,})"/);
                     if (m) return m[1];
                 }
             } catch (e) {}
@@ -601,9 +601,11 @@ async def solve_funcaptcha_pixels(page, iframe=None,
 # Discord sometimes shows hCaptcha's PUZZLE challenge: a scene image with a
 # cutout hole and a floating piece that you drag into place with a slider.
 # External token APIs often hang forever on this challenge type, so we solve
-# it directly in the browser: screenshot the puzzle, locate the piece/hole
-# outlines with edge analysis, then drag the slider until the challenge
-# passes. Never faked - success is verified against the real hCaptcha token.
+# it directly in the browser: screenshot the puzzle, locate the piece with
+# edge analysis, then TEMPLATE-MATCH its pixels against the scene to find the
+# hole (the hole is an exact cutout of the piece pixels), and drag the slider
+# by the offset. Never faked - success is verified against the real hCaptcha
+# token.
 
 
 def _puzzle_edge_profile(img: Image.Image) -> list[float]:
@@ -733,6 +735,182 @@ def _puzzle_deltas(img: Image.Image) -> list[int]:
     return out
 
 
+def _find_piece_boxes(img: Image.Image, max_boxes: int = 4) -> list:
+    """Candidate puzzle-piece boxes (x, y, w, h) in image pixels.
+
+    The piece's hard border + drop shadow make its left/right edges the
+    strongest vertical edges in the scene, so we cluster strong edge columns
+    and pair them up. The piece can sit on either side of its slot, so up to
+    `max_boxes` pairs are returned (strongest first); the caller validates
+    each with template matching and keeps the best fit.
+    """
+    gray = img.convert('L')
+    w, h = gray.size
+    if w < 60 or h < 60:
+        return []
+    px = gray.load()
+
+    band_top = int(h * 0.08)
+    band_bot = int(h * 0.85)
+    prof = [0.0] * w
+    for y in range(band_top, band_bot):
+        prev = px[0, y]
+        for x in range(1, w):
+            cur = px[x, y]
+            prof[x] += abs(cur - prev)
+            prev = cur
+    n = max(1, band_bot - band_top)
+    prof = [p / n for p in prof]
+
+    mean = sum(prof) / len(prof)
+    thresh = max(mean * 2.0 + 1.0, 2.0)
+    peaks = []
+    for x in range(1, w - 1):
+        if prof[x] >= thresh and prof[x] >= prof[x - 1] and prof[x] >= prof[x + 1]:
+            peaks.append(x)
+    if len(peaks) < 2:
+        return []
+
+    clusters = []
+    for p in peaks:
+        if clusters and p - clusters[-1][-1] <= 5:
+            clusters[-1].append(p)
+        else:
+            clusters.append([p])
+    scored = []
+    for c in clusters:
+        center = c[len(c) // 2]
+        energy = sum(prof[x] for x in c)
+        scored.append((center, energy))
+
+    min_sep = int(w * 0.15)
+    pairs = []
+    for i in range(len(scored)):
+        for j in range(i + 1, len(scored)):
+            a, ea = scored[i]
+            b, eb = scored[j]
+            if a > b:
+                a, b = b, a
+            bw2 = b - a
+            if bw2 < min_sep or bw2 > int(w * 0.8):
+                continue
+            pairs.append((a, b, ea + eb))
+    pairs.sort(key=lambda t: -t[2])
+
+    boxes = []
+    for a, b, _s in pairs:
+        dup = False
+        for (bx, _by, bw_, _bh) in boxes:
+            if abs(a - bx) < 8 and abs(b - (bx + bw_)) < 8:
+                dup = True
+                break
+        if dup:
+            continue
+        pw = b - a
+        # Refine the piece's vertical extent with row edges inside its columns.
+        row_prof = []
+        for y in range(band_top, band_bot):
+            e = 0
+            for x in range(max(1, a), b):
+                e += abs(px[x, y] - px[x - 1, y])
+            row_prof.append(e)
+        # Rows inside the piece carry the left+right border edges ON TOP of the
+        # scene noise, so they sit above mean + 1.5*std (NOT mean*1.4, which is
+        # too high on busy scenes). Take the longest elevated run of >= 15 rows.
+        rmean = sum(row_prof) / max(1, len(row_prof))
+        rvar = sum((e - rmean) ** 2 for e in row_prof) / max(1, len(row_prof))
+        rstd = rvar ** 0.5
+        rthresh = rmean + 1.5 * rstd
+        best_run, cur_run = [], []
+        for i, e in enumerate(row_prof):
+            if e >= rthresh:
+                cur_run.append(i)
+            else:
+                if len(cur_run) > len(best_run):
+                    best_run = cur_run
+                cur_run = []
+        if len(cur_run) > len(best_run):
+            best_run = cur_run
+        y_top, y_bot = band_top, band_bot
+        if len(best_run) >= 15:
+            y_top = band_top + best_run[0]
+            y_bot = band_top + best_run[-1] + 1
+        ph = y_bot - y_top
+        if ph < 20:
+            y_top, ph = band_top, band_bot - band_top
+        boxes.append((a, y_top, pw, ph))
+        if len(boxes) >= max_boxes:
+            break
+    return boxes
+
+
+def _template_match_hole(img: Image.Image, piece_box: tuple,
+                         scale: int = 4) -> Optional[tuple]:
+    """Find the hole by template-matching the piece's interior pixels.
+
+    The hole is an exact cutout of the piece's pixels (same scene), so sliding
+    the piece template along the piece's row band and minimizing the pixel
+    difference locates it - even for wavy jigsaw edges that break pure
+    column-edge analysis. Returns (hole_left_x, match_score) in image pixels,
+    or None. The piece's own position is excluded from the search.
+    """
+    try:
+        x, y, w, h = piece_box
+        if w < 24 or h < 24:
+            return None
+        inset = max(2, int(min(w, h) * 0.06))
+        tpl = img.crop((x + inset, y + inset, x + w - inset, y + h - inset))
+        if tpl.width < 8 or tpl.height < 8:
+            return None
+
+        # Coarse pass on downscaled images (fast), then a fine pass at full res.
+        tw = max(6, tpl.width // scale)
+        th = max(6, tpl.height // scale)
+        tpl_s = tpl.convert('L').resize((tw, th), Image.BILINEAR)
+
+        band = img.crop((0, y + inset, img.width, y + h - inset))
+        bw = max(6, band.width // scale)
+        bh = max(6, band.height // scale)
+        band_s = band.convert('L').resize((bw, bh), Image.BILINEAR)
+        if bw - tw < 10:
+            return None
+
+        piece_cx_s = int(((x + inset) + (x + w - inset)) / 2 / scale)
+        best_score = float('inf')
+        best_x = None
+        for sx in range(0, bw - tw + 1):
+            if abs(sx + tw / 2 - piece_cx_s) < tw * 0.75:
+                continue  # skip the piece's own position
+            region = band_s.crop((sx, 0, sx + tw, th))
+            diff = ImageChops.difference(region, tpl_s)
+            score = sum(diff.getdata()) / (tw * th)
+            if score < best_score:
+                best_score = score
+                best_x = sx
+        if best_x is None:
+            return None
+        coarse = best_x * scale
+
+        # Fine pass at full resolution around the coarse position.
+        tpl_f = tpl.convert('L')
+        band_f = band.convert('L')
+        twf, thf = tpl_f.size
+        best_f = None
+        lo = max(0, coarse - scale * 2)
+        hi = min(band_f.width - twf, coarse + scale * 2)
+        for fx in range(lo, hi + 1):
+            region = band_f.crop((fx, 0, fx + twf, thf))
+            diff = ImageChops.difference(region, tpl_f)
+            score = sum(diff.getdata()) / (twf * thf)
+            if best_f is None or score < best_f[0]:
+                best_f = (score, fx)
+        if best_f is not None:
+            return best_f[1], best_f[0]
+        return coarse, best_score
+    except Exception:
+        return None
+
+
 async def _drag_handle(page, start_x: float, start_y: float, delta: int,
                        steps: int = 16) -> None:
     """Humanized mouse drag on the slider handle."""
@@ -823,8 +1001,10 @@ async def solve_hcaptcha_drag(page, iframe, log=None,
                               max_attempts: int = 6) -> bool:
     """Solve the hCaptcha puzzle drag challenge directly in the browser.
 
-    Screenshots the puzzle, computes the drag offset from the piece/hole
-    outlines, then drags the slider. Verified against the real token - no
+    Screenshots the puzzle, finds the piece, template-matches its pixels to
+    locate the hole, then drags the slider by the offset (CSS-pixel aware:
+    screenshots are device pixels, mouse moves are CSS pixels, so the offset
+    is divided by devicePixelRatio). Verified against the real token - no
     faking. Returns True only when hCaptcha actually accepted the solve.
     """
     log = log or (lambda msg, level="info": None)
@@ -861,20 +1041,46 @@ async def solve_hcaptcha_drag(page, iframe, log=None,
             hy = iframe_box['y'] + iframe_box['height'] * 0.85
             log("[Drag] Slider handle not found - dragging from slider area", level="warn")
 
+        try:
+            dpr = float(await page.evaluate("() => window.devicePixelRatio || 1"))
+        except Exception:
+            dpr = 1.0
+        if not dpr or dpr <= 0:
+            dpr = 1.0
+
         for attempt in range(1, max_attempts + 1):
             shot = await page.screenshot(clip=shot_box)
             img = Image.open(io.BytesIO(shot))
-            deltas = _puzzle_deltas(img)
-            if not deltas:
-                log(f"[Drag] Attempt {attempt}: no piece/hole outlines found - retrying",
+
+            delta_img = None
+            best_match = None  # (score, delta_img)
+            for box in _find_piece_boxes(img):
+                found = _template_match_hole(img, box)
+                if not found:
+                    continue
+                hole_x, score = found
+                piece_cx = box[0] + box[2] / 2
+                d = int(round(hole_x - piece_cx))
+                if best_match is None or score < best_match[0]:
+                    best_match = (score, d)
+            if best_match:
+                delta_img = best_match[1]
+                log(f"[Drag] Attempt {attempt}: template offset {delta_img:+d}px")
+            if delta_img is None:
+                deltas = _puzzle_deltas(img)
+                if deltas:
+                    delta_img = deltas[0]
+                    log(f"[Drag] Attempt {attempt}: edge-analysis offset "
+                        f"{delta_img:+d}px (candidates {deltas})")
+            if delta_img is None:
+                log(f"[Drag] Attempt {attempt}: no piece/hole detected - retrying",
                     level="warn")
                 await asyncio.sleep(1.2)
                 continue
-            delta = deltas[0]
-            log(f"[Drag] Attempt {attempt}/{max_attempts}: offset {delta:+d}px "
-                f"(candidates {deltas})")
-            # Drag the estimate, then fine-tune around it: outline detection
-            # can land on the inner vs outer border edge (+/- a few px).
+
+            delta = int(round(delta_img / dpr))
+            # Drag the estimate, then fine-tune around it: the match can land
+            # on the piece/hole border edge (+/- a few px).
             for adjust in (0, -4, 4):
                 d = delta + adjust
                 if d == 0:
