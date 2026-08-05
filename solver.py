@@ -51,6 +51,9 @@ CHROME_VERSION = "130"
 HCAPTCHA_API = "https://api2.hcaptcha.com"
 DEFAULT_VERSION = "c3663008fb8d8104807d55045f8251cbe96a2f84"
 
+# Directory where the trained "brains" live (model_grid.pth, model_drag.pth, motion_params.json)
+MODELS_DIR = Path(__file__).resolve().parent / "models"
+
 # Realistic screen sizes for motion data
 SCREEN_SIZES = [
     (1920, 1080), (1366, 768), (1536, 864),
@@ -105,14 +108,32 @@ class MotionData:
         self.cores = random.choice(CORE_COUNTS)
         self.lang, self.langs = random.choice(LANGUAGES)
         self.counter = 0
+        # Real human mouse stats from the trained brain pack (optional)
+        self.params = {}
+        mp = MODELS_DIR / "motion_params.json"
+        if mp.exists():
+            try:
+                with open(mp) as f:
+                    self.params = json.load(f)
+            except Exception:
+                self.params = {}
 
     def _tick(self, ms: int = 0) -> int:
-        self.counter += ms or random.randint(8, 25)
+        if ms:
+            self.counter += ms
+        else:
+            # Use real human pause stats when the brain pack provides them
+            mean_pause = self.params.get("mean_pause") or 16
+            lo = max(1, int(mean_pause * 0.6))
+            hi = max(lo + 1, int(mean_pause * 1.6))
+            self.counter += random.randint(lo, hi)
         return self.base_ms + self.counter
 
     def _human_path(self, start: Tuple[int, int], end: Tuple[int, int],
                     points: int = 30) -> List[List[int]]:
         """Generate a curved, human-like mouse path between two points."""
+        if self.params.get("mean_points"):
+            points = max(8, min(60, int(self.params["mean_points"])))
         path = []
         sx, sy = start
         ex, ey = end
@@ -387,6 +408,12 @@ class TileClassifier:
     def __init__(self, model_path: Optional[str] = None):
         self.model = None
         self.use_model = False
+        # Auto-discover the trained grid brain if no path was given.
+        if not model_path:
+            for candidate in (MODELS_DIR / "model_grid.pth", Path("model.pth")):
+                if candidate.exists():
+                    model_path = str(candidate)
+                    break
         if model_path and Path(model_path).exists():
             try:
                 import torch
@@ -441,13 +468,77 @@ import io
 
 
 # ═══════════════════════════════════════════════════════════════
+# Drag Brain (ResNet18 regressor — your trained model_drag.pth)
+# ═══════════════════════════════════════════════════════════════
+
+class DragBrain:
+    """
+    Loads model_drag.pth (ResNet18, fc=2) and regresses the normalized
+    (x, y) target position directly from the background image. The model
+    was trained on slider-puzzle YOLO labels, so it outputs [0, 1] coords.
+    """
+
+    def __init__(self, model_path: Optional[str] = None):
+        self.model = None
+        self.use_model = False
+        if not model_path:
+            model_path = MODELS_DIR / "model_drag.pth"
+        if model_path and Path(model_path).exists():
+            try:
+                import torch
+                from torchvision import models, transforms
+                raw = torch.load(model_path, map_location="cpu", weights_only=False)
+                state = raw.get("state_dict", raw) if isinstance(raw, dict) else raw
+                self.model = models.resnet18(weights=None)
+                self.model.fc = torch.nn.Linear(self.model.fc.in_features, 2)
+                self.model.load_state_dict(state)
+                self.model.eval()
+                self.transform = transforms.Compose([
+                    transforms.Resize((224, 224)),
+                    transforms.ToTensor(),
+                    transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
+                ])
+                self.use_model = True
+                print(f"  Loaded drag brain from {model_path}")
+            except Exception as e:
+                print(f"  Drag brain load failed ({e}) — OpenCV matching only")
+
+    def predict(self, bg_bgr: np.ndarray) -> Optional[Tuple[float, float]]:
+        """Return normalized (x, y) in [0, 1], or None on failure."""
+        if not self.use_model or self.model is None:
+            return None
+        try:
+            import torch
+            rgb = cv2.cvtColor(bg_bgr, cv2.COLOR_BGR2RGB)
+            x = self.transform(Image.fromarray(rgb)).unsqueeze(0)
+            with torch.no_grad():
+                out = self.model(x)[0].tolist()
+            return float(out[0]), float(out[1])
+        except Exception as e:
+            print(f"  Drag brain predict failed ({e})")
+            return None
+
+
+_DRAG_BRAIN: Optional[DragBrain] = None
+
+
+def get_drag_brain() -> DragBrain:
+    """Lazily load and cache the drag brain singleton."""
+    global _DRAG_BRAIN
+    if _DRAG_BRAIN is None:
+        _DRAG_BRAIN = DragBrain()
+    return _DRAG_BRAIN
+
+
+# ═══════════════════════════════════════════════════════════════
 # Drag Solver (OpenCV template matching — from drag_solver.py)
 # ═══════════════════════════════════════════════════════════════
 
 def solve_drag(piece_bytes: bytes, bg_bytes: bytes) -> Tuple[int, int, float]:
     """
     Given puzzle piece and background images, return (target_x, target_y, confidence).
-    Multi-scale, multi-method, edge-aware matching.
+    Multi-scale, multi-method, edge-aware matching, with the trained drag
+    brain as a fallback candidate when OpenCV confidence is low.
     """
     piece = cv2.imdecode(np.frombuffer(piece_bytes, np.uint8), cv2.IMREAD_COLOR)
     bg = cv2.imdecode(np.frombuffer(bg_bytes, np.uint8), cv2.IMREAD_COLOR)
@@ -488,6 +579,18 @@ def solve_drag(piece_bytes: bytes, bg_bytes: bytes) -> Tuple[int, int, float]:
             if conf > best_conf:
                 best_conf = conf
                 best_x, best_y = max_loc
+
+    # Trained drag brain as a candidate when OpenCV is unsure
+    if best_conf < 55:
+        brain = get_drag_brain()
+        if brain.use_model:
+            pred = brain.predict(bg)
+            if pred:
+                nx, ny = pred
+                bx, by = int(nx * bw), int(ny * bh)
+                if 0 <= bx < bw and 0 <= by < bh:
+                    print(f"  Drag brain: ({bx},{by}) — OpenCV conf was {best_conf:.0f}%")
+                    return bx, by, 70.0
     return best_x, best_y, best_conf
 
 
@@ -751,7 +854,8 @@ async def main():
                         help="hCaptcha sitekey (default: Discord)")
     parser.add_argument("--host", default="discord.com", help="Target host")
     parser.add_argument("--proxy", help="HTTP proxy URL")
-    parser.add_argument("--model", default="model.pth", help="Path to trained model.pth")
+    parser.add_argument("--model", default=None,
+                        help="Path to trained model (default: models/model_grid.pth)")
     args = parser.parse_args()
 
     print("═" * 50)

@@ -236,8 +236,15 @@ def handle_activity_log():
 @app.route('/api_status')
 def handle_api_status():
     solver_key_set = bool((os.environ.get("API_KEY") or "").strip())
+    brains = {}
+    try:
+        import fetch_brains
+        brains = {name: ok for name, ok in fetch_brains.installed_status().items()}
+    except Exception:
+        pass
     return jsonify({
         "api_key_set": solver_key_set,
+        "brains": brains,
     })
 
 
@@ -263,6 +270,15 @@ def _run_event_loop(loop: asyncio.AbstractEventLoop) -> None:
     loop.run_forever()
 
 
+def _bootstrap_brains() -> None:
+    """Best-effort install of the trained brains from Kaggle (non-fatal)."""
+    try:
+        import fetch_brains
+        fetch_brains.fetch_brains()
+    except Exception as e:
+        _log(f"[brains] bootstrap failed: {e}", level="warn")
+
+
 def main() -> None:
     global _loop
     config = load_config()
@@ -274,6 +290,9 @@ def main() -> None:
     _loop = asyncio.new_event_loop()
     t = threading.Thread(target=_run_event_loop, args=(_loop,), daemon=True)
     t.start()
+
+    # Install the trained brains in the background (uses KAGGLE_KEY from API Keys)
+    threading.Thread(target=_bootstrap_brains, daemon=True).start()
 
     api_key = os.environ.get('API_KEY', '').strip()
     print("=" * 56, flush=True)
@@ -356,6 +375,7 @@ input[type=text],input[type=email]{background:#0f172a;border:1px solid #1e293b;c
     <div class="stat-card"><div class="num cyan" id="statSolverCalls">0</div><div class="label">API Calls</div></div>
   </div>
   <div id="creditLine" class="small mt8">Balance: --</div>
+  <div id="brainsLine" class="small mt8" style="color:#818cf8">Brains: checking...</div>
 </div>
 
 <div class="card">
@@ -480,6 +500,18 @@ async function checkModel(){
       document.getElementById('modelDot').className='model-dot error';
       document.getElementById('modelText').textContent='No solver key - set API_KEY (nocaptchaai.com)';
       document.getElementById('modelText').style.color='#ef4444';
+    }
+    let br=st.brains||{};
+    let keys=Object.keys(br);
+    let have=keys.filter(k=>br[k]).length;
+    let el=document.getElementById('brainsLine');
+    if(keys.length===0){
+      el.textContent='Brains: no model files found (fetch on startup via KAGGLE_KEY)';
+    } else if(have===keys.length){
+      el.textContent='Brains: all '+have+' installed (grid + drag + motion) ✅';
+      el.style.color='#22c55e';
+    } else {
+      el.textContent='Brains: '+have+'/'+keys.length+' installed - '+keys.filter(k=>!br[k]).join(', ')+' pending';
     }
   }catch(e){}
 }
