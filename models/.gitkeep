@@ -1,0 +1,4 @@
+# Trained "brains" (downloaded from Kaggle by fetch_brains.py):
+#   model_grid.pth       - 33-class tile grid classifier (ResNet18)
+#   model_drag.pth       - drag position regressor (ResNet18, normalized x,y)
+#   motion_params.json   - human mouse-behavior stats
