@@ -1650,6 +1650,58 @@ async def solve_hcaptcha_accessibility(page, iframe,
     import asyncio
     import base64
 
+    async def _discover_vision_model() -> str:
+        """Ask Ollama /api/tags which models are actually loaded and pick a
+        vision-capable one. The configured model may not exist on the server,
+        which silently breaks every vision solve."""
+        try:
+            import aiohttp
+            async with aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=10)
+            ) as session:
+                async with session.get(f"{ollama_url}/api/tags") as resp:
+                    if resp.status != 200:
+                        return ollama_model
+                    data = await resp.json()
+            names = [m.get("name", "") for m in data.get("models", [])]
+            if not names:
+                log("[Accessibility] [CRITICAL] Ollama endpoint has NO models pulled — "
+                    "vision cannot solve image questions. Pull a vision model "
+                    "e.g. `ollama pull llava:7b` (or moondream) on the server, or set "
+                    "OLLAMA_URL to a server that has one.", level="error")
+                return ollama_model
+            # Prefer known vision models, else the first one that supports images
+            preferred = ["llava", "moondream", "minicpm-v", "bakllava",
+                         "llava-llama3", "llava:13b", "llava:7b", "llava:34b"]
+            for p in preferred:
+                for n in names:
+                    if n.split(":")[0].lower() == p or n == p:
+                        return n
+            for n in names:
+                try:
+                    async with aiohttp.ClientSession(
+                        timeout=aiohttp.ClientTimeout(total=10)
+                    ) as session:
+                        async with session.get(f"{ollama_url}/api/show",
+                                               params={"name": n}) as resp:
+                            if resp.status == 200:
+                                d = await resp.json()
+                                if "vision" in str(d.get("model_info", {})).lower() or \
+                                   "clip" in str(d.get("model_info", {})).lower():
+                                    return n
+                except Exception:
+                    continue
+            return names[0]
+        except Exception as e:
+            log(f"[Accessibility] Model discovery error: {e}", level="warn")
+            return ollama_model
+
+    discovered = await _discover_vision_model()
+    if discovered and discovered != ollama_model:
+        log(f"[Accessibility] Using available vision model: {discovered}")
+        ollama_model = discovered
+    log(f"[Accessibility] Vision model in use: {ollama_model}")
+
     # ── Helpers ────────────────────────────────────────────
 
     async def _ollama_chat(image_b64: str, prompt: str, timeout: float = 20.0) -> str:
@@ -1692,6 +1744,25 @@ async def solve_hcaptcha_accessibility(page, iframe,
         img = await target.screenshot(type="png")
         return base64.b64encode(img).decode()
 
+    async def _screenshot_question(hcaptcha) -> str:
+        """Screenshot just the question area (bigger = better OCR).
+        Tries selectors inside the frame, then falls back to full frame."""
+        for sel in (
+            '#prompt-text', '.challenge-prompt', '[class*="prompt"]',
+            '[class*="challenge"] [class*="text"]', '[class*="question"]',
+            '[class*="task"]', '[class*="instruction"]', '[class*="challenge-container"]',
+        ):
+            try:
+                el = await hcaptcha.locator(sel).first.element_handle(timeout=1500)
+                if el:
+                    img = await el.screenshot(type="png")
+                    b64 = base64.b64encode(img).decode()
+                    if b64:
+                        return b64
+            except Exception:
+                continue
+        return await _screenshot_b64(hcaptcha)
+
     async def _token_present() -> bool:
         try:
             tok = await page.evaluate(
@@ -1705,27 +1776,56 @@ async def solve_hcaptcha_accessibility(page, iframe,
             return False
 
     async def _challenge_js(js: str, arg=None):
-        """Run JS inside the hCaptcha frames (frame_locator can't evaluate)."""
-        for f in page.frames:
-            try:
-                if f.url and "hcaptcha.com" in f.url:
+        """Run JS in hCaptcha frames first, then every other frame."""
+        try:
+            for f in page.frames:
+                try:
+                    if f.url and "hcaptcha" in f.url.lower():
+                        res = await f.evaluate(js, arg)
+                        if res is not None and res != "":
+                            return res
+                except Exception:
+                    continue
+            for f in page.frames:
+                try:
                     res = await f.evaluate(js, arg)
                     if res is not None and res != "":
                         return res
-            except Exception:
-                continue
+                except Exception:
+                    continue
+        except Exception:
+            pass
         return None
 
     async def _accessibility_active(hcaptcha) -> bool:
         """True when the accessibility question (input/prompt) is on screen.
-        Strict selectors only — do NOT match textarea or hidden inputs
-        (those are the hCaptcha token field, always present)."""
+        Checks the frame_locator first, then falls back to page-level JS so
+        we catch the challenge even when it renders outside the hcaptcha frame."""
         try:
             await hcaptcha.locator(
                 'input[type="text"], input[type="number"], [role="textbox"], '
                 '#prompt-text, [class*="prompt"]'
-            ).first.wait_for(state="visible", timeout=2500)
+            ).first.wait_for(state="visible", timeout=2000)
             return True
+        except Exception:
+            pass
+        try:
+            res = await _challenge_js("""() => {
+                const sels = ['#prompt-text', '.challenge-prompt', '[class*="prompt"]',
+                              'input[type="text"]', 'input[type="number"]',
+                              '[role="textbox"]', '[class*="input"]'];
+                for (const s of sels) {
+                    const el = document.querySelector(s);
+                    if (el && el.offsetParent !== null) {
+                        const v = el.value || el.textContent || '';
+                        if (v.trim() || s.indexOf('input') === 0 || s === '[role="textbox"]') {
+                            return 'active';
+                        }
+                    }
+                }
+                return null;
+            }""")
+            return bool(res)
         except Exception:
             return False
 
@@ -1893,13 +1993,14 @@ async def solve_hcaptcha_accessibility(page, iframe,
         return False
 
     async def _open_accessibility_challenge(hcaptcha) -> bool:
-        """Open accessibility challenge. Single attempt — JS click first
-        (the method that worked in logs), real Playwright click as fallback."""
+        """Open accessibility challenge with detection at each step.
+        Click one 3-dots method → wait 5s for menu → click option → detect input.
+        If any step fails, retry with next method."""
 
-        # ── Step A: Click 3-dots ──
+        # ── Step A: Click 3-dots (one method at a time, detect menu open) ──
         menu_opened = False
 
-        # PRIMARY: JS dispatchEvent click (bypasses intercept — worked in logs)
+        # WAY 1: JS click
         try:
             js_result = await _challenge_js("""() => {
                 const btn = document.querySelector('#menu-info')
@@ -1923,27 +2024,21 @@ async def solve_hcaptcha_accessibility(page, iframe,
                         log("[Accessibility] Menu opened (way 1)")
                         break
                     await asyncio.sleep(0.5)
-            else:
-                log("[Accessibility] JS found no 3-dots button yet", level="warn")
         except Exception as e:
             log(f"[Accessibility] way 1 (JS) failed: {str(e)[:60]}", level="warn")
 
-        # FALLBACK: Real Playwright click (actual mouse simulation)
         if not menu_opened:
-            await asyncio.sleep(0.3)
+            # WAY 2: Playwright role click
             try:
-                for sel in ("#menu-info", '[aria-label*="About hCaptcha"]',
-                            '[aria-label*="Extra menu"]', '.display-menu-btn'):
+                for label in ("About hCaptcha & Accessibility Options", "Extra menu", "More options", "Menu"):
                     try:
-                        btn = hcaptcha.locator(sel).first
-                        await btn.wait_for(state="visible", timeout=5000)
-                        await btn.scroll_into_view_if_needed()
-                        await btn.click(timeout=3000)
-                        log(f"[Accessibility] Real-clicked 3-dots via '{sel}'")
-                        for _ in range(10):  # 5 seconds
+                        btn = hcaptcha.get_by_role("button", name=label).first
+                        await btn.wait_for(state="visible", timeout=3000)
+                        await btn.click(timeout=2000)
+                        log(f"[Accessibility] Clicked 3-dots via role '{label}' (way 2)")
+                        for _ in range(10):
                             if await _menu_visible(hcaptcha):
                                 menu_opened = True
-                                log("[Accessibility] Menu opened (real click)")
                                 break
                             await asyncio.sleep(0.5)
                         if menu_opened:
@@ -1951,33 +2046,38 @@ async def solve_hcaptcha_accessibility(page, iframe,
                     except Exception:
                         continue
             except Exception as e:
-                log(f"[Accessibility] Real click failed: {str(e)[:60]}", level="warn")
+                log(f"[Accessibility] way 2 (role) failed: {str(e)[:60]}", level="warn")
 
-        # LAST RESORT: native JS .click() method on the element
         if not menu_opened:
-            await asyncio.sleep(0.3)
+            # WAY 3: CSS force-click
             try:
-                js2 = await _challenge_js("""() => {
-                    const btn = document.querySelector('#menu-info')
-                             || document.querySelector('[aria-label*="About hCaptcha"]')
-                             || document.querySelector('[aria-label*="Extra menu"]')
-                             || document.querySelector('.display-menu-btn');
-                    if (btn) { btn.click(); return 'ok'; }
-                    return null;
-                }""")
-                if js2:
-                    log("[Accessibility] Native JS .click() fallback")
-                    for _ in range(10):  # 5 seconds
-                        if await _menu_visible(hcaptcha):
-                            menu_opened = True
-                            log("[Accessibility] Menu opened (native JS click)")
-                            break
-                        await asyncio.sleep(0.5)
+                btn = hcaptcha.locator("#menu-info").first
+                await btn.wait_for(state="visible", timeout=3000)
+                await btn.click(force=True, timeout=3000)
+                log("[Accessibility] Force-clicked #menu-info (way 3)")
+                for _ in range(10):
+                    if await _menu_visible(hcaptcha):
+                        menu_opened = True
+                        break
+                    await asyncio.sleep(0.5)
             except Exception as e:
-                log(f"[Accessibility] Native JS click failed: {str(e)[:60]}", level="warn")
+                log(f"[Accessibility] way 3 (force) failed: {str(e)[:60]}", level="warn")
 
         if not menu_opened:
-            log("[Accessibility] Menu did not open after 3 click methods", level="warn")
+            # WAY 4: dispatch event
+            try:
+                await hcaptcha.locator("#menu-info").first.dispatch_event("click")
+                log("[Accessibility] Dispatched click (way 4)")
+                for _ in range(10):
+                    if await _menu_visible(hcaptcha):
+                        menu_opened = True
+                        break
+                    await asyncio.sleep(0.5)
+            except Exception as e:
+                log(f"[Accessibility] way 4 (dispatch) failed: {str(e)[:60]}", level="warn")
+
+        if not menu_opened:
+            log("[Accessibility] Menu never opened after all 4 methods", level="warn")
             return False
 
         # ── Step B: Menu is open — click Accessibility Challenge option ──
@@ -1988,24 +2088,15 @@ async def solve_hcaptcha_accessibility(page, iframe,
             return False
 
         # ── Step C: Wait for accessibility challenge input to appear ──
-        for _ in range(20):  # 10 seconds
+        for _ in range(12):  # 6 seconds
             if await _accessibility_active(hcaptcha):
                 log("[Accessibility] [OK] Accessibility challenge input detected!")
                 return True
-            try:
-                has_input = await page.evaluate("""() => {
-                    const inp = document.querySelector('input[type="text"]:not([type="hidden"]), input[type="number"]:not([type="hidden"]), textarea:not([type="hidden"])');
-                    return !!(inp && inp.offsetParent !== null);
-                }""")
-                if has_input:
-                    log("[Accessibility] [OK] Input found at page level!")
-                    return True
-            except Exception:
-                pass
             await asyncio.sleep(0.5)
 
         log("[Accessibility] Accessibility challenge did not open (no input detected)", level="warn")
         return False
+
     async def _read_question_text() -> str:
         """Read the question straight from the DOM (it is real text —
         that's the whole point of an accessibility challenge)."""
@@ -2013,15 +2104,20 @@ async def solve_hcaptcha_accessibility(page, iframe,
             const sels = ['#prompt-text', '.challenge-prompt',
                           '[class*="prompt"]', '[class*="challenge-text"]',
                           '[class*="task-text"]', '[class*="instruction"]',
-                          '[role="heading"]', '[class*="question"]'];
+                          '[role="heading"]', '[class*="question"]',
+                          '[class*="challenge"] [class*="text"]', 'p', 'span'];
             for (const s of sels) {
-                const el = document.querySelector(s);
-                if (el) { const t = (el.textContent || '').trim(); if (t) return t; }
+                const els = document.querySelectorAll(s);
+                for (const el of els) {
+                    if (el.offsetParent === null) continue;
+                    const t = (el.textContent || '').trim();
+                    if (t && t.length > 4 && t.length < 400) return t;
+                }
             }
             const body = document.body ? (document.body.innerText || '') : '';
             const lines = body.split('\n').map(l => l.trim()).filter(l => l.length > 3);
             for (const l of lines) {
-                if (/how many|type|word|letter|reverse|enter|answer|add|coins|jar/i.test(l)) return l;
+                if (/how many|type|word|letter|reverse|enter|answer|add|coins|jar|number/i.test(l)) return l;
             }
             return lines.slice(0, 3).join(' ');
         }"""
@@ -2144,9 +2240,9 @@ async def solve_hcaptcha_accessibility(page, iframe,
             if local is not None:
                 log(f"[Accessibility] Q{q} solved locally: {local}")
                 return local
-        # vision fallback
+        # vision fallback — capture the question area, not the whole widget
         try:
-            img_b64 = await _screenshot_b64(hcaptcha)
+            img_b64 = await _screenshot_question(hcaptcha)
         except Exception:
             img_b64 = None
         if img_b64:
@@ -2259,68 +2355,73 @@ async def solve_hcaptcha_accessibility(page, iframe,
                     level="error")
                 return False
 
-        # ── ONLY 1 attempt — click 3-dots once, click accessibility once ──
-        if await _token_present():
-            log("[Accessibility] [OK] Already solved — token present!")
-            return True
+        for attempt in range(1, max_attempts + 1):
+            log(f"[Accessibility] Attempt {attempt}/{max_attempts}")
 
-        # Already active? Don't reopen — jump straight to answering
-        if await _accessibility_active(hcaptcha):
-            log("[Accessibility] Accessibility challenge already active")
-        else:
-            # Open the accessibility challenge — ONE attempt only
-            if not await _open_accessibility_challenge(hcaptcha):
-                log("[Accessibility] Could not open accessibility challenge (1 attempt)",
-                    level="warn")
-                return False
-
-        # ── Answer every question hCaptcha asks, one after another ──
-        # (runs whether the challenge was already active OR freshly opened)
-        for q in range(1, max_questions + 1):
             if await _token_present():
-                log("[Accessibility] [OK] hCaptcha passed!")
+                log("[Accessibility] [OK] Already solved — token present!")
                 return True
 
-            answer = await _get_answer(hcaptcha, q)
-            if answer is None:
-                log("[Accessibility] No answer this round", level="warn")
-                break
+            # Already active? Don't reopen — jump straight to answering
+            if await _accessibility_active(hcaptcha):
+                log("[Accessibility] Accessibility challenge already active")
+            else:
+                # Open the accessibility challenge (only once)
+                if not await _open_accessibility_challenge(hcaptcha):
+                    log("[Accessibility] Could not open accessibility challenge",
+                        level="warn")
+                    await asyncio.sleep(1.5)
+                    continue
 
-            if not await _type_answer(hcaptcha, answer):
-                log("[Accessibility] Could not type answer", level="warn")
-                break
-
-            await asyncio.sleep(0.8)
-
-            if not await _submit_answer(hcaptcha):
-                log("[Accessibility] Could not submit", level="warn")
-                break
-
-            # Wait for the outcome: token (passed) or a NEW question
-            outcome = None
-            for _ in range(10):
-                await asyncio.sleep(0.75)
-                if await _token_present():
-                    outcome = "passed"
-                    break
-                if await _accessibility_active(hcaptcha):
-                    outcome = "next"
-                    break
-            if outcome == "passed":
-                log("[Accessibility] [OK] hCaptcha passed!")
-                return True
-            if outcome is None:
-                log("[Accessibility] Challenge closed — double-checking token",
-                    level="info")
-                await asyncio.sleep(1.0)
+            # ── Answer every question hCaptcha asks, one after another ──
+            for q in range(1, max_questions + 1):
                 if await _token_present():
                     log("[Accessibility] [OK] hCaptcha passed!")
                     return True
-                break
-            log(f"[Accessibility] New question detected (Q{q + 1}) — continuing")
 
-        log("[Accessibility] [FAIL] Could not solve accessibility challenge",
-            level="error")
+                answer = await _get_answer(hcaptcha, q)
+                if answer is None:
+                    log("[Accessibility] No answer this round", level="warn")
+                    break
+
+                if not await _type_answer(hcaptcha, answer):
+                    log("[Accessibility] Could not type answer", level="warn")
+                    break
+
+                await asyncio.sleep(0.8)
+
+                if not await _submit_answer(hcaptcha):
+                    log("[Accessibility] Could not submit", level="warn")
+                    break
+
+                # Wait for the outcome: token (passed) or a NEW question
+                outcome = None
+                for _ in range(10):
+                    await asyncio.sleep(0.75)
+                    if await _token_present():
+                        outcome = "passed"
+                        break
+                    if await _accessibility_active(hcaptcha):
+                        outcome = "next"
+                        break
+                if outcome == "passed":
+                    log("[Accessibility] [OK] hCaptcha passed!")
+                    return True
+                if outcome is None:
+                    log("[Accessibility] Challenge closed — double-checking token",
+                        level="info")
+                    await asyncio.sleep(1.0)
+                    if await _token_present():
+                        log("[Accessibility] [OK] hCaptcha passed!")
+                        return True
+                    break
+                log(f"[Accessibility] New question detected (Q{q + 1}) — continuing")
+
+            log(f"[Accessibility] Attempt {attempt} did not solve — retrying",
+                level="warn")
+            await asyncio.sleep(2.0)
+
+        log("[Accessibility] [FAIL] Could not solve after all attempts", level="error")
         return False
 
     except Exception as e:
