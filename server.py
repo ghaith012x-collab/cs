@@ -421,9 +421,18 @@ class DiscordAutomation:
                 self._log(f"[Captcha] Already past captcha - at {self._page.url[:50]}")
                 return True
 
+            # ── CRITICAL: Always wait 12s for the captcha widget to FULLY load ──
+            self._log("[Captcha] Waiting 12 seconds for captcha widget to fully load...")
+            await asyncio.sleep(12)
+
+            # Check if already past captcha after waiting
+            if await self._past_captcha():
+                self._log(f"[Captcha] Page moved past captcha - at {self._page.url[:50]}")
+                return True
+
             # Find the captcha iframe
             iframe = None
-            for attempt in range(25):
+            for attempt in range(6):
                 try:
                     iframe_el = await asyncio.wait_for(
                         self._page.query_selector('iframe[src*="hcaptcha.com"]'),
@@ -438,7 +447,8 @@ class DiscordAutomation:
                 if await self._past_captcha():
                     self._log(f"[Captcha] Page navigated to {self._page.url[:50]} - no captcha needed")
                     return True
-                await asyncio.sleep(0.5)
+                self._log(f"[Captcha] No hCaptcha iframe yet (attempt {attempt+1}/6)")
+                await asyncio.sleep(2.0)
 
             if not iframe:
                 # No hCaptcha iframe - check for FunCAPTCHA (Arkose) instead
@@ -454,10 +464,12 @@ class DiscordAutomation:
                     if has_captcha_text:
                         self._log("[Captcha] FunCAPTCHA detected - pixel tile solver...")
                         return await self._solve_funcaptcha()
-                    self._log(f"[Captcha] No captcha indicators on page: {self._page.url[:40]}")
+                    self._log(f"[Captcha] No captcha indicators on page: {self._page.url[:40]}", level="warn")
+                    # DON'T claim solved - let the caller retry or report failure
+                    return False
                 except Exception as e:
                     self._log(f"[Captcha] Captcha check error: {e}", level="warn")
-                return True
+                return False
 
             # Which challenge is showing? A checkbox widget is solvable via the
             # NoCaptchaAI token API; a drag puzzle must be dragged in-browser.
@@ -476,17 +488,13 @@ class DiscordAutomation:
                           "(set API_KEY to your nocaptchaai.com key)", level="error")
                 return False
 
-            if mode != "drag" or drag_result is None:
-                # Freshly-mounted widget (or one still loading when the drag
-                # solver looked): let it settle before re-checking/extracting.
-                self._log("[Captcha] Widget detected - waiting 12s for full load...")
-                await asyncio.sleep(12)
-
-            # ── ACCESSIBILITY CHALLENGE — Ollama vision, easiest path ──
-            # Must run AFTER the 12s settle wait so the iframe is fully rendered
+            # ── ACCESSIBILITY CHALLENGE — try it first (easiest path) ──
+            # Open menu info then wait 2s between each attempt
             self._log("[Captcha] Trying accessibility challenge (Ollama vision)...")
-            if await solve_hcaptcha_accessibility(self._page, iframe, log=self._log):
+            acc_result = await solve_hcaptcha_accessibility(self._page, iframe, log=self._log)
+            if acc_result:
                 self._log("[Captcha] [OK] Accessibility challenge solved!")
+                await asyncio.sleep(2)
                 await self._click_form_submit()
                 await asyncio.sleep(3)
                 if await self._past_captcha():
@@ -497,6 +505,7 @@ class DiscordAutomation:
                     return True
             else:
                 self._log("[Captcha] Accessibility challenge failed — trying API fallback", level="warn")
+                await asyncio.sleep(2)  # pause before next method
 
             if await self._past_captcha():
                 self._log(f"[Captcha] Page moved on - at {self._page.url[:50]}")
@@ -955,7 +964,22 @@ class DiscordAutomation:
                 self._log("[WARN] No ToS checkbox found - the Create Account button may be disabled")
 
             # Wait for React to process the checkbox change
-            await asyncio.sleep(1.0)
+            await asyncio.sleep(2.0)  # Increased: React needs time to re-render enabled state
+
+            # ── VERIFY ToS is actually checked before trying Create Account ──
+            try:
+                verify = await self._page.evaluate("""() => {
+                    const cbs = document.querySelectorAll('input[type="checkbox"]');
+                    let checked = 0;
+                    for (const cb of cbs) {
+                        if (cb.checked) checked++;
+                    }
+                    const roleCbs = document.querySelectorAll('[role="checkbox"][aria-checked="true"]');
+                    return { native: checked, role: roleCbs.length };
+                }""")
+                self._log(f"[Form] Checkbox state: native={verify.get('native',0)} role={verify.get('role',0)}")
+            except Exception:
+                pass
 
             # ── Create Account Button — try multiple strategies ────────
             self._log("Clicking Create Account...")
@@ -966,20 +990,38 @@ class DiscordAutomation:
                     break
                 if click_attempt > 0:
                     self._log(f"Retrying Create Account click (attempt {click_attempt+1}/4)...")
-                    # Re-check TOS on retry (sometimes React resets it)
-                    if not tos_checked:
-                        try:
-                            checkboxes = self._page.locator('input[type="checkbox"]:visible')
-                            cb_count = await checkboxes.count()
-                            for i in range(cb_count):
+                    # Re-check ALL unchecked checkboxes on retry (React may have reset them)
+                    try:
+                        checkboxes = self._page.locator('input[type="checkbox"]:visible')
+                        cb_count = await checkboxes.count()
+                        rechecked = 0
+                        for i in range(cb_count):
+                            try:
                                 if not await checkboxes.nth(i).is_checked():
                                     await checkboxes.nth(i).scroll_into_view_if_needed()
                                     await checkboxes.nth(i).check(force=True)
-                                    self._log(f"Re-checked checkbox {i}")
-                                    break
-                        except Exception:
-                            pass
-                    await asyncio.sleep(0.8)
+                                    rechecked += 1
+                            except Exception:
+                                pass
+                        if rechecked:
+                            self._log(f"Re-checked {rechecked} checkbox(es)")
+                            # Also re-check role checkboxes
+                            try:
+                                await self._page.evaluate("""() => {
+                                    const rcs = document.querySelectorAll('[role="checkbox"]');
+                                    for (const rc of rcs) {
+                                        if (rc.getAttribute('aria-checked') !== 'true') {
+                                            rc.click();
+                                            rc.setAttribute('aria-checked', 'true');
+                                            rc.dispatchEvent(new Event('change', {bubbles: true}));
+                                        }
+                                    }
+                                }""")
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
+                    await asyncio.sleep(1.5)  # Longer wait for React to process
 
                 try:
                     result = await self._page.evaluate("""() => {
