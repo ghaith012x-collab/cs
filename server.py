@@ -27,16 +27,25 @@ from duckmail import TempMail
 # ── TOR Control ───────────────────────────────────────────
 
 def _tor_newnym():
-    """Signal TOR to switch to a new identity."""
+    """Signal TOR to switch to a new identity (fresh exit node)."""
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.settimeout(3)
+        s.settimeout(15)
         s.connect(("127.0.0.1", 9051))
         s.recv(1024)
+        s.sendall(b"AUTHENTICATE\r\n")
+        auth_resp = s.recv(1024).decode().strip()
+        if "250" not in auth_resp:
+            s.close()
+            print(f"[TOR] auth failed: {auth_resp}", flush=True)
+            return False
         s.sendall(b"SIGNAL NEWNYM\r\n")
         resp = s.recv(1024).decode().strip()
         s.close()
-        return "250" in resp
+        if "250" in resp:
+            time.sleep(3)
+            return True
+        print(f"[TOR] newnym rejected: {resp}", flush=True)
     except Exception as e:
         print(f"[TOR] newnym error: {e}", flush=True)
     return False

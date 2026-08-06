@@ -2418,62 +2418,72 @@ async def solve_hcaptcha_accessibility(page, iframe,
         return None
 
     async def _type_answer(hcaptcha, answer: str) -> bool:
-        # Try 0: Accessible role-based locator (most reliable)
+        """Type answer into the hCaptcha accessibility input.
+        Uses JS injection (via _challenge_js which scans ALL frames) as primary
+        approach - more reliable than Playwright locators on deeply nested iframes."""
+        escaped = answer.replace("\\", "\\\\").replace("'", "\\'")
+
+        # Primary: JS injection - find visible input, set value, fire events
+        js_set = (
+            "() => {"
+            "const inputs = document.querySelectorAll("
+            "'input:not([type=\"hidden\"]), textarea, [role=\"textbox\"], [contenteditable=\"true\"]'"
+            ");"
+            "for (const inp of inputs) {"
+            "if (inp.offsetParent !== null) {"
+            "inp.focus();"
+            "inp.value = '';"
+            "inp.value = '" + escaped + "';"
+            "inp.dispatchEvent(new Event('input', { bubbles: true }));"
+            "inp.dispatchEvent(new Event('change', { bubbles: true }));"
+            "return 'ok:' + inp.tagName;"
+            "}"
+            "}"
+            "return null;"
+            "}"
+        )
+        try:
+            result = await _challenge_js(js_set)
+            if result and 'ok' in str(result):
+                log(f"[Accessibility] JS-set '{answer}' ({result})")
+                return True
+        except Exception as e:
+            log(f"[Accessibility] JS-set error: {e}")
+
+        # Fallback 1: get_by_role (works on newer Playwright)
         try:
             inp = hcaptcha.get_by_role("textbox", name="Challenge Text Input").first
             await inp.wait_for(state="visible", timeout=3000)
             await inp.click()
             await inp.fill("")
             await inp.type(answer, delay=30)
-            log(f"[Accessibility] Typed '{answer}' via get_by_role textbox")
+            log(f"[Accessibility] Typed '{answer}' via get_by_role")
             return True
         except Exception:
             pass
-        # Try 1: Locate input field by selector (aria + fallbacks)
-        for inp_sel in [
-            'input[aria-label="Challenge Text Input"]',
-            '[role="textbox"][name="Challenge Text Input"]',
-            'input[name="captcha"]',
-            'input[type="text"]', 'input[type="number"]',
-            'input:not([type="hidden"])', 'textarea',
-            '[role="textbox"]', '[contenteditable="true"]',
-        ]:
-            try:
-                inp = hcaptcha.locator(inp_sel).first
-                await inp.wait_for(state="visible", timeout=3000)
-                await inp.click()
-                await inp.fill("")
-                await inp.type(answer, delay=30)
-                log(f"[Accessibility] Typed '{answer}' into {inp_sel}")
-                return True
-            except Exception:
-                continue
-        # Try 2: Click center of frame to focus, then type
+
+        # Fallback 2: keyboard type (click visible input first)
         try:
-            box = await hcaptcha.locator("body").first.bounding_box()
-            if box:
-                cx = box["x"] + box["width"] / 2
-                cy = box["y"] + box["height"] / 2
-                await page.mouse.click(cx, cy)
-                await asyncio.sleep(0.3)
-                await page.keyboard.type(answer, delay=50)
-                log(f"[Accessibility] Typed '{answer}' via page keyboard")
-                return True
-        except Exception:
-            pass
-        # Try 3: JS focus + keyboard
-        try:
-            await _challenge_js('''() => {
-                const inp = document.querySelector('input:not([type="hidden"]), textarea, [role="textbox"]');
-                if (inp) { inp.focus(); inp.value = ''; return 'ok'; }
-                return null;
-            }''')
-            await asyncio.sleep(0.3)
+            inp = hcaptcha.locator(
+                "input:not([type='hidden']), textarea, [role='textbox']"
+            ).first
+            await inp.click()
+            await asyncio.sleep(0.2)
+            await page.keyboard.press("Control+a")
             await page.keyboard.type(answer, delay=50)
-            log("[Accessibility] Typed via JS focus + keyboard")
+            log(f"[Accessibility] Typed '{answer}' via keyboard")
             return True
         except Exception:
             pass
+
+        # Fallback 3: brute-force page-level keyboard
+        try:
+            await page.keyboard.type(answer, delay=50)
+            log(f"[Accessibility] Typed '{answer}' via brute-force keyboard")
+            return True
+        except Exception:
+            pass
+
         return False
 
     async def _submit_answer(hcaptcha) -> bool:
