@@ -2591,42 +2591,78 @@ async def solve_hcaptcha_accessibility(page, iframe,
                 await asyncio.sleep(1.5)
                 continue
 
-            # ── Answer every question hCaptcha asks, one after another ──
-            for q in range(1, max_questions + 1):
-                if await _token_present():
-                    log("[Accessibility] [OK] hCaptcha passed!")
-                    return True
-
-                answer = await _get_answer(hcaptcha, q)
-                if answer is None:
-                    log("[Accessibility] No answer this round", level="warn")
+            # ── Captcha-chain loop: keep solving until iframe disappears ──
+            # hCaptcha can throw multiple challenges in a row after each
+            # set of accessibility questions. Solve them all.
+            chain_attempt = 0
+            while True:
+                chain_attempt += 1
+                if chain_attempt > 4:
+                    log("[Accessibility] Too many captcha chains — aborting",
+                        level="warn")
                     break
-
-                if not await _type_answer(hcaptcha, answer):
-                    log("[Accessibility] Could not type answer", level="warn")
-                    break
-
-                await asyncio.sleep(0.8)
-
-                if not await _submit_answer(hcaptcha):
-                    log("[Accessibility] Could not submit", level="warn")
-                    break
-
-                # Wait for token (passed) or assume next question
-                outcome = None
-                for _ in range(12):
-                    await asyncio.sleep(0.75)
-                    if await _token_present():
-                        outcome = "passed"
+                if chain_attempt > 1:
+                    log(f"[Accessibility] NEW captcha detected — chain #{chain_attempt}")
+                    # Re-open accessibility for the new captcha
+                    if not await _open_accessibility_challenge(hcaptcha):
+                        log("[Accessibility] Could not re-open accessibility for chain",
+                            level="warn")
                         break
-                if outcome == "passed":
-                    log("[Accessibility] [OK] hCaptcha passed!")
-                    return True
-                await asyncio.sleep(1.0)
+                    await asyncio.sleep(1.5)
+
+                # ── Answer every question in this chain ──
+                for q in range(1, max_questions + 1):
+                    if await _token_present():
+                        log("[Accessibility] Token appeared mid-chain!")
+                        break
+
+                    answer = await _get_answer(hcaptcha, q)
+                    if answer is None:
+                        log(f"[Accessibility] Q{q}: No answer", level="warn")
+                        break
+
+                    log(f"[Accessibility] Q{q} solved: {answer}")
+
+                    if not await _type_answer(hcaptcha, answer):
+                        log("[Accessibility] Could not type answer", level="warn")
+                        break
+
+                    await asyncio.sleep(0.8)
+
+                    if not await _submit_answer(hcaptcha):
+                        log("[Accessibility] Could not submit", level="warn")
+                        break
+
+                    # Wait for Next→new question transition
+                    await asyncio.sleep(2.0)
+
+                    # Check if token appeared (captcha complete)
+                    if await _token_present():
+                        log(f"[Accessibility] Token appeared after Q{q}!")
+                        break
+
+                # ── After answering all questions, check if captcha is gone ──
+                await asyncio.sleep(2.0)
                 if await _token_present():
-                    log("[Accessibility] [OK] hCaptcha passed!")
-                    return True
-                log(f"[Accessibility] No token yet — continuing to Q{q + 1}")
+                    log("[Accessibility] Token present — checking for new captcha...")
+                    await asyncio.sleep(3.0)
+                    if await _token_present():
+                        # Still have token, but is there a NEW iframe?
+                        try:
+                            new_iframe = page.locator('iframe[src*="hcaptcha.com"]')
+                            if await new_iframe.count() == 0:
+                                log("[Accessibility] [OK] No more captchas — done!")
+                                return True
+                            log("[Accessibility] Captcha iframe still present — new challenge!")
+                        except Exception:
+                            log("[Accessibility] [OK] No captcha iframe found — done!")
+                            return True
+                    else:
+                        # Token disappeared — maybe page transitioned
+                        log("[Accessibility] Token disappeared — page may have advanced")
+                        return True
+                else:
+                    log(f"[Accessibility] No token after Q{q} — more questions or retry")
 
             log(f"[Accessibility] Attempt {attempt} did not solve — retrying",
                 level="warn")

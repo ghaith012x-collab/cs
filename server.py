@@ -492,16 +492,39 @@ class DiscordAutomation:
             acc_result = await solve_hcaptcha_accessibility(self._page, iframe, log=self._log)
             if acc_result:
                 self._log("[Captcha] [OK] Accessibility challenge solved!")
-                await asyncio.sleep(2)
+                # Wait and verify the captcha iframe is truly gone before
+                # clicking Create Account. hCaptcha can chain challenges.
+                for check_i in range(5):
+                    await asyncio.sleep(3)
+                    if await self._past_captcha():
+                        self._log("[Captcha] Page past captcha — clicking Create Account")
+                        await self._click_form_submit()
+                        return True
+                    # Check if another captcha iframe appeared
+                    try:
+                        new_iframe = await self._page.query_selector(
+                            'iframe[src*="hcaptcha.com"]'
+                        )
+                        if new_iframe:
+                            self._log(
+                                "[Captcha] NEW captcha detected! Solving again..."
+                            )
+                            iframe = new_iframe
+                            acc_result = await solve_hcaptcha_accessibility(
+                                self._page, iframe, log=self._log
+                            )
+                            if not acc_result:
+                                self._log(
+                                    "[Captcha] Chain captcha failed",
+                                    level="error"
+                                )
+                                return False
+                            continue  # captcha solved, re-check
+                    except Exception:
+                        pass
+                    self._log(f"[Captcha] Waiting for page... ({check_i+1}/5)")
+                # After all checks, try clicking Create Account anyway
                 await self._click_form_submit()
-                await asyncio.sleep(3)
-                if await self._past_captcha():
-                    return True
-                # Still check for token even if URL didn't change
-                if await read_hcaptcha_token(self._page):
-                    await self._click_form_submit()
-                    return True
-                # Challenge solved but page didn't advance — wait and re-check
                 await asyncio.sleep(3)
                 if await self._past_captcha():
                     return True
