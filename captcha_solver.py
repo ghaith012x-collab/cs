@@ -1798,34 +1798,16 @@ async def solve_hcaptcha_accessibility(page, iframe,
         return None
 
     async def _accessibility_active(hcaptcha) -> bool:
-        """True when the accessibility question (input/prompt) is on screen.
-        Checks the frame_locator first, then falls back to page-level JS so
-        we catch the challenge even when it renders outside the hcaptcha frame."""
+        """True when the accessibility question input is actually visible.
+        ONLY checks the frame_locator with tight selectors — no page-level JS
+        fallback (the hCaptcha frame always contains hidden inputs that would
+        false-match)."""
         try:
             await hcaptcha.locator(
                 'input[type="text"], input[type="number"], [role="textbox"], '
                 '#prompt-text, [class*="prompt"]'
             ).first.wait_for(state="visible", timeout=2000)
             return True
-        except Exception:
-            pass
-        try:
-            res = await _challenge_js("""() => {
-                const sels = ['#prompt-text', '.challenge-prompt', '[class*="prompt"]',
-                              'input[type="text"]', 'input[type="number"]',
-                              '[role="textbox"]', '[class*="input"]'];
-                for (const s of sels) {
-                    const el = document.querySelector(s);
-                    if (el && el.offsetParent !== null) {
-                        const v = el.value || el.textContent || '';
-                        if (v.trim() || s.indexOf('input') === 0 || s === '[role="textbox"]') {
-                            return 'active';
-                        }
-                    }
-                }
-                return null;
-            }""")
-            return bool(res)
         except Exception:
             return False
 
@@ -2362,16 +2344,15 @@ async def solve_hcaptcha_accessibility(page, iframe,
                 log("[Accessibility] [OK] Already solved — token present!")
                 return True
 
-            # Already active? Don't reopen — jump straight to answering
-            if await _accessibility_active(hcaptcha):
-                log("[Accessibility] Accessibility challenge already active")
-            else:
-                # Open the accessibility challenge (only once)
-                if not await _open_accessibility_challenge(hcaptcha):
-                    log("[Accessibility] Could not open accessibility challenge",
-                        level="warn")
-                    await asyncio.sleep(1.5)
-                    continue
+            # Always open the accessibility challenge via the menu.
+            # NOTE: removed the "already active" shortcut because
+            # _accessibility_active was false-matching hidden inputs in
+            # the hCaptcha token field. Always clicking 3-dots is safer.
+            if not await _open_accessibility_challenge(hcaptcha):
+                log("[Accessibility] Could not open accessibility challenge",
+                    level="warn")
+                await asyncio.sleep(1.5)
+                continue
 
             # ── Answer every question hCaptcha asks, one after another ──
             for q in range(1, max_questions + 1):
