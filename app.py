@@ -2,28 +2,34 @@ import asyncio
 import base64
 import json
 import os
-import sys
 import threading
-from typing import Optional
+import time
+from typing import Dict, List, Optional
 
 from flask import Flask, jsonify, request, Response
 
+import db
+from proxies import pool as proxy_pool
 from server import DiscordAutomation
-from captcha_solver import NoCaptchaAI
 
-# ── Global state (shared between the Flask thread and the asyncio thread) ──
+# ── Global state (Flask thread + asyncio thread) ──
 
 _loop: Optional[asyncio.AbstractEventLoop] = None
-_automation: Optional[DiscordAutomation] = None
 _running = False
+_start_time = 0.0
+
+# worker_id -> worker state
+_workers: Dict[str, dict] = {}
+WORKER_COUNT = 5
+WORKER_IDS = [f"B{i+1}" for i in range(WORKER_COUNT)]
+
 _config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
 
 DEFAULT_CONFIG = {
-    "email": "",
     "headless": True,
     "web_port": 8080,
     "camera_interval": 3,
-    "run_automation": False,
+    "worker_count": WORKER_COUNT,
 }
 
 
@@ -38,7 +44,6 @@ def load_config(path: str = _config_path) -> dict:
                         config[key] = saved[key]
         except Exception:
             pass
-    # Environment always wins for the port
     config["web_port"] = int(os.environ.get("PORT", config.get("web_port", 8080)))
     return config
 
@@ -55,94 +60,141 @@ def _log(msg: str, level: str = "info"):
     print(f"[{level.upper()}] {msg}", flush=True)
 
 
-def _is_auto_email(email: str) -> bool:
-    """True when the saved email is empty or an auto-generated temp address."""
-    e = (email or "").lower().strip()
-    if not e:
-        return True
-    return (e.startswith("dm") or "@duckmail.sbs" in e
-            or "@web-library.net" in e or "@mail.tm" in e)
+# ── Worker management (runs in the asyncio thread) ──
+
+def _init_worker(wid: str) -> dict:
+    return {
+        "id": wid,
+        "bot": None,
+        "status": "idle",          # idle | starting | running | done | error
+        "step": "",
+        "email": "",
+        "username": "",
+        "password": "",
+        "token": "",
+        "proxy": "",
+        "started_at": 0,
+        "finished_at": 0,
+        "screenshots": 0,
+        "last_shot_b64": "",
+    }
 
 
-# ── Automation control (runs inside the asyncio thread) ──
-
-async def _start_automation_async(config: dict) -> None:
-    global _automation, _running
-    if _automation and _running:
-        _log("Automation already running")
-        return
-    # Always generate a fresh duckmail inbox per Start click. Only keep a
-    # deliberately custom (non-auto-generated) email from config.
-    email = (config.get('email', '') or '').strip()
-    if _is_auto_email(email):
-        email = ''
-    _automation = DiscordAutomation(
-        headless=config.get('headless', True),
-        email=email,
-    )
-    _running = True
-    try:
-        await _automation.initialize()
-        screenshot_task = asyncio.create_task(
-            _capture_periodic_screenshots(config.get('camera_interval', 3))
-        )
-        _log("Starting Discord signup "
-             "(email from config - auto-generated via duckmail.sbs if empty)")
-        success = await _automation.start_discord_signup()
-        if success:
-            _log("[OK] Automation completed successfully")
-        else:
-            _log("[FAIL] Automation failed", level="error")
-        screenshot_task.cancel()
-    except Exception as e:
-        _log(f"Error during automation: {e}", level="error")
-        import traceback
-        traceback.print_exc()
-    finally:
-        await _cleanup_async()
-
-
-async def _capture_periodic_screenshots(interval: int) -> None:
-    global _running
-    while _running:
+async def _worker_capture_loop(wid: str, cfg: dict, stagger: int) -> None:
+    """Capture screenshots for this worker, staggered so browsers don't all
+    upload at the same time: B1 immediately, B2 after 2s, B3 after 4s..."""
+    bot: DiscordAutomation = _workers[wid]["bot"]
+    interval = max(1, int(cfg.get("camera_interval", 3)))
+    await asyncio.sleep(stagger)
+    while _running and bot is not None and bot._page is not None:
         try:
-            await _automation.capture_screenshot()
-            await asyncio.sleep(interval)
-        except asyncio.CancelledError:
-            break
+            shot = await bot.capture_screenshot()
+            if shot:
+                _workers[wid]["last_shot_b64"] = shot
+                _workers[wid]["screenshots"] += 1
         except Exception:
-            await asyncio.sleep(interval)
+            pass
+        await asyncio.sleep(interval)
 
 
-async def _stop_automation_async() -> None:
-    global _running, _automation
-    _running = False
-    if _automation:
+async def _run_worker(wid: str, cfg: dict, proxy: str) -> None:
+    state = _workers[wid]
+    state["status"] = "starting"
+    state["proxy"] = proxy
+    state["started_at"] = time.time()
+    bot = DiscordAutomation(
+        headless=cfg.get("headless", True),
+        proxy=proxy,
+        worker_id=wid,
+    )
+    state["bot"] = bot
+    try:
+        await bot.initialize()
+        state["status"] = "running"
+        stagger = int(wid[1:]) - 1  # B1->0, B2->1 ...
+        cam_task = asyncio.create_task(_worker_capture_loop(wid, cfg, stagger * 2))
+        ok = await bot.start_discord_signup()
+        cam_task.cancel()
+        acc = bot.get_account()
+        state["email"] = acc["email"]
+        state["username"] = acc["username"]
+        state["password"] = acc["password"]
+        state["token"] = acc["token"]
+        if ok and acc["token"]:
+            state["status"] = "done"
+            await db.save_account(
+                email=acc["email"], username=acc["username"],
+                password=acc["password"], token=acc["token"],
+                proxy=acc["proxy"], worker_id=wid,
+            )
+            _log(f"[{wid}] Account saved to DB (token {len(acc['token'])} chars)")
+        elif ok:
+            state["status"] = "done"
+            _log(f"[{wid}] Signup ok but no token yet")
+        else:
+            state["status"] = "error"
+    except Exception as e:
+        state["status"] = "error"
+        state["step"] = f"error: {str(e)[:120]}"
+        _log(f"[{wid}] worker error: {e}")
+    finally:
+        state["finished_at"] = time.time()
+        proxy_pool.release(proxy, ok=state["status"] == "done")
         try:
-            await _automation.close()
-        except Exception as e:
-            _log(f"[STOP] close error (non-fatal): {e}")
-        _automation = None
-    _log("Automation stopped")
+            await bot.close()
+        except Exception:
+            pass
+        state["bot"] = None
 
 
-async def _cleanup_async() -> None:
-    global _running, _automation
+async def _start_all_async(cfg: dict) -> None:
+    global _running, _start_time
+    if _running:
+        return
+    _running = True
+    _start_time = time.time()
+
+    for wid in WORKER_IDS:
+        _workers[wid] = _init_worker(wid)
+
+    # Refresh proxy pool (fetch + validate free proxies)
+    _log("[Proxy] Refreshing free proxy pool...")
+    try:
+        await proxy_pool.refresh()
+    except Exception as e:
+        _log(f"[Proxy] refresh error: {e}")
+    _log(f"[Proxy] {proxy_pool.valid_count} working proxies available")
+
+    for i, wid in enumerate(WORKER_IDS):
+        proxy = proxy_pool.take()
+        if not proxy:
+            _log(f"[{wid}] No proxy available - using direct connection")
+        asyncio.create_task(_run_worker(wid, cfg, proxy or ""))
+
+
+async def _stop_all_async() -> None:
+    global _running
     _running = False
-    if _automation:
-        try:
-            await _automation.close()
-        except Exception as e:
-            _log(f"[CLEANUP] close error (non-fatal): {e}")
-        _automation = None
+    for wid, state in list(_workers.items()):
+        bot = state.get("bot")
+        if bot is not None:
+            try:
+                await bot.close()
+            except Exception:
+                pass
+            state["bot"] = None
+        if state["status"] not in ("done", "error"):
+            state["status"] = "stopped"
 
 
-def _run_in_loop(coro):
-    """Schedule a coroutine on the background event loop and wait for it."""
+def _run_in_loop(coro) -> Optional[object]:
     if not _loop:
         return None
-    fut = asyncio.run_coroutine_threadsafe(coro, _loop)
-    return fut.result(timeout=120)
+    try:
+        fut = asyncio.run_coroutine_threadsafe(coro, _loop)
+        return fut.result(timeout=120)
+    except Exception:
+        return None
 
 
 # ── Flask app ─────────────────────────────────────────────
@@ -157,11 +209,12 @@ def handle_root():
 
 @app.route('/start', methods=['POST'])
 def handle_start():
+    global _workers
     if _running:
         return "Already running"
-    config = load_config()
+    cfg = load_config()
     threading.Thread(
-        target=lambda: _run_in_loop(_start_automation_async(config)),
+        target=lambda: _run_in_loop(_start_all_async(cfg)),
         daemon=True,
     ).start()
     return "Started"
@@ -169,98 +222,78 @@ def handle_start():
 
 @app.route('/stop', methods=['POST'])
 def handle_stop():
-    _run_in_loop(_stop_automation_async())
+    _run_in_loop(_stop_all_async())
     return "Stopped"
+
+
+@app.route('/proxies/refresh', methods=['POST'])
+def handle_proxy_refresh():
+    _run_in_loop(proxy_pool.refresh())
+    return jsonify(proxy_pool.stats())
+
+
+@app.route('/status')
+def handle_status():
+    workers = []
+    for wid in WORKER_IDS:
+        s = _workers.get(wid) or _init_worker(wid)
+        workers.append({
+            "id": wid,
+            "status": s["status"],
+            "step": s["step"],
+            "email": s["email"],
+            "username": s["username"],
+            "token": s["token"],
+            "proxy": s["proxy"],
+            "screenshots": s["screenshots"],
+            "started_at": s["started_at"],
+        })
+    return jsonify({
+        "running": _running,
+        "uptime": int(time.time() - _start_time) if _start_time else 0,
+        "workers": workers,
+        "proxies": proxy_pool.stats(),
+    })
+
+
+@app.route('/latest')
+def handle_latest_screenshot():
+    wid = request.args.get("worker", "B1")
+    s = _workers.get(wid)
+    if s and s.get("last_shot_b64"):
+        try:
+            return Response(base64.b64decode(s["last_shot_b64"]),
+                            content_type='image/png')
+        except Exception:
+            pass
+    return Response(status=404)
+
+
+@app.route('/tokens')
+def handle_tokens():
+    accounts = _run_in_loop(db.list_accounts(limit=300)) or []
+    valid = _run_in_loop(db.validate_all_tokens(accounts)) if accounts else 0
+    return jsonify({
+        "count": len(accounts),
+        "valid": valid,
+        "accounts": accounts,
+    })
 
 
 @app.route('/config', methods=['GET', 'POST'])
 def handle_config():
     if request.method == 'POST':
         data = request.get_json(silent=True) or {}
-        config = load_config()
-        if 'email' in data:
-            config['email'] = str(data['email'] or '').strip()
+        cfg = load_config()
         if 'headless' in data:
-            config['headless'] = bool(data['headless'])
-        save_config(config)
-        return jsonify({"ok": True, "config": config})
-    config = load_config()
-    return jsonify({
-        "email": config.get('email', ''),
-        "headless": config.get('headless', True),
-    })
-
-
-@app.route('/status')
-def handle_status():
-    auto = _automation
-    screenshots = len(auto.get_screenshots()) if auto else 0
-    email = auto._email if auto else (load_config().get('email') or "")
-    username = auto._username if auto else ""
-    mail_provider = auto._mail.provider if auto and auto._mail else ""
-    solver = {"configured": False, "stats": {}}
-    if auto and hasattr(auto, '_solver'):
-        solver = {
-            "configured": auto._solver.configured,
-            "stats": auto._solver.stats,
-        }
-    return jsonify({
-        "running": _running,
-        "screenshots": screenshots,
-        "email": email,
-        "username": username,
-        "mail_provider": mail_provider,
-        "solver": solver,
-    })
-
-
-@app.route('/latest')
-def handle_latest_screenshot():
-    if _automation:
-        b64 = _automation.get_latest_screenshot()
-        if b64:
-            try:
-                return Response(base64.b64decode(b64), content_type='image/png')
-            except Exception:
-                pass
-    return Response(status=404)
-
-
-@app.route('/activity')
-def handle_activity_log():
-    if _automation:
-        return jsonify(_automation.get_activity_log())
-    return jsonify([])
-
-
-@app.route('/api_status')
-def handle_api_status():
-    solver_key_set = bool((os.environ.get("API_KEY") or "").strip())
-    brains = {}
-    try:
-        import fetch_brains
-        brains = {name: ok for name, ok in fetch_brains.installed_status().items()}
-    except Exception:
-        pass
-    return jsonify({
-        "api_key_set": solver_key_set,
-        "brains": brains,
-    })
-
-
-@app.route('/credits')
-def handle_credits():
-    """NoCaptchaAI account balance."""
-    s = NoCaptchaAI()
-    if not s.configured:
-        return jsonify({"configured": False})
-    result = _run_in_loop(s.get_balance())
-    if result is None:
-        return jsonify({"configured": True, "error": "unreachable"})
-    return jsonify({
-        "configured": True,
-        "balance": result.get("balance", 0),
-    })
+            cfg['headless'] = bool(data['headless'])
+        if 'worker_count' in data:
+            cfg['worker_count'] = int(data['worker_count'])
+        save_config(cfg)
+        return jsonify({"ok": True, "config": cfg})
+    cfg = load_config()
+    return jsonify({"headless": cfg.get("headless", True),
+                    "worker_count": cfg.get("worker_count", WORKER_COUNT)})
 
 
 # ── Background event loop ─────────────────────────────────
@@ -268,15 +301,6 @@ def handle_credits():
 def _run_event_loop(loop: asyncio.AbstractEventLoop) -> None:
     asyncio.set_event_loop(loop)
     loop.run_forever()
-
-
-def _bootstrap_brains() -> None:
-    """Best-effort install of the trained brains from Kaggle (non-fatal)."""
-    try:
-        import fetch_brains
-        fetch_brains.fetch_brains()
-    except Exception as e:
-        _log(f"[brains] bootstrap failed: {e}", level="warn")
 
 
 def main() -> None:
@@ -291,261 +315,236 @@ def main() -> None:
     t = threading.Thread(target=_run_event_loop, args=(_loop,), daemon=True)
     t.start()
 
-    # Install the trained brains in the background (uses KAGGLE_KEY from API Keys)
-    threading.Thread(target=_bootstrap_brains, daemon=True).start()
+    # Auto-migrate DB (DATABASE_URL from env)
+    _run_in_loop(db.init_db())
 
-    api_key = os.environ.get('API_KEY', '').strip()
     print("=" * 56, flush=True)
-    if api_key:
-        print("  NoCaptchaAI solver: READY - click Start", flush=True)
-    else:
-        print("  NoCaptchaAI solver: API_KEY not set - FunCAPTCHA offline solver only", flush=True)
-    print("  Email: fresh duckmail.sbs inbox on every Start (or custom config email)", flush=True)
+    print("  EYES GEN - multi-browser Discord token generator", flush=True)
+    print(f"  Browsers per Start: {WORKER_COUNT}", flush=True)
     print(f"  Dashboard: http://0.0.0.0:{web_port}", flush=True)
     print("=" * 56, flush=True)
 
-    # Flask dev server on 0.0.0.0 — no debug/reloader (threads + asyncio don't mix with it)
-    app.run(host='0.0.0.0', port=web_port, debug=False, use_reloader=False, threaded=True)
+    app.run(host='0.0.0.0', port=web_port, debug=False,
+            use_reloader=False, threaded=True)
 
 
 # ═══════════════════════════════════════════════════════════
-# DASHBOARD HTML
+# EYES GEN DASHBOARD — mobile-first
 # ═══════════════════════════════════════════════════════════
 
 DASHBOARD_HTML = """<!doctype html><html><head>
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>NoCaptchaAI - Discord GEN Control</title>
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#05060f">
+<title>Eyes GEN</title>
 <style>
-*{box-sizing:border-box;margin:0;padding:0}
-body{font-family:system-ui;background:#0a0e1a;color:#e2e8f0;max-width:960px;margin:0 auto;padding:20px}
-h1{font-size:24px;font-weight:800;background:linear-gradient(135deg,#06b6d4,#8b5cf6);-webkit-background-clip:text;-webkit-text-fill-color:transparent;margin-bottom:4px}
-h2{font-size:16px;color:#94a3b8;font-weight:600;margin:18px 0 10px}
-h3{font-size:13px;color:#94a3b8;font-weight:600;margin:10px 0 6px;text-transform:uppercase;letter-spacing:.5px}
-.card{background:#111827;border-radius:14px;padding:18px;margin-bottom:14px;border:1px solid #1e293b}
-.btn-group{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
-button{font-size:14px;padding:10px 18px;border-radius:9px;border:0;cursor:pointer;font-weight:600;transition:all .15s}
-.btn-primary{background:#6366f1;color:white}
-.btn-primary:hover{background:#4f46e5}
-.btn-stop{background:#ef4444;color:white}
-.btn-stop:hover{background:#dc2626}
-input[type=text],input[type=email]{background:#0f172a;border:1px solid #1e293b;color:#e2e8f0;border-radius:8px;padding:9px 12px;font-size:14px;width:100%;max-width:420px}
-#status{margin:10px 0;color:#a7f3d0;font-size:14px;font-weight:500}
-.cam-wrap{background:#000;border-radius:12px;overflow:hidden;min-height:200px;position:relative}
-.cam-wrap img{width:100%;display:block;min-height:180px;object-fit:contain}
-.cam-placeholder{display:flex;align-items:center;justify-content:center;min-height:180px;color:#475569;font-size:14px}
-#log{background:#0f172a;border-radius:10px;padding:12px;max-height:400px;overflow-y:auto;font-family:monospace;font-size:12px;line-height:1.6}
-#log .entry{padding:3px 0;border-bottom:1px solid #1e293b}
-#log .time{color:#4b5563;margin-right:8px}
-#log .info{color:#a7f3d0}
-#log .error{color:#fca5a5}
-#log .warn{color:#fde68a}
-#log .vision{color:#818cf8}
-.stats-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin:8px 0}
-@media(max-width:600px){.stats-grid{grid-template-columns:repeat(2,1fr)}}
-.stat-card{background:#0f172a;border-radius:10px;padding:12px;text-align:center}
-.stat-card .num{font-size:24px;font-weight:800}
-.stat-card .num.cyan{color:#06b6d4}
-.stat-card .num.green{color:#22c55e}
-.stat-card .num.red{color:#ef4444}
-.stat-card .label{font-size:11px;color:#64748b;text-transform:uppercase;margin-top:2px}
-.model-status{display:flex;align-items:center;gap:8px;padding:8px 12px;background:#0f172a;border-radius:8px;margin:8px 0;font-size:13px}
-.model-dot{width:10px;height:10px;border-radius:50%;display:inline-block}
-.model-dot.loading{background:#f59e0b;animation:pulse 1s infinite}
-.model-dot.loaded{background:#22c55e}
-.model-dot.error{background:#ef4444}
-@keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
-.small{font-size:12px;color:#64748b}
-.mt8{margin-top:8px}
+*{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
+:root{
+  --bg:#05060f;--card:#0b0e1c;--card2:#10142a;--line:#1c2240;
+  --txt:#e8ecff;--dim:#7c85a8;--acc:#22d3ee;--acc2:#8b5cf6;
+  --good:#34d399;--bad:#f87171;--warn:#fbbf24;
+}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
+  background:radial-gradient(1200px 600px at 80% -10%,#101a3a 0%,var(--bg) 55%);
+  color:var(--txt);min-height:100vh;max-width:560px;margin:0 auto;padding:14px 12px 110px}
+h1{font-size:26px;font-weight:900;letter-spacing:.5px;
+  background:linear-gradient(90deg,var(--acc),var(--acc2));
+  -webkit-background-clip:text;-webkit-text-fill-color:transparent;display:flex;align-items:center;gap:8px}
+h1 .dot{width:10px;height:10px;border-radius:50%;background:var(--good);display:inline-block;
+  -webkit-text-fill-color:initial;box-shadow:0 0 12px var(--good);animation:pulse 1.6s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+.sub{color:var(--dim);font-size:12px;margin:2px 0 14px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:14px;margin-bottom:12px}
+.row{display:flex;align-items:center;justify-content:space-between;gap:8px}
+button{font-size:14px;font-weight:700;padding:12px 18px;border-radius:12px;border:0;cursor:pointer;
+  transition:transform .1s,filter .15s}
+button:active{transform:scale(.96)}
+.btn-start{background:linear-gradient(90deg,var(--acc),#06b6d4);color:#03141c;flex:1}
+.btn-stop{background:#3b1020;color:#fca5a5;border:1px solid #7f1d3a;flex:1}
+.btn-sm{background:var(--card2);color:var(--txt);border:1px solid var(--line);padding:8px 12px;font-size:12px}
+.badge{font-size:11px;font-weight:700;padding:3px 9px;border-radius:99px}
+.b-idle{background:#1e2a4a;color:var(--dim)}
+.b-starting{background:#3a2c12;color:var(--warn)}
+.b-running{background:#0f2e28;color:var(--good)}
+.b-done{background:#122a3a;color:var(--acc)}
+.b-error{background:#3a1212;color:var(--bad)}
+.b-stopped{background:#241c38;color:var(--dim)}
+.stats{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:12px}
+.stat{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:10px;text-align:center}
+.stat .num{font-size:22px;font-weight:900}
+.stat .lbl{font-size:10px;color:var(--dim);text-transform:uppercase;letter-spacing:.5px;margin-top:2px}
+.num.acc{color:var(--acc)}.num.good{color:var(--good)}.num.prox{color:var(--acc2)}
+h3{font-size:12px;color:var(--dim);text-transform:uppercase;letter-spacing:1px;margin:16px 0 8px}
+.cams{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.cam{background:#000;border:1px solid var(--line);border-radius:14px;overflow:hidden;position:relative;aspect-ratio:16/12}
+.cam img{width:100%;height:100%;object-fit:contain;display:block}
+.cam .tag{position:absolute;top:6px;left:6px;background:rgba(5,6,15,.75);color:var(--txt);
+  font-size:10px;font-weight:800;padding:2px 8px;border-radius:99px;backdrop-filter:blur(4px)}
+.cam .st{position:absolute;bottom:6px;right:6px;font-size:9px;padding:2px 7px;border-radius:99px;
+  background:rgba(5,6,15,.75);color:var(--dim)}
+.cam .ph{display:flex;align-items:center;justify-content:center;height:100%;color:#2c3560;font-size:11px}
+.nav{position:fixed;bottom:0;left:0;right:0;background:rgba(7,9,20,.92);backdrop-filter:blur(12px);
+  border-top:1px solid var(--line);display:flex;z-index:50;max-width:560px;margin:0 auto}
+.nav button{flex:1;background:none;color:var(--dim);font-size:13px;padding:14px 6px;border-radius:0;font-weight:600}
+.nav button.on{color:var(--acc)}
+.tab{display:none}.tab.on{display:block}
+.tok{background:var(--card2);border:1px solid var(--line);border-radius:12px;padding:10px;margin-bottom:8px}
+.tok .top{display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:6px}
+.tok .user{font-weight:800;font-size:14px}
+.tok .mail{color:var(--dim);font-size:11px}
+.tok .line{font-family:ui-monospace,Menlo,monospace;font-size:10.5px;color:#9fb4d8;word-break:break-all;
+  background:#070a18;border:1px solid var(--line);border-radius:8px;padding:7px 8px;margin-top:5px}
+.copy{background:var(--acc);color:#03141c;font-size:11px;padding:5px 10px;border-radius:8px}
+.tok-badge{font-size:10px;padding:2px 8px;border-radius:99px;font-weight:700}
+.t-valid{background:#0f2e28;color:var(--good)}
+.t-invalid{background:#3a1212;color:var(--bad)}
+.t-pending{background:#1e2a4a;color:var(--dim)}
+.empty{color:var(--dim);text-align:center;padding:30px 0;font-size:13px}
+.footer{color:#3a4368;font-size:10px;text-align:center;margin-top:18px}
 </style></head><body>
-<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:4px">
-  <h1>NoCaptchaAI GEN</h1>
-  <div class="model-status" id="modelStatus">
-    <span class="model-dot loading" id="modelDot"></span>
-    <span id="modelText">Checking solver...</span>
-  </div>
-</div>
-<p class="small">Discord account generator | NoCaptchaAI solving (primary) | offline FunCAPTCHA solver | fresh duckmail.sbs inbox per run</p>
 
-<div class="card">
-  <h3>Solver Status</h3>
-  <div class="stats-grid">
-    <div class="stat-card"><div class="num cyan" id="statChallenges">0</div><div class="label">Tasks</div></div>
-    <div class="stat-card"><div class="num green" id="statSolved">0</div><div class="label">Solved</div></div>
-    <div class="stat-card"><div class="num red" id="statFailed">0</div><div class="label">Failed</div></div>
-    <div class="stat-card"><div class="num cyan" id="statSolverCalls">0</div><div class="label">API Calls</div></div>
-  </div>
-  <div id="creditLine" class="small mt8">Balance: --</div>
-  <div id="brainsLine" class="small mt8" style="color:#818cf8">Brains: checking...</div>
+<h1><span class="dot"></span>EYES GEN</h1>
+<div class="sub">Multi-browser Discord token generator &middot; free proxies &middot; auto-save</div>
+
+<div class="stats">
+  <div class="stat"><div class="num acc" id="stRunning">0</div><div class="lbl">Running</div></div>
+  <div class="stat"><div class="num good" id="stTokens">0</div><div class="lbl">Tokens</div></div>
+  <div class="stat"><div class="num prox" id="stProxies">0</div><div class="lbl">Proxies</div></div>
 </div>
 
-<div class="card">
-  <h3>Signup Email</h3>
-  <p class="small">Leave empty for a fresh duckmail.sbs inbox on every Start. Set a custom email to use it instead.</p>
-  <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px;align-items:center">
-    <input type="email" id="emailInput" placeholder="your@email.com (optional)">
-    <button class="btn-primary" onclick="saveEmail()">Save</button>
-    <button class="btn-stop" onclick="clearEmail()">Clear (fresh each Start)</button>
+<div id="tabHome" class="tab on">
+  <div class="card">
+    <div class="row">
+      <button class="btn-start" onclick="start()">START</button>
+      <button class="btn-stop" onclick="stop()">STOP</button>
+    </div>
+    <div id="statusLine" class="sub" style="margin:10px 0 0">Idle - press START to launch all browsers</div>
   </div>
-  <div id="emailSaved" class="small mt8" style="color:#22c55e;display:none">Email saved</div>
+  <h3>Live Cams</h3>
+  <div class="cams" id="cams"></div>
+  <div class="footer">Eyes GEN &middot; each browser: fresh proxy + duckmail inbox + full token capture</div>
 </div>
 
-<div class="card">
-  <h3>Discord Automation</h3>
-  <p class="small">Email: <strong id="emailLabel">loading...</strong></p>
-  <div class="btn-group">
-    <button class="btn-primary" onclick="start()">Start</button>
-    <button class="btn-stop" onclick="stop()">Stop</button>
+<div id="tabTokens" class="tab">
+  <div class="card">
+    <div class="row">
+      <button class="btn-sm" onclick="refreshTokens()">Refresh</button>
+      <span id="tokCount" class="badge b-idle">--</span>
+    </div>
   </div>
-  <div id="status">Idle</div>
-  <div class="cam-wrap">
-    <div class="cam-placeholder" id="camPlaceholder">Waiting for screenshot...</div>
-    <img id="shot" alt="Live view" style="display:none">
-  </div>
-  <h2 style="margin-top:12px;font-size:12px;color:#94a3b8;font-weight:600">Activity Log</h2>
-  <div id="log"><div class="entry"><span class="time">--:--:--</span><span class="info">Ready - set an API_KEY (nocaptchaai.com) to enable fast solving.</span></div></div>
+  <div id="tokList"></div>
+</div>
+
+<div class="nav">
+  <button id="navHome" class="on" onclick="showTab('Home')">Home</button>
+  <button id="navTokens" onclick="showTab('Tokens')">Tokens</button>
 </div>
 
 <script>
-async function api(path,opts){return fetch(path,opts)}
+let workers = {};
+async function api(path, opts){ return fetch(path, opts); }
+
+function showTab(name){
+  document.getElementById('tabHome').classList.toggle('on', name==='Home');
+  document.getElementById('tabTokens').classList.toggle('on', name==='Tokens');
+  document.getElementById('navHome').classList.toggle('on', name==='Home');
+  document.getElementById('navTokens').classList.toggle('on', name==='Tokens');
+  if(name==='Tokens') refreshTokens();
+}
 
 async function start(){
-  let r=await api('/start',{method:'POST'});
-  document.getElementById('status').textContent=await r.text();
+  let r = await api('/start', {method:'POST'});
+  document.getElementById('statusLine').textContent = await r.text();
 }
 async function stop(){
-  let r=await api('/stop',{method:'POST'});
-  document.getElementById('status').textContent=await r.text();
-}
-
-async function saveEmail(){
-  let email=document.getElementById('emailInput').value.trim();
-  let r=await api('/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email})});
-  let x=await r.json();
-  if(x.ok){
-    document.getElementById('emailSaved').style.display='block';
-    setTimeout(()=>document.getElementById('emailSaved').style.display='none',2500);
-    document.getElementById('emailLabel').textContent=email||'auto (duckmail.sbs)';
-  }
-}
-
-async function clearEmail(){
-  document.getElementById('emailInput').value='';
-  let r=await api('/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email:''})});
-  if(r.ok){
-    document.getElementById('emailSaved').style.display='block';
-    document.getElementById('emailSaved').textContent='Fresh duckmail inbox on next Start';
-    setTimeout(()=>{document.getElementById('emailSaved').style.display='none';document.getElementById('emailSaved').textContent='Email saved';},2500);
-    document.getElementById('emailLabel').textContent='auto (fresh each Start)';
-  }
+  let r = await api('/stop', {method:'POST'});
+  document.getElementById('statusLine').textContent = await r.text();
 }
 
 async function refresh(){
   try{
-    let r=await api('/status');let x=await r.json();
-    let s=document.getElementById('status');
-    if(x.email) document.getElementById('emailLabel').textContent=x.email;
-    if(x.mail_provider) document.getElementById('emailLabel').textContent+=' ('+x.mail_provider+')';
-    if(x.username) document.getElementById('emailLabel').textContent+=' @'+x.username;
+    let r = await api('/status'); let x = await r.json();
+    let running = x.workers.filter(w=>w.status==='running'||w.status==='starting').length;
+    document.getElementById('stRunning').textContent = x.running ? running+'/'+x.workers.length : '0';
+    document.getElementById('stProxies').textContent = x.proxies ? x.proxies.available : 0;
     if(x.running){
-      s.textContent=x.screenshots?'> Running ('+x.screenshots+' screenshots)':'> Running';
-      s.style.color='#a7f3d0';
-    }else{
-      s.textContent='Stopped';
-      s.style.color='#fca5a5';
+      let s = document.getElementById('statusLine');
+      s.textContent = '> Running ('+Math.floor(x.uptime/60)+'m) - '+running+' browsers active';
+      s.style.color = '#34d399';
     }
-    let sol=x.solver||{};
-    let st=sol.stats||{};
-    document.getElementById('statChallenges').textContent=st.calls||0;
-    document.getElementById('statSolved').textContent=st.ok||0;
-    document.getElementById('statFailed').textContent=st.failed||0;
-    document.getElementById('statSolverCalls').textContent=st.calls||0;
-    let img=document.getElementById('shot');let ph=document.getElementById('camPlaceholder');
-    if(x.screenshots&&x.screenshots>0){
-      img.src='/latest?'+Date.now();
-      img.style.display='block';
-      ph.style.display='none';
-    }else{
-      img.style.display='none';
-      ph.style.display='flex';
-      ph.textContent='Waiting for screenshot...';
-    }
-  }catch(e){document.getElementById('status').textContent='Connection error'}
-}
-
-async function refreshLog(){
-  try{
-    let r=await api('/activity');let logs=await r.json();
-    if(logs.length===0)return;
-    let html='';let recent=logs.slice(-80).reverse();
-    for(let e of recent){
-      let cls=e.level||'info';
-      let msg=e.message||'';
-      if(msg.includes('[NoCaptchaAI]')) cls='vision';
-      if(msg.includes('[FunCAPTCHA]')||msg.includes('[Captcha]')) cls='vision';
-      if(msg.includes('SOLVED')) cls='info';
-      html+='<div class="entry"><span class="time">'+e.time+'</span><span class="'+cls+'">'+msg+'</span></div>';
-    }
-    document.getElementById('log').innerHTML=html;
+    workers = {};
+    x.workers.forEach(w=>{ workers[w.id]=w; });
+    renderCams();
   }catch(e){}
 }
 
-async function checkModel(){
+function camStatus(w){
+  if(w.status==='done') return 'done';
+  if(w.status==='error') return 'error';
+  if(w.status==='starting') return 'starting';
+  if(w.status==='running') return 'live';
+  return w.status;
+}
+
+function renderCams(){
+  let ids = ['B1','B2','B3','B4','B5'];
+  let html = '';
+  ids.forEach(id=>{
+    let w = workers[id] || {status:'idle', email:'', proxy:''};
+    let st = camStatus(w);
+    let proxy = w.proxy ? w.proxy.replace('://',' ').split(':')[1]||'' : '';
+    html += '<div class="cam" id="cam'+id+'">'
+      + '<div class="tag">'+id+(proxy?' &middot; '+proxy:'')+'</div>'
+      + (st==='live'||st==='done'
+        ? '<img src="/latest?worker='+id+'&t='+Date.now()+'" onerror="this.style.display=\'none\'">'
+        : '<div class="ph">'+ (st==='starting'?'starting…':(st==='done'?'finished':'idle')) +'</div>')
+      + '<div class="st">'+st+'</div></div>';
+  });
+  document.getElementById('cams').innerHTML = html;
+}
+
+async function refreshTokens(){
   try{
-    let r=await api('/api_status');let st=await r.json();
-    if(st.api_key_set){
-      document.getElementById('modelDot').className='model-dot loaded';
-      document.getElementById('modelText').textContent='NoCaptchaAI ready';
-      document.getElementById('modelText').style.color='#22c55e';
-    } else {
-      document.getElementById('modelDot').className='model-dot error';
-      document.getElementById('modelText').textContent='No solver key - set API_KEY (nocaptchaai.com)';
-      document.getElementById('modelText').style.color='#ef4444';
+    let r = await api('/tokens'); let x = await r.json();
+    document.getElementById('tokCount').textContent = x.valid+' / '+x.count+' valid';
+    document.getElementById('tokCount').className = 'badge '+(x.valid>0?'b-done':'b-idle');
+    if(!x.accounts || !x.accounts.length){
+      document.getElementById('tokList').innerHTML = '<div class="empty">No tokens yet. Press START.</div>';
+      return;
     }
-    let br=st.brains||{};
-    let keys=Object.keys(br);
-    let have=keys.filter(k=>br[k]).length;
-    let el=document.getElementById('brainsLine');
-    if(keys.length===0){
-      el.textContent='Brains: no model files found (fetch on startup via KAGGLE_KEY)';
-    } else if(have===keys.length){
-      el.textContent='Brains: all '+have+' installed (grid + drag + motion) ✅';
-      el.style.color='#22c55e';
-    } else {
-      el.textContent='Brains: '+have+'/'+keys.length+' installed - '+keys.filter(k=>!br[k]).join(', ')+' pending';
-    }
+    let html = '';
+    x.accounts.forEach(a=>{
+      let line = a.token;
+      let st = a.status || 'pending';
+      let badge = st==='valid'?'t-valid':(st==='invalid'?'t-invalid':'t-pending');
+      html += '<div class="tok">'
+        + '<div class="top"><div><div class="user">@'+(a.username||'?')+'</div>'
+        + '<div class="mail">'+(a.email||'')+'</div></div>'
+        + '<div style="display:flex;gap:6px;align-items:center">'
+        + '<span class="tok-badge '+badge+'">'+st+'</span>'
+        + '<button class="copy" onclick="copyLine(\''+escape(a.token)+'\',this)">COPY</button>'
+        + '</div></div>'
+        + '<div class="line">'+a.token+'</div>'
+        + '<div class="line" style="color:#6b7aa0">'+(a.email||'')+' : '+(a.password||'')+'</div>'
+        + '</div>';
+    });
+    document.getElementById('tokList').innerHTML = html;
   }catch(e){}
 }
 
-async function loadCredits(){
-  try{
-    let r=await api('/credits');let x=await r.json();
-    if(x.configured){
-      document.getElementById('creditLine').innerHTML='NoCaptchaAI balance: <b>$'+Number(x.balance||0).toFixed(2)+'</b>';
-    } else {
-      document.getElementById('creditLine').textContent='Set API_KEY (nocaptchaai.com) to see balance';
-    }
-  }catch(e){}
+function escape(s){ return String(s).replace(/\\\\/g,'\\\\\\\\').replace(/'/g,"\\\\'"); }
+
+function copyLine(val, btn){
+  if(navigator.clipboard && navigator.clipboard.writeText){
+    navigator.clipboard.writeText(val).then(()=>{btn.textContent='COPIED';setTimeout(()=>btn.textContent='COPY',1200);});
+  } else {
+    let ta = document.createElement('textarea'); ta.value = val; document.body.appendChild(ta);
+    ta.select(); try{document.execCommand('copy');}catch(e){}
+    document.body.removeChild(ta);
+    btn.textContent='COPIED'; setTimeout(()=>btn.textContent='COPY',1200);
+  }
 }
 
-async function loadEmail(){
-  try{
-    let r=await api('/config');let x=await r.json();
-    if(x.email) document.getElementById('emailInput').value=x.email;
-    document.getElementById('emailLabel').textContent=x.email||'auto (fresh duckmail per Start)';
-  }catch(e){}
-}
-
-setInterval(refresh,3000);
-setInterval(refreshLog,2000);
-setInterval(checkModel,5000);
-setInterval(loadCredits,30000);
+setInterval(refresh, 2500);
 refresh();
-refreshLog();
-checkModel();
-loadCredits();
-loadEmail();
+setInterval(refreshTokens, 15000);
 </script></body></html>"""
-
-
-if __name__ == "__main__":
-    main()

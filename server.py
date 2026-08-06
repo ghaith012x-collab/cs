@@ -85,8 +85,11 @@ NAV_TIMEOUT_MS = 30000
 
 
 class DiscordAutomation:
-    def __init__(self, headless: bool = False, email: str = ""):
+    def __init__(self, headless: bool = False, email: str = "",
+                 proxy: str = "", worker_id: str = "B1"):
         self.headless = headless
+        self.worker_id = worker_id
+        self.proxy = proxy  # e.g. "http://1.2.3.4:8080" or "" for none
         self._playwright = None
         self._browser = None
         self._context = None
@@ -98,35 +101,27 @@ class DiscordAutomation:
         self._email = (email or os.environ.get("ACCOUNT_EMAIL", "")).strip()
         self._username = ""
         self._password = ""
+        self._token = ""
         self._solver = NoCaptchaAI(log=self._log)
         self._mail: Optional[TempMail] = None
 
     def _log(self, message: str, level: str = "info") -> None:
+        tagged = f"[{self.worker_id}] {message}"
         entry = {
             "time": time.strftime("%H:%M:%S"),
             "timestamp": time.time(),
             "level": level,
-            "message": message
+            "message": tagged
         }
         self._activity_log.append(entry)
         if len(self._activity_log) > 500:
             self._activity_log = self._activity_log[-500:]
-        print(f"[{entry['time']}] [{level.upper()}] {message}", flush=True)
+        print(f"[{entry['time']}] [{level.upper()}] {tagged}", flush=True)
 
     def get_activity_log(self) -> list:
         return self._activity_log
 
     async def initialize(self) -> None:
-        if _tor_check():
-            self._log("[TOR] Rotating IP for new session...")
-            if _tor_newnym():
-                self._log("[TOR] New identity requested")
-            else:
-                self._log("[TOR] Using current circuit", level="warn")
-            await asyncio.sleep(2)
-        else:
-            self._log("[TOR] Not available", level="warn")
-
         self._playwright = await async_playwright().start()
 
         args = [
@@ -140,13 +135,21 @@ class DiscordAutomation:
         self._ua = random.choice(USER_AGENTS)
         self._browser = await self._playwright.chromium.launch(headless=self.headless, args=args)
 
-        self._tor_enabled = _tor_check()
         ctx_opts = {
             'viewport': {'width': 1920, 'height': 1080},
             'user_agent': self._ua,
         }
-        if self._tor_enabled:
+        if self.proxy:
+            ctx_opts['proxy'] = {'server': self.proxy}
+            self._log(f"Proxy: {self.proxy}")
+        elif _tor_check():
+            self._log("[TOR] Rotating IP for new session...")
+            if _tor_newnym():
+                self._log("[TOR] New identity requested")
             ctx_opts['proxy'] = {'server': 'socks5://127.0.0.1:9050'}
+            await asyncio.sleep(2)
+        else:
+            self._log("[Proxy] None available - using direct connection", level="warn")
 
         self._context = await self._browser.new_context(**ctx_opts)
         self._log(f"User-Agent: {self._ua[:60]}...")
@@ -263,6 +266,12 @@ class DiscordAutomation:
                     self._log("[OK] CAPTCHA SOLVED! Registration submitted.")
                     # Auto-verify: complete Discord email verification via duckmail.sbs
                     await self._verify_account_email()
+                    # Login + grab the FULL token from localStorage
+                    self._token = await self._extract_token()
+                    if self._token:
+                        self._log("[Token] [OK] Full token captured")
+                    else:
+                        self._log("[Token] No token yet (account may still be pending)", level="warn")
                 else:
                     self._log("[FAIL] Captcha solving failed", level="error")
             else:
@@ -1094,6 +1103,58 @@ class DiscordAutomation:
         while True:
             await self.capture_screenshot()
             await asyncio.sleep(interval)
+
+    async def _extract_token(self, attempts: int = 4) -> str:
+        """Login to Discord with the created account and grab the FULL token
+        from localStorage. Discord stores it under 'token'."""
+        if not (self._email and self._password):
+            return ""
+        try:
+            for i in range(attempts):
+                try:
+                    await self._page.goto("https://discord.com/login",
+                                          wait_until="domcontentloaded",
+                                          timeout=NAV_TIMEOUT_MS)
+                    break
+                except Exception:
+                    await asyncio.sleep(3)
+            await asyncio.sleep(3)
+            try:
+                email_input = self._page.locator('input[name="email"]').first
+                await email_input.fill(self._email, timeout=8000)
+                pw_input = self._page.locator('input[name="password"]').first
+                await pw_input.fill(self._password, timeout=8000)
+                await pw_input.press("Enter")
+                self._log("[Token] Submitted login form")
+            except Exception as e:
+                self._log(f"[Token] Login fill error: {e}", level="warn")
+                return ""
+            # Wait for token to appear
+            for _ in range(12):
+                await asyncio.sleep(2.5)
+                try:
+                    token = await self._page.evaluate(
+                        "() => localStorage.getItem('token') || ''"
+                    )
+                    if token and len(token) > 20:
+                        return token.strip()
+                except Exception:
+                    pass
+            return ""
+        except Exception as e:
+            self._log(f"[Token] extract error: {e}", level="warn")
+            return ""
+
+    def get_account(self) -> dict:
+        """Return the generated account info (email, user, pass, full token)."""
+        return {
+            "email": self._email,
+            "username": self._username,
+            "password": self._password,
+            "token": self._token,
+            "proxy": self.proxy,
+            "worker_id": self.worker_id,
+        }
 
     async def close(self) -> None:
         if self._mail:
