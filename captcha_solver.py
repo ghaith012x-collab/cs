@@ -2051,6 +2051,21 @@ async def solve_hcaptcha_accessibility(page, iframe,
         t = text.strip().lower()
         orig = text.strip()
 
+        # ── COIN / JAR word problems: extract and sum all numbers ──
+        # "Your jar has 3 coins. On Sunday, you add 6 coins. Then on Saturday,
+        #  you add 8 coins. How many coins are there?" → 3+6+8 = 17
+        coin_jar = re.search(
+            r'(?:jar|coins?|add|put|total|altogether|in\s+all)',
+            t, re.IGNORECASE
+        )
+        if coin_jar:
+            # Extract ALL numbers from the question
+            nums = re.findall(r'(\d+)', orig)
+            if len(nums) >= 2:
+                total = sum(int(n) for n in nums)
+                log(f"[Accessibility] Coin/jar sum: {'+'.join(nums)} = {total}")
+                return str(total)
+
         # ── MATH: robust chain detection ──
         # Match expressions like "5 + 8 + 7", "12 × 3 ÷ 2", "10 - 2 - 3"
         math_re = re.compile(
@@ -2240,15 +2255,16 @@ async def solve_hcaptcha_accessibility(page, iframe,
                 log("[Accessibility] [OK] Already solved — token present!")
                 return True
 
-            # Open the accessibility challenge if it isn't showing already
-            if not await _accessibility_active(hcaptcha):
+            # Already active? Don't reopen — jump straight to answering
+            if await _accessibility_active(hcaptcha):
+                log("[Accessibility] Accessibility challenge already active")
+            else:
+                # Open the accessibility challenge (only once)
                 if not await _open_accessibility_challenge(hcaptcha):
                     log("[Accessibility] Could not open accessibility challenge",
                         level="warn")
                     await asyncio.sleep(1.5)
                     continue
-            else:
-                log("[Accessibility] Accessibility challenge already active")
 
             # ── Answer every question hCaptcha asks, one after another ──
             for q in range(1, max_questions + 1):
