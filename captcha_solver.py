@@ -2487,22 +2487,56 @@ async def solve_hcaptcha_accessibility(page, iframe,
         return False
 
     async def _submit_answer(hcaptcha) -> bool:
-        # The Next button is the primary submit for accessibility challenges.
-        # WAIT 3 seconds before clicking — Skip sits at the same coordinates
-        # as Next and would be clicked instead if we act too fast.
+        """Click Next / Submit on the accessibility challenge.
+        Primary: JS injection via _challenge_js (works on nested iframes).
+        The 3s wait avoids the Skip button which shares coordinates."""
         log("[Accessibility] Waiting 3s before clicking Next (avoid Skip)")
         await asyncio.sleep(3)
-        # Try accessible role-based locator: "Next" first, then "Submit"
+
+        # ── Primary: JS injection — click the visible action button ──
+        js_click = r"""() => {
+            const names = ['Next', 'Submit', 'Verify', 'Continue', 'OK', 'Done'];
+            const btns = document.querySelectorAll('button, [role="button"]');
+            for (const b of btns) {
+                const txt = (b.textContent || '').trim().toLowerCase();
+                const label = ((b.getAttribute('aria-label') || '') + ' ' + txt).toLowerCase();
+                for (const n of names) {
+                    if (label.includes(n.toLowerCase()) && b.offsetParent !== null) {
+                        b.click();
+                        return 'clicked:' + n;
+                    }
+                }
+            }
+            // Fallback: any visible primary submit button
+            for (const b of btns) {
+                const t = (b.getAttribute('type') || '').toLowerCase();
+                if (t === 'submit' && b.offsetParent !== null) {
+                    b.click();
+                    return 'clicked:submit';
+                }
+            }
+            return null;
+        }"""
+        try:
+            result = await _challenge_js(js_click)
+            if result and 'clicked' in str(result):
+                log(f"[Accessibility] Submitted via JS click ({result})")
+                return True
+        except Exception as e:
+            log(f"[Accessibility] JS click error: {e}")
+
+        # ── Fallback 1: get_by_role ──
         for name in ("Next", "Submit", "Verify", "Continue", "OK"):
             try:
                 btn = hcaptcha.get_by_role("button", name=name).first
-                await btn.wait_for(state="visible", timeout=3000)
-                await btn.click(timeout=3000)
-                log(f"[Accessibility] Submitted via get_by_role button {name}")
+                await btn.wait_for(state="visible", timeout=2000)
+                await btn.click(timeout=2000)
+                log(f"[Accessibility] Submitted via get_by_role {name}")
                 return True
             except Exception:
                 continue
-        # Fallback: selector-based submit buttons
+
+        # ── Fallback 2: selector-based ──
         for btn_sel in [
             'button[type="submit"]',
             'button:has-text("Next")',
@@ -2510,20 +2544,38 @@ async def solve_hcaptcha_accessibility(page, iframe,
             'button:has-text("Verify")',
             'button:has-text("OK")',
             'button:has-text("Continue")',
-            '#submit',
         ]:
             try:
-                await hcaptcha.locator(btn_sel).first.click(timeout=3000)
+                await hcaptcha.locator(btn_sel).first.click(timeout=2000)
                 log(f"[Accessibility] Submitted via {btn_sel}")
                 return True
             except Exception:
                 pass
+
+        # ── Fallback 3: Enter key ──
         try:
-            await hcaptcha.locator("input").first.press("Enter", timeout=2000)
+            inp = hcaptcha.locator("input:not([type='hidden']), textarea").first
+            await inp.press("Enter", timeout=2000)
             log("[Accessibility] Submitted via Enter")
             return True
         except Exception:
-            return False
+            pass
+
+        # ── Fallback 4: click center of frame (Next is usually bottom-right) ──
+        try:
+            box = await hcaptcha.locator("body").first.bounding_box()
+            if box:
+                # Bottom-right area of the frame = Next button position
+                cx = box["x"] + box["width"] - 60
+                cy = box["y"] + box["height"] - 40
+                await page.mouse.click(cx, cy)
+                log("[Accessibility] Submitted via frame bottom-right click")
+                return True
+        except Exception:
+            pass
+
+        return False
+
 
     # ── Main flow ─────────────────────────────────────────
 
