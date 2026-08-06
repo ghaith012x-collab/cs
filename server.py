@@ -63,22 +63,151 @@ def _tor_check():
 
 
 USER_AGENTS = [
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0',
-    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36 Edg/130.0.0.0',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36 Edg/129.0.0.0',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:131.0) Gecko/20100101 Firefox/131.0',
+    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (X11; CrOS x86_64 14541.0.0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36',
 ]
 
 PAST_CAPTCHA_KEYWORDS = ['/channels', '/verify', '/welcome', '/login', '@me', 'discord.com/app']
 
 INIT_SCRIPT = """
-    Object.defineProperty(navigator, 'webdriver', { get: () => false, configurable: true });
-    Object.defineProperty(navigator, 'languages', { get: () => Object.freeze(['en-US', 'en']) });
-    Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8 });
-    Object.defineProperty(navigator, 'platform', { get: () => 'Win32' });
-    Object.defineProperty(navigator, 'vendor', { get: () => 'Google Inc.' });
+// ==============================================
+// Anti-detection: incognito + humanized fingerprints
+// ==============================================
+(function(){
+  // --- Canvas fingerprint noise ---
+  const origToDataURL = HTMLCanvasElement.prototype.toDataURL;
+  HTMLCanvasElement.prototype.toDataURL = function(type) {
+    const ctx = this.getContext('2d');
+    if (ctx) {
+      const imgData = ctx.getImageData(0, 0, 1, 1);
+      imgData.data[0] = imgData.data[0] ^ (Math.floor(Math.random() * 2));
+      ctx.putImageData(imgData, 0, 0);
+    }
+    return origToDataURL.apply(this, arguments);
+  };
+  const origToBlob = HTMLCanvasElement.prototype.toBlob;
+  HTMLCanvasElement.prototype.toBlob = function(cb, type) {
+    const ctx = this.getContext('2d');
+    if (ctx) {
+      const imgData = ctx.getImageData(0, 0, 1, 1);
+      imgData.data[0] = imgData.data[0] ^ (Math.floor(Math.random() * 2));
+      ctx.putImageData(imgData, 0, 0);
+    }
+    return origToBlob.apply(this, arguments);
+  };
+
+  // --- WebGL fingerprint ---
+  const vendors = ['Google Inc. (Intel)', 'Google Inc. (NVIDIA)', 'Google Inc. (AMD)', 'Google Inc.'];
+  const renderers = [
+    'ANGLE (Intel, Intel(R) UHD Graphics 620 Direct3D11 vs_5_0 ps_5_0)',
+    'ANGLE (NVIDIA, NVIDIA GeForce RTX 3060 Direct3D11 vs_5_0 ps_5_0)',
+    'ANGLE (AMD, AMD Radeon RX 580 Direct3D11 vs_5_0 ps_5_0)',
+    'ANGLE (Intel, Intel(R) Iris Xe Graphics Direct3D11 vs_5_0 ps_5_0)',
+    'ANGLE (NVIDIA, NVIDIA GeForce GTX 1660 Direct3D11 vs_5_0 ps_5_0)',
+  ];
+  const pick = Math.floor(Math.random() * vendors.length);
+  const vendor = vendors[pick];
+  const renderer = renderers[pick];
+  try {
+    const getParam = WebGLRenderingContext.prototype.getParameter;
+    WebGLRenderingContext.prototype.getParameter = function(p) {
+      if (p === 37445) return vendor;   // UNMASKED_VENDOR_WEBGL
+      if (p === 37446) return renderer; // UNMASKED_RENDERER_WEBGL
+      return getParam.call(this, p);
+    };
+    const getParam2 = WebGL2RenderingContext.prototype.getParameter;
+    WebGL2RenderingContext.prototype.getParameter = function(p) {
+      if (p === 37445) return vendor;
+      if (p === 37446) return renderer;
+      return getParam2.call(this, p);
+    };
+  } catch(e) {}
+
+  // --- AudioContext fingerprint ---
+  try {
+    const origGetChannelData = AudioBuffer.prototype.getChannelData;
+    AudioBuffer.prototype.getChannelData = function(channel) {
+      const data = origGetChannelData.call(this, channel);
+      for (let i = 0; i < Math.min(data.length, 10); i++) {
+        data[i] = data[i] + (Math.random() * 1e-10 - 5e-11);
+      }
+      return data;
+    };
+    const origCreateAnalyser = AudioContext.prototype.createAnalyser;
+    AudioContext.prototype.createAnalyser = function() {
+      const analyser = origCreateAnalyser.call(this);
+      const origGetFloatFreq = analyser.getFloatFrequencyData;
+      analyser.getFloatFrequencyData = function(arr) {
+        origGetFloatFreq.call(this, arr);
+        for (let i = 0; i < Math.min(arr.length, 5); i++) {
+          arr[i] = arr[i] + (Math.random() * 1e-10 - 5e-11);
+        }
+      };
+      return analyser;
+    };
+  } catch(e) {}
+
+  // --- Navigator properties ---
+  const platforms = ['Win32', 'Win32', 'MacIntel', 'Linux x86_64'];
+  const cores = [4, 8, 8, 12, 16, 16];
+  const mem = [4, 8, 8, 16, 16, 32];
+  const touches = [0, 0, 0, 0, 0, 0, 5];
+  const p = platforms[Math.floor(Math.random() * platforms.length)];
+  const c = cores[Math.floor(Math.random() * cores.length)];
+  const m = mem[Math.floor(Math.random() * mem.length)];
+  const t = touches[Math.floor(Math.random() * touches.length)];
+
+  Object.defineProperty(navigator, 'webdriver', { get: () => false });
+  Object.defineProperty(navigator, 'languages', { get: () => Object.freeze(['en-US', 'en']) });
+  Object.defineProperty(navigator, 'platform', { get: () => p });
+  Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => c });
+  Object.defineProperty(navigator, 'deviceMemory', { get: () => m });
+  Object.defineProperty(navigator, 'maxTouchPoints', { get: () => t });
+  Object.defineProperty(navigator, 'vendor', { get: () => 'Google Inc.' });
+  Object.defineProperty(navigator, 'productSub', { get: () => '20030107' });
+  Object.defineProperty(navigator, 'appVersion', { get: () => navigator.userAgent.replace('Mozilla/', '') });
+
+  // --- Hide Chrome automation ---
+  if (window.chrome) { window.chrome.runtime = {}; }
+  Object.defineProperty(window, 'chrome', { get: () => ({ runtime: {} }), set: () => {} });
+
+  // --- Plugins array ---
+  Object.defineProperty(navigator, 'plugins', {
+    get: () => {
+      const arr = [
+        { name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
+        { name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai', description: '' },
+        { name: 'Native Client', filename: 'internal-nacl-plugin', description: '' },
+      ];
+      arr.item = (i) => arr[i];
+      arr.namedItem = (n) => arr.find(x => x.name === n);
+      arr.refresh = () => {};
+      Object.defineProperty(arr, 'length', { get: () => 3 });
+      return arr;
+    }
+  });
+
+  // --- Permissions ---
+  const origQuery = window.navigator.permissions.query;
+  window.navigator.permissions.query = function(args) {
+    if (args.name === 'notifications') return Promise.resolve({ state: 'prompt', onchange: null });
+    return origQuery.apply(this, arguments);
+  };
+
+  // --- Screen ---
+  Object.defineProperty(screen, 'colorDepth', { get: () => 24 });
+  Object.defineProperty(screen, 'pixelDepth', { get: () => 24 });
+})();
 """
 
 NAV_TIMEOUT_MS = 30000
@@ -144,9 +273,13 @@ class DiscordAutomation:
         self._ua = random.choice(USER_AGENTS)
         self._browser = await self._playwright.chromium.launch(headless=self.headless, args=args)
 
+        timezones = ['America/New_York','America/Chicago','America/Denver','America/Los_Angeles','Europe/London','Europe/Berlin','Europe/Paris']
+        tz = random.choice(timezones)
         ctx_opts = {
             'viewport': {'width': 860, 'height': 640},
             'user_agent': self._ua,
+            'timezone_id': tz,
+            'locale': 'en-US',
         }
         if self.proxy:
             p = self.proxy
@@ -183,9 +316,12 @@ class DiscordAutomation:
             pass
         try:
             self._tor_enabled = False
+            timezones2 = random.choice(['America/New_York','America/Chicago','America/Denver','America/Los_Angeles','Europe/London','Europe/Berlin','Europe/Paris'])
             self._context = await self._browser.new_context(
                 viewport={'width': 860, 'height': 640},
                 user_agent=self._ua,
+                timezone_id=timezones2,
+                locale='en-US',
             )
             await self._context.add_init_script(INIT_SCRIPT)
             self._page = await self._context.new_page()
