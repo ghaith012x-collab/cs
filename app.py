@@ -310,6 +310,8 @@ def handle_latest_screenshot():
 
 @app.route('/tokens')
 def handle_tokens():
+    if not _db_available or db is None:
+        return jsonify({"count": 0, "valid": 0, "accounts": [], "error": "DB not available"})
     accounts = _run_in_loop(db.list_accounts(limit=300)) or []
     valid = _run_in_loop(db.validate_all_tokens(accounts)) if accounts else 0
     return jsonify({
@@ -383,7 +385,7 @@ DASHBOARD_HTML = """<!doctype html><html><head>
   --txt:#e8ecff;--dim:#7c85a8;--acc:#22d3ee;--acc2:#8b5cf6;
   --good:#34d399;--bad:#f87171;--warn:#fbbf24;
 }
-body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
+body{position:relative;z-index:1;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
   background:radial-gradient(1200px 600px at 80% -10%,#101a3a 0%,var(--bg) 55%);
   color:var(--txt);min-height:100vh;max-width:560px;margin:0 auto;padding:14px 12px 110px}
 h1{font-size:26px;font-weight:900;letter-spacing:.5px;
@@ -422,7 +424,7 @@ h3{font-size:12px;color:var(--dim);text-transform:uppercase;letter-spacing:1px;m
 .cam .st{position:absolute;bottom:6px;right:6px;font-size:9px;padding:2px 7px;border-radius:99px;
   background:rgba(5,6,15,.75);color:var(--dim)}
 .cam .ph{display:flex;align-items:center;justify-content:center;height:100%;color:#2c3560;font-size:11px}
-.nav{position:fixed;bottom:0;left:0;right:0;background:rgba(7,9,20,.92);backdrop-filter:blur(12px);
+.nav{position:fixed;bottom:0;left:0;right:0;height:64px;background:rgba(7,9,20,.92);backdrop-filter:blur(12px);
   border-top:1px solid var(--line);display:flex;z-index:50;max-width:560px;margin:0 auto}
 .nav button{flex:1;background:none;color:var(--dim);font-size:13px;padding:14px 6px;border-radius:0;font-weight:600}
 .nav button.on{color:var(--acc)}
@@ -492,12 +494,16 @@ function showTab(name){
 }
 
 async function start(){
-  let r = await api('/start', {method:'POST'});
-  document.getElementById('statusLine').textContent = await r.text();
+  try{
+    let r = await api('/start', {method:'POST'});
+    document.getElementById('statusLine').textContent = await r.text();
+  }catch(e){ document.getElementById('statusLine').textContent = 'Error: '+e.message; }
 }
 async function stop(){
-  let r = await api('/stop', {method:'POST'});
-  document.getElementById('statusLine').textContent = await r.text();
+  try{
+    let r = await api('/stop', {method:'POST'});
+    document.getElementById('statusLine').textContent = await r.text();
+  }catch(e){ document.getElementById('statusLine').textContent = 'Error: '+e.message; }
 }
 
 async function refresh(){
@@ -561,7 +567,7 @@ async function refreshTokens(){
         + '<div class="mail">'+(a.email||'')+'</div></div>'
         + '<div style="display:flex;gap:6px;align-items:center">'
         + '<span class="tok-badge '+badge+'">'+st+'</span>'
-        + '<button class="copy" onclick="copyLine(\''+escape(a.token)+'\',this)">COPY</button>'
+        + '<button class="copy" onclick="copyLine(\''+jsEscape(a.token)+'\',this)">COPY</button>'
         + '</div></div>'
         + '<div class="line">'+a.token+'</div>'
         + '<div class="line" style="color:#6b7aa0">'+(a.email||'')+' : '+(a.password||'')+'</div>'
@@ -571,7 +577,7 @@ async function refreshTokens(){
   }catch(e){}
 }
 
-function escape(s){ return String(s).replace(/\\\\/g,'\\\\\\\\').replace(/'/g,"\\\\'"); }
+function jsEscape(s){ return String(s).replace(/\\\\/g,'\\\\\\\\').replace(/'/g,"\\\\'"); }
 
 function copyLine(val, btn){
   if(navigator.clipboard && navigator.clipboard.writeText){
