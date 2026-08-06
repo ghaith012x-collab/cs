@@ -18,6 +18,7 @@ from captcha_solver import (
     set_hcaptcha_token_on_page,
     solve_funcaptcha_pixels,
     solve_hcaptcha_drag,
+    solve_hcaptcha_accessibility,
     _probe_drag_dom,
 )
 from duckmail import TempMail
@@ -469,6 +470,21 @@ class DiscordAutomation:
                 drag_result = await self._try_solve_drag(iframe)
                 if drag_result is True:
                     return True
+
+            # ── ACCESSIBILITY CHALLENGE — Ollama vision, easiest path ──
+            self._log("[Captcha] Trying accessibility challenge (Ollama vision)...")
+            if await solve_hcaptcha_accessibility(self._page, iframe, log=self._log):
+                self._log("[Captcha] [OK] Accessibility challenge solved!")
+                await self._click_form_submit()
+                await asyncio.sleep(3)
+                if await self._past_captcha():
+                    return True
+                # Still check for token even if URL didn't change
+                if await read_hcaptcha_token(self._page):
+                    await self._click_form_submit()
+                    return True
+            else:
+                self._log("[Captcha] Accessibility challenge failed — trying API fallback", level="warn")
 
             if not self._solver.configured:
                 self._log("[Captcha] [FAIL] No API_KEY set - NoCaptchaAI unavailable "
