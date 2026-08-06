@@ -2204,13 +2204,29 @@ async def solve_hcaptcha_accessibility(page, iframe,
             if (full.length > 10) return full.substring(0, 500);
             return '';
         }"""
-        # Try page-level first (accessibility text may render outside iframe)
+        # Primary: hCaptcha frame body innerText (most reliable)
         val = None
         try:
-            val = await page.evaluate(js)
+            val = await hcaptcha.locator("body").inner_text()
+            if val:
+                val = val.strip()
         except Exception:
             pass
+        # Fallback 1: page-level JS scan
+        if not val or len(val) < 3:
+            try:
+                val = await page.evaluate(js)
+            except Exception:
+                pass
+        # Fallback 2: scan all frames
         if not val or not str(val).strip():
+            # Try inner_text() first (Playwright reliable text extraction)
+            try:
+                body_text = await hcaptcha.locator("body").inner_text()
+                if body_text and len(body_text.strip()) > 3:
+                    return body_text.strip()[:600]
+            except Exception:
+                pass
             val = await _challenge_js(js)
         return (val or "").strip()
 
@@ -2369,8 +2385,22 @@ async def solve_hcaptcha_accessibility(page, iframe,
         return None
 
     async def _type_answer(hcaptcha, answer: str) -> bool:
-        # Try 1: Locate input field by selector
+        # Try 0: Accessible role-based locator (most reliable)
+        try:
+            inp = hcaptcha.get_by_role("textbox", name="Challenge Text Input").first
+            await inp.wait_for(state="visible", timeout=3000)
+            await inp.click()
+            await inp.fill("")
+            await inp.type(answer, delay=30)
+            log(f"[Accessibility] Typed '{answer}' via get_by_role textbox")
+            return True
+        except Exception:
+            pass
+        # Try 1: Locate input field by selector (aria + fallbacks)
         for inp_sel in [
+            'input[aria-label="Challenge Text Input"]',
+            '[role="textbox"][name="Challenge Text Input"]',
+            'input[name="captcha"]',
             'input[type="text"]', 'input[type="number"]',
             'input:not([type="hidden"])', 'textarea',
             '[role="textbox"]', '[contenteditable="true"]',
@@ -2414,12 +2444,23 @@ async def solve_hcaptcha_accessibility(page, iframe,
         return False
 
     async def _submit_answer(hcaptcha) -> bool:
+        # Try accessible role-based locator first
+        try:
+            btn = hcaptcha.get_by_role("button", name="Submit").first
+            await btn.wait_for(state="visible", timeout=3000)
+            await btn.click(timeout=3000)
+            log("[Accessibility] Submitted via get_by_role button Submit")
+            return True
+        except Exception:
+            pass
+        # Fallback: selector-based submit buttons
         for btn_sel in [
             'button[type="submit"]',
             'button:has-text("Submit")',
             'button:has-text("Verify")',
             'button:has-text("Next")',
             'button:has-text("OK")',
+            'button:has-text("Continue")',
             '#submit',
         ]:
             try:
