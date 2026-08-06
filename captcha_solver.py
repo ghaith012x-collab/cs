@@ -1588,10 +1588,10 @@ async def solve_hcaptcha_accessibility(page, iframe,
         for attempt in range(1, max_attempts + 1):
             log(f"[Accessibility] Attempt {attempt}/{max_attempts}")
 
-            # 3a) Click 3-dots in the iframe
+            # 3a) Click 3-dots in the iframe — use REAL mouse coordinates, not JS click()
             menu_clicked = False
             try:
-                result = await frame.evaluate("""() => {
+                rect = await frame.evaluate("""() => {
                     const selectors = [
                         '[aria-label*="Options"]',
                         '[class*="menu"] [role="button"]',
@@ -1603,14 +1603,17 @@ async def solve_hcaptcha_accessibility(page, iframe,
                     for (const sel of selectors) {
                         const el = document.querySelector(sel);
                         if (el && el.offsetParent !== null) {
-                            el.click();
-                            return sel;
+                            const r = el.getBoundingClientRect();
+                            return {x: r.x + r.width/2, y: r.y + r.height/2, w: r.width, h: r.height, sel: sel};
                         }
                     }
                     return null;
                 }""")
-                if result:
-                    log(f"[Accessibility] Menu clicked in iframe: {result}")
+                if rect:
+                    cx = iframe_box['x'] + rect['x']
+                    cy = iframe_box['y'] + rect['y']
+                    log(f"[Accessibility] Clicking 3-dots in iframe at ({cx:.0f},{cy:.0f}) [{rect['sel']}]")
+                    await page.mouse.click(cx, cy)
                     menu_clicked = True
             except Exception as e:
                 log(f"[Accessibility] Menu in iframe error: {e}", level="warn")
@@ -1618,46 +1621,51 @@ async def solve_hcaptcha_accessibility(page, iframe,
             # 3b) Also try clicking 3-dots on the PARENT PAGE (hCaptcha renders menu outside iframe)
             if not menu_clicked:
                 try:
-                    result = await page.evaluate("""() => {
-                        // hCaptcha places the 3-dot menu in a sibling div, not inside the iframe
+                    rect = await page.evaluate("""() => {
                         const all = document.querySelectorAll('[aria-label*="Options"], [class*="menu"], button[class*="dots"]');
                         for (const el of all) {
                             if (el.offsetParent !== null) {
-                                el.click();
-                                return el.tagName + ':' + (el.className || el.getAttribute('aria-label') || '');
+                                const r = el.getBoundingClientRect();
+                                return {x: r.x + r.width/2, y: r.y + r.height/2, w: r.width, h: r.height, tag: el.tagName};
                             }
                         }
                         return null;
                     }""")
-                    if result:
-                        log(f"[Accessibility] Menu clicked on page: {result}")
+                    if rect:
+                        log(f"[Accessibility] Clicking 3-dots on page at ({rect['x']:.0f},{rect['y']:.0f}) [{rect['tag']}]")
+                        await page.mouse.click(rect['x'], rect['y'])
                         menu_clicked = True
                 except Exception as e:
                     log(f"[Accessibility] Menu on page error: {e}", level="warn")
 
             await asyncio.sleep(1.0)
 
-            # 3c) Try clicking "Accessibility Challenge" in both iframe and page
+            # 3c) Try clicking "Accessibility Challenge" using REAL mouse coordinates
             acc_clicked = False
             for context, ctx_name in [(frame, "iframe"), (page, "page")]:
                 if acc_clicked:
                     break
                 try:
-                    result = await context.evaluate("""() => {
+                    rect = await context.evaluate("""() => {
                         const links = document.querySelectorAll('a, button, [role="menuitem"], [role="option"]');
                         for (const el of links) {
                             const t = (el.textContent || '').toLowerCase();
                             if (t.includes('accessibility') || t.includes('accessible')) {
                                 if (el.offsetParent !== null) {
-                                    el.click();
-                                    return t.slice(0, 40);
+                                    const r = el.getBoundingClientRect();
+                                    return {x: r.x + r.width/2, y: r.y + r.height/2, w: r.width, h: r.height, text: t.slice(0, 40)};
                                 }
                             }
                         }
                         return null;
                     }""")
-                    if result:
-                        log(f"[Accessibility] Selected '{result}' in {ctx_name}")
+                    if rect:
+                        if ctx_name == "iframe":
+                            cx, cy = iframe_box['x'] + rect['x'], iframe_box['y'] + rect['y']
+                        else:
+                            cx, cy = rect['x'], rect['y']
+                        log(f"[Accessibility] Clicking '{rect['text']}' in {ctx_name} at ({cx:.0f},{cy:.0f})")
+                        await page.mouse.click(cx, cy)
                         acc_clicked = True
                 except Exception:
                     pass
@@ -1751,26 +1759,39 @@ async def solve_hcaptcha_accessibility(page, iframe,
 
             await asyncio.sleep(1.0)
 
-            # Click submit
-            try:
-                await frame.evaluate("""() => {
-                    const btns = document.querySelectorAll('button, [role="button"]');
-                    for (const b of btns) {
-                        if (b.offsetParent === null) continue;
-                        const t = (b.textContent || '').toLowerCase();
-                        if (t.includes('submit') || t.includes('verify') ||
-                            t.includes('continue') || t.includes('check') ||
-                            t.includes('next') || t.includes('done') ||
-                            t.includes('ok')) {
-                            b.click();
-                            return t;
+            # Click submit — try iframe first with real mouse click, then page, then keyboard
+            submit_clicked = False
+            for context, ctx_name in [(frame, "iframe"), (page, "page")]:
+                if submit_clicked:
+                    break
+                try:
+                    rect = await context.evaluate("""() => {
+                        const btns = document.querySelectorAll('button, [role="button"]');
+                        for (const b of btns) {
+                            if (b.offsetParent === null) continue;
+                            const t = (b.textContent || '').toLowerCase();
+                            if (t.includes('submit') || t.includes('verify') ||
+                                t.includes('continue') || t.includes('check') ||
+                                t.includes('next') || t.includes('done') ||
+                                t.includes('ok')) {
+                                const r = b.getBoundingClientRect();
+                                return {x: r.x + r.width/2, y: r.y + r.height/2, text: t.slice(0, 20)};
+                            }
                         }
-                    }
-                    return null;
-                }""")
-            except Exception:
-                pass
-            await page.keyboard.press("Enter")
+                        return null;
+                    }""")
+                    if rect:
+                        if ctx_name == "iframe":
+                            cx, cy = iframe_box['x'] + rect['x'], iframe_box['y'] + rect['y']
+                        else:
+                            cx, cy = rect['x'], rect['y']
+                        log(f"[Accessibility] Clicking submit '{rect['text']}' in {ctx_name} at ({cx:.0f},{cy:.0f})")
+                        await page.mouse.click(cx, cy)
+                        submit_clicked = True
+                except Exception:
+                    pass
+            if not submit_clicked:
+                await page.keyboard.press("Enter")
             await asyncio.sleep(2.5)
 
             # Verify
