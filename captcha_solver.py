@@ -44,10 +44,24 @@ from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
-import cv2
-import numpy as np
-from curl_cffi import requests as cffi_requests
-from PIL import Image, ImageChops
+# Lazy / optional imports — not all environments have these.
+# They are imported properly inside the functions that need them.
+try:
+    import cv2
+except ImportError:
+    cv2 = None  # type: ignore
+try:
+    import numpy as np
+except ImportError:
+    np = None  # type: ignore
+try:
+    from curl_cffi import requests as cffi_requests
+except ImportError:
+    cffi_requests = None  # type: ignore
+try:
+    from PIL import Image, ImageChops
+except ImportError:
+    Image = ImageChops = None  # type: ignore
 
 # ═══════════════════════════════════════════════════════════════
 # Config
@@ -1473,6 +1487,76 @@ class HCaptchaSolver:
             await hsw.close()
             return {"success": False, "error": str(e),
                     "time": time.time() - start}
+
+
+# ═══════════════════════════════════════════════════════════════
+# Backward-compat: NoCaptchaAI class wrapping the brain solver
+# (app.py / server.py still import this)
+# ═══════════════════════════════════════════════════════════════
+
+class NoCaptchaAI:
+    """Drop-in replacement for the old NoCaptchaAI API client.
+    Now uses the trained brains + curl_cffi API flow instead of paid tokens."""
+
+    def __init__(self, log: Optional[Callable] = None):
+        self._log = log or (lambda msg, level="info": None)
+        self.stats = {"calls": 0, "ok": 0, "failed": 0}
+
+    @property
+    def configured(self) -> bool:
+        return True  # always ready — no API key needed
+
+    async def solve_hcaptcha(self, sitekey: str, pageurl: str,
+                             timeout: float = 85.0, poll: float = 1.0,
+                             rqdata: Optional[str] = None) -> Optional[str]:
+        """Solve hCaptcha using the brain-based solver. Returns token or None."""
+        self.stats["calls"] += 1
+        self._log(f"[Solver] hCaptcha (sitekey {sitekey[:12]}...)")
+        host = pageurl
+        try:
+            parsed = __import__("urllib.parse", fromlist=[""]).urlparse(pageurl)
+            host = parsed.netloc or parsed.path or pageurl
+        except Exception:
+            pass
+        solver = HCaptchaSolver(sitekey=sitekey, host=host)
+        result = await solver.solve()
+        if result.get("success"):
+            self.stats["ok"] += 1
+            token = result.get("token", "")
+            self._log(f"[Solver] [OK] Token after {result.get('time', 0):.0f}s")
+            return token
+        self.stats["failed"] += 1
+        self._log(f"[Solver] Failed: {result.get('error')}", level="warn")
+        return None
+
+    async def get_balance(self) -> Optional[dict]:
+        return {"balance": 0.0, "currency": "USD", "free": True}
+
+
+async def extract_hcaptcha_rqdata(page) -> str:
+    """Pull the hCaptcha Enterprise rqdata from the page (best effort).
+    Still exported for backward compat — brain solver doesn't need it."""
+    try:
+        val = await page.evaluate("""() => {
+            const el = document.querySelector('[data-sitekey]');
+            if (el) {
+                const v = el.getAttribute('data-rqdata') || el.getAttribute('rqdata');
+                if (v && v.length > 8) return v;
+            }
+            for (const s of document.querySelectorAll('script')) {
+                const t = s.textContent || '';
+                const m = t.match(/"rqdata"\\s*:\\s*"([^"]{8,})"/) ||
+                          t.match(/'rqdata'\\s*:\\s*'([^']{8,})'/) ||
+                          t.match(/rqdata\\s*[:=]\\s*["']([^"']{8,})["']/);
+                if (m) return m[1];
+            }
+            return '';
+        }""")
+        if val:
+            return str(val).strip()
+    except Exception:
+        pass
+    return ""
 
 
 # ═══════════════════════════════════════════════════════════════
