@@ -2128,94 +2128,12 @@ async def solve_hcaptcha_accessibility(page, iframe,
             log("[Accessibility] Could not click accessibility option", level="warn")
             return False
 
-        # ── Step C: Smart wait for the accessibility challenge to appear ──
-        # hCaptcha may show an intermediate "Start Challenge"/"Set Cookie"
-        # screen before the actual question input. Handle that here.
-
-        # C1: Wait for ANY accessibility UI to appear (up to 10 seconds)
-        ui_detected = False
-        for _ in range(20):  # 10 seconds
-            if await _accessibility_active(hcaptcha):
-                ui_detected = True
-                break
-            await asyncio.sleep(0.5)
-
-        if not ui_detected:
-            log("[Accessibility] No accessibility UI appeared after click", level="warn")
-            return False
-
-        log("[Accessibility] Accessibility UI detected — checking for intermediate screens")
-
-        # C2: Handle intermediate "Start Challenge" / cookie screens
-        # hCaptcha often shows a screen with a start button or cookie prompt
-        # before the actual question input appears.
-        for _ in range(6):  # 3 seconds to dismiss intermediates
-            # Check if we're already at the question input
-            try:
-                inp = hcaptcha.locator(
-                    'input[type="text"]:visible, '
-                    'input[type="number"]:visible, '
-                    'textarea:visible, '
-                    '[role="textbox"]:visible'
-                ).first
-                await inp.wait_for(state="visible", timeout=500)
-                log("[Accessibility] [OK] Question input is already visible!")
-                return True
-            except Exception:
-                pass
-
-            # Try clicking any "Start" / "Begin" / cookie button
-            start_clicked = False
-            for btn_sel in [
-                'button:has-text("Start")',
-                'button:has-text("Begin")',
-                'button:has-text("Continue")',
-                'button:has-text("Set Accessibility Cookie")',
-                'button:has-text("OK")',
-                'button:has-text("Next")',
-                '[role="button"]:has-text("Start")',
-            ]:
-                try:
-                    btn = hcaptcha.locator(btn_sel).first
-                    await btn.wait_for(state="visible", timeout=500)
-                    await btn.click(timeout=2000)
-                    log(f"[Accessibility] Clicked '{btn_sel}' intermediate button")
-                    start_clicked = True
-                    await asyncio.sleep(1.0)
-                    break
-                except Exception:
-                    continue
-
-            if not start_clicked:
-                # No button found — maybe the UI is already at the input stage
-                # but using different markup
-                if await _accessibility_active(hcaptcha):
-                    return True
-                await asyncio.sleep(0.5)
-
-        # C3: Final check — wait for the actual question input to appear
-        for _ in range(16):  # 8 seconds
-            try:
-                inp = hcaptcha.locator(
-                    'input[type="text"]:visible, '
-                    'input[type="number"]:visible, '
-                    'textarea:visible, '
-                    '[role="textbox"]:visible'
-                ).first
-                await inp.wait_for(state="visible", timeout=500)
-                log("[Accessibility] [OK] Accessibility challenge input detected!")
-                return True
-            except Exception:
-                pass
-
-            # Broader: just check if ANY accessibility UI is still showing
-            if not await _accessibility_active(hcaptcha):
-                log("[Accessibility] Accessibility UI disappeared — challenge may have closed", level="warn")
-                return False
-            await asyncio.sleep(0.5)
-
-        log("[Accessibility] Accessibility challenge input never appeared", level="warn")
-        return False
+        # ── Step C: Wait for the challenge to render, then return ──
+        # No detection — just wait. The caller will screenshot + AI solve.
+        log("[Accessibility] Accessibility option clicked — waiting 10s for challenge to load")
+        await asyncio.sleep(10)
+        log("[Accessibility] Challenge wait complete — proceeding to screenshot + AI solve")
+        return True
 
     async def _read_question_text() -> str:
         """Read the question straight from the DOM.  Accessibility challenges
@@ -2396,25 +2314,15 @@ async def solve_hcaptcha_accessibility(page, iframe,
         return None
 
     async def _get_answer(hcaptcha, q: int) -> Optional[str]:
-        """Get the answer for question q: DOM text + local solve first,
-        Ollama vision as fallback for image-style questions."""
-        text = await _read_question_text()
-        log(f"[Accessibility] Q{q} raw text: '{text[:200]}'")
-        if text:
-            local = _solve_text_question(text)
-            if local is not None:
-                log(f"[Accessibility] Q{q} solved locally: {local}")
-                return local
-            log(f"[Accessibility] Q{q} local solve failed — trying vision")
-        else:
-            log(f"[Accessibility] Q{q} no DOM text — trying vision")
-        # vision fallback — capture the question area, not the whole widget.
-        # Only used when DOM gives nothing; retry once.
-        img_b64 = None
+        """Get the answer: screenshot full frame -> Ollama vision FIRST,
+        then local text parser as fallback."""
+        # -- Primary: screenshot entire hCaptcha frame -> Ollama vision --
+        log(f"[Accessibility] Q{q}: capturing full-frame screenshot for AI")
         try:
-            img_b64 = await _screenshot_question(hcaptcha)
+            img_b64 = await _screenshot_b64(hcaptcha)
         except Exception:
             img_b64 = None
+
         if img_b64:
             vision_prompt = (
                 "You are solving an hCaptcha accessibility challenge. "
@@ -2425,41 +2333,75 @@ async def solve_hcaptcha_accessibility(page, iframe,
                 "If it asks to type text you see, respond with ONLY that text. "
                 "IMPORTANT: Respond with ONLY the answer. No explanation, no punctuation, no extra words."
             )
-            if text:
-                vision_prompt += f"\nOn-screen question text: {text[:300]}"
-            ans = await _ollama_chat(img_b64, vision_prompt, timeout=35.0)
+            ans = await _ollama_chat(img_b64, vision_prompt, timeout=45.0)
             ans = (ans or "").strip()
-            ans = re.sub(r'["\'.,!?;:\-\[\](){}]', '', ans).split('\n')[0].strip()
+            # Clean: remove quotes/punctuation, take first line
+            import re as _re2
+            ans = _re2.sub(r"[^a-zA-Z0-9\s\-]", "", ans).split(chr(10))[0].strip()
             if not ans:
-                # one retry — vision models sometimes fail on first try
-                log(f"[Accessibility] Q{q} Ollama empty — retrying once")
-                ans = await _ollama_chat(img_b64, vision_prompt, timeout=35.0)
+                log(f"[Accessibility] Q{q} Ollama empty - retrying once")
+                ans = await _ollama_chat(img_b64, vision_prompt, timeout=45.0)
                 ans = (ans or "").strip()
-                ans = re.sub(r'["\'.,!?;:\-\[\](){}]', '', ans).split('\n')[0].strip()
+                ans = _re2.sub(r"[^a-zA-Z0-9\s\-]", "", ans).split(chr(10))[0].strip()
             if ans:
                 log(f"[Accessibility] Q{q} Ollama answer: '{ans}'")
                 return ans
             log(f"[Accessibility] Q{q} Ollama gave no answer", level="warn")
+
+        # -- Fallback: DOM text + local solver --
+        text = await _read_question_text()
+        log(f"[Accessibility] Q{q} DOM text: '{text[:200]}'")
+        if text:
+            local = _solve_text_question(text)
+            if local is not None:
+                log(f"[Accessibility] Q{q} solved locally: {local}")
+                return local
         return None
 
     async def _type_answer(hcaptcha, answer: str) -> bool:
-        for inp_sel in ['input[type="text"]', 'input[type="number"]', 'input', 'textarea', '[role="textbox"]']:
+        # Try 1: Locate input field by selector
+        for inp_sel in [
+            'input[type="text"]', 'input[type="number"]',
+            'input:not([type="hidden"])', 'textarea',
+            '[role="textbox"]', '[contenteditable="true"]',
+        ]:
             try:
                 inp = hcaptcha.locator(inp_sel).first
-                await inp.wait_for(state="visible", timeout=5000)
+                await inp.wait_for(state="visible", timeout=3000)
                 await inp.click()
                 await inp.fill("")
                 await inp.type(answer, delay=30)
                 log(f"[Accessibility] Typed '{answer}' into {inp_sel}")
                 return True
             except Exception:
-                pass
+                continue
+        # Try 2: Click center of frame to focus, then type
         try:
+            box = await hcaptcha.locator("body").first.bounding_box()
+            if box:
+                cx = box["x"] + box["width"] / 2
+                cy = box["y"] + box["height"] / 2
+                await page.mouse.click(cx, cy)
+                await asyncio.sleep(0.3)
+                await page.keyboard.type(answer, delay=50)
+                log(f"[Accessibility] Typed '{answer}' via page keyboard")
+                return True
+        except Exception:
+            pass
+        # Try 3: JS focus + keyboard
+        try:
+            await _challenge_js('''() => {
+                const inp = document.querySelector('input:not([type="hidden"]), textarea, [role="textbox"]');
+                if (inp) { inp.focus(); inp.value = ''; return 'ok'; }
+                return null;
+            }''')
+            await asyncio.sleep(0.3)
             await page.keyboard.type(answer, delay=50)
-            log("[Accessibility] Typed via keyboard")
+            log("[Accessibility] Typed via JS focus + keyboard")
             return True
         except Exception:
-            return False
+            pass
+        return False
 
     async def _submit_answer(hcaptcha) -> bool:
         for btn_sel in [
@@ -2570,28 +2512,21 @@ async def solve_hcaptcha_accessibility(page, iframe,
                     log("[Accessibility] Could not submit", level="warn")
                     break
 
-                # Wait for the outcome: token (passed) or a NEW question
+                # Wait for token (passed) or assume next question
                 outcome = None
-                for _ in range(10):
+                for _ in range(12):
                     await asyncio.sleep(0.75)
                     if await _token_present():
                         outcome = "passed"
                         break
-                    if await _accessibility_active(hcaptcha):
-                        outcome = "next"
-                        break
                 if outcome == "passed":
                     log("[Accessibility] [OK] hCaptcha passed!")
                     return True
-                if outcome is None:
-                    log("[Accessibility] Challenge closed — double-checking token",
-                        level="info")
-                    await asyncio.sleep(1.0)
-                    if await _token_present():
-                        log("[Accessibility] [OK] hCaptcha passed!")
-                        return True
-                    break
-                log(f"[Accessibility] New question detected (Q{q + 1}) — continuing")
+                await asyncio.sleep(1.0)
+                if await _token_present():
+                    log("[Accessibility] [OK] hCaptcha passed!")
+                    return True
+                log(f"[Accessibility] No token yet — continuing to Q{q + 1}")
 
             log(f"[Accessibility] Attempt {attempt} did not solve — retrying",
                 level="warn")
