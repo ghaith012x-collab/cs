@@ -1629,7 +1629,36 @@ async def solve_hcaptcha_accessibility(page, iframe,
                 pass
             await asyncio.sleep(1.0)
 
-        # ── Step 1: Get iframe bounding box (retry up to 8s) ──
+        # ── Step 1: Find the INNERMOST hCaptcha frame (challenge may be nested) ──
+        #    Do this FIRST — it uses page.frames, no bounding_box needed
+        try:
+            all_frames = page.frames
+            hcap_frames = [f for f in all_frames
+                           if 'hcaptcha' in (f.url or '').lower()]
+            if hcap_frames:
+                hcap_frames.sort(key=lambda f: len(f.url or ''), reverse=True)
+                frame = hcap_frames[0]
+                log(f"[Accessibility] Using nested frame: {frame.url[:90]}")
+        except Exception as e:
+            log(f"[Accessibility] frame scan error: {e}", level="warn")
+
+        # ── Step 2: Get content frame (essential — can't proceed without this) ──
+        if not frame:
+            for _retry in range(5):
+                try:
+                    frame = await iframe.content_frame()
+                    if frame:
+                        log("[Accessibility] Content frame ready")
+                        break
+                except Exception:
+                    pass
+                await asyncio.sleep(0.5)
+
+        if not frame:
+            log("[Accessibility] No content frame — cannot proceed", level="error")
+            return False
+
+        # ── Step 3: Get iframe bounding box (best-effort, NOT a blocker) ──
         iframe_box = None
         for _retry in range(8):
             try:
@@ -1643,39 +1672,21 @@ async def solve_hcaptcha_accessibility(page, iframe,
             log("[Accessibility] Waiting for iframe to render...", level="warn")
 
         if not iframe_box or iframe_box.get("width", 0) < 10:
-            log("[Accessibility] Iframe never rendered", level="error")
-            return False
-
-        # ── Step 2: Get content frame ──
-        frame = None
-        for _retry in range(5):
+            log("[Accessibility] WARNING: bounding_box unavailable — will use estimated coords", level="warn")
+            # Fallback: estimate iframe position from viewport
             try:
-                frame = await iframe.content_frame()
-                if frame:
-                    log("[Accessibility] Content frame ready")
-                    break
+                vp = await page.evaluate("() => ({w: window.innerWidth, h: window.innerHeight})")
+                # hCaptcha challenge is centered in viewport, ~400x500px
+                iframe_box = {
+                    'x': max(0, (vp['w'] - 400) / 2),
+                    'y': max(0, (vp['h'] - 500) / 2),
+                    'width': 400, 'height': 500,
+                }
+                log(f"[Accessibility] Estimated iframe at ({iframe_box['x']:.0f},{iframe_box['y']:.0f})")
             except Exception:
-                pass
-            await asyncio.sleep(0.5)
+                iframe_box = {'x': 100, 'y': 100, 'width': 400, 'height': 500}
 
-        if not frame:
-            log("[Accessibility] No content frame", level="error")
-            return False
-
-        # ── Step 2b: Find the INNERMOST hCaptcha frame (challenge is nested) ──
-        try:
-            all_frames = page.frames
-            hcap_frames = [f for f in all_frames
-                           if 'hcaptcha' in (f.url or '').lower()]
-            if hcap_frames:
-                # Prefer the deepest / longest URL (actual challenge frame)
-                hcap_frames.sort(key=lambda f: len(f.url or ''), reverse=True)
-                frame = hcap_frames[0]
-                log(f"[Accessibility] Using nested frame: {frame.url[:90]}")
-        except Exception as e:
-            log(f"[Accessibility] frame scan error: {e}", level="warn")
-
-        # ── Step 3: DUMP everything clickable, then click 3-dots ──
+        # ── Step 4: DUMP everything clickable, then click 3-dots ──
         await _dump_clickables(page, frame, iframe_box, log)
 
         for attempt in range(1, max_attempts + 1):
@@ -1788,7 +1799,7 @@ async def solve_hcaptcha_accessibility(page, iframe,
             except Exception:
                 pass
 
-            # Screenshot the challenge
+            # Screenshot the challenge (clip or full-page fallback)
             try:
                 shot = await page.screenshot(clip={
                     'x': iframe_box['x'],
@@ -1796,11 +1807,15 @@ async def solve_hcaptcha_accessibility(page, iframe,
                     'width': iframe_box['width'],
                     'height': iframe_box['height'],
                 })
-                img_b64 = base64.b64encode(shot).decode()
-                log(f"[Accessibility] Screenshot captured ({len(shot)} bytes)")
-            except Exception as e:
-                log(f"[Accessibility] Screenshot error: {e}", level="error")
-                continue
+            except Exception:
+                try:
+                    log("[Accessibility] Clip screenshot failed — full page fallback", level="warn")
+                    shot = await page.screenshot()
+                except Exception as e:
+                    log(f"[Accessibility] Screenshot error: {e}", level="error")
+                    continue
+            img_b64 = base64.b64encode(shot).decode()
+            log(f"[Accessibility] Screenshot captured ({len(shot)} bytes)")
 
             # Ollama vision
             vision_prompt = (
