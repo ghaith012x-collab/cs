@@ -2080,8 +2080,10 @@ async def solve_hcaptcha_accessibility(page, iframe,
         return False
 
     async def _read_question_text() -> str:
-        """Read the question straight from the DOM (it is real text —
-        that's the whole point of an accessibility challenge)."""
+        """Read the question straight from the DOM.  Two-pass approach:
+        Pass 1 — look for text that contains question words + numbers
+        (the actual challenge question, not the header).
+        Pass 2 — fall back to the first visible prompt-like text."""
         js = """() => {
             const sels = ['#prompt-text', '.challenge-prompt',
                           '[class*="prompt"]', '[class*="challenge-text"]',
@@ -2093,15 +2095,19 @@ async def solve_hcaptcha_accessibility(page, iframe,
                 for (const el of els) {
                     if (el.offsetParent === null) continue;
                     const t = (el.textContent || '').trim();
-                    if (t && t.length > 4 && t.length < 400) return t;
+                    if (!t || t.length < 8 || t.length > 500) continue;
+                    if (/\d/.test(t) && /how many|jar|coins|add|put|total|remove|first|last|letter|reverse|word|type|number|letter/i.test(t)) return t;
                 }
             }
             const body = document.body ? (document.body.innerText || '') : '';
-            const lines = body.split('\n').map(l => l.trim()).filter(l => l.length > 3);
+            const lines = body.split('\n').map(l => l.trim()).filter(l => l.length > 5);
             for (const l of lines) {
-                if (/how many|type|word|letter|reverse|enter|answer|add|coins|jar|number/i.test(l)) return l;
+                if (/\d/.test(l) && /how many|jar|coins|add|put|total|remove|first|last|letter|reverse|word|type|number/i.test(l)) return l;
             }
-            return lines.slice(0, 3).join(' ');
+            for (const l of lines) {
+                if (/how many|jar|coins|add|put|total|remove|first|last|letter|reverse|word|number/i.test(l)) return l;
+            }
+            return '';
         }"""
         val = await _challenge_js(js)
         return (val or "").strip()
@@ -2216,12 +2222,15 @@ async def solve_hcaptcha_accessibility(page, iframe,
         """Get the answer for question q: DOM text + local solve first,
         Ollama vision as fallback for image-style questions."""
         text = await _read_question_text()
+        log(f"[Accessibility] Q{q} raw text: '{text[:200]}'")
         if text:
-            log(f"[Accessibility] Q{q}: '{text[:140]}'")
             local = _solve_text_question(text)
             if local is not None:
                 log(f"[Accessibility] Q{q} solved locally: {local}")
                 return local
+            log(f"[Accessibility] Q{q} local solve failed — trying vision")
+        else:
+            log(f"[Accessibility] Q{q} no DOM text — trying vision")
         # vision fallback — capture the question area, not the whole widget
         try:
             img_b64 = await _screenshot_question(hcaptcha)
