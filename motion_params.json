@@ -1,0 +1,8 @@
+{
+  "mean_velocity": 0.33,
+  "std_velocity": 0.12,
+  "mean_pause": 16.0,
+  "count": 0,
+  "mean_points": 30.0,
+  "mean_accel": 0.02
+}
