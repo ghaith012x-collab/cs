@@ -1727,6 +1727,22 @@ async def solve_hcaptcha_accessibility(page, iframe,
         except Exception:
             return False
 
+    async def _menu_visible(hcaptcha) -> bool:
+        """True when the dropdown menu is open — has visible menu/listbox."""
+        try:
+            result = await _challenge_js("""() => {
+                const els = document.querySelectorAll('[role="menu"], [role="listbox"], .menu, .dropdown, [class*="menu"]');
+                for (const el of els) {
+                    if (el.offsetParent !== null && el.children.length > 0) {
+                        return 'menu_open';
+                    }
+                }
+                return null;
+            }""")
+            return bool(result)
+        except Exception:
+            return False
+
     async def _click_three_dots(hcaptcha) -> bool:
         """Click the 3-dots menu button — tries 4 methods in rapid sequence:
         WAY 1: JS evaluate finds & clicks the button (most direct, bypasses intercept).
@@ -1880,17 +1896,109 @@ async def solve_hcaptcha_accessibility(page, iframe,
         return False
 
     async def _open_accessibility_challenge(hcaptcha) -> bool:
-        """3-dots -> Accessibility Challenge -> wait for question to render."""
-        if not await _click_three_dots(hcaptcha):
+        """Open accessibility challenge with detection at each step.
+        Click one 3-dots method → wait 5s for menu → click option → detect input.
+        If any step fails, retry with next method."""
+
+        # ── Step A: Click 3-dots (one method at a time, detect menu open) ──
+        menu_opened = False
+
+        # WAY 1: JS click
+        try:
+            js_result = await _challenge_js("""() => {
+                const btn = document.querySelector('#menu-info')
+                         || document.querySelector('[aria-label*="About hCaptcha"]')
+                         || document.querySelector('[aria-label*="Extra menu"]')
+                         || document.querySelector('.display-menu-btn');
+                if (btn && btn.offsetParent !== null) {
+                    btn.scrollIntoView({block: 'center'});
+                    btn.dispatchEvent(new MouseEvent('mousedown', {bubbles:true}));
+                    btn.dispatchEvent(new MouseEvent('mouseup', {bubbles:true}));
+                    btn.dispatchEvent(new MouseEvent('click', {bubbles:true}));
+                    return 'ok';
+                }
+                return null;
+            }""")
+            if js_result:
+                log("[Accessibility] Clicked 3-dots via JS (way 1)")
+                for _ in range(10):  # 5 seconds
+                    if await _menu_visible(hcaptcha):
+                        menu_opened = True
+                        log("[Accessibility] Menu opened (way 1)")
+                        break
+                    await asyncio.sleep(0.5)
+        except Exception as e:
+            log(f"[Accessibility] way 1 (JS) failed: {str(e)[:60]}", level="warn")
+
+        if not menu_opened:
+            # WAY 2: Playwright role click
+            try:
+                for label in ("About hCaptcha & Accessibility Options", "Extra menu", "More options", "Menu"):
+                    try:
+                        btn = hcaptcha.get_by_role("button", name=label).first
+                        await btn.wait_for(state="visible", timeout=3000)
+                        await btn.click(timeout=2000)
+                        log(f"[Accessibility] Clicked 3-dots via role '{label}' (way 2)")
+                        for _ in range(10):
+                            if await _menu_visible(hcaptcha):
+                                menu_opened = True
+                                break
+                            await asyncio.sleep(0.5)
+                        if menu_opened:
+                            break
+                    except Exception:
+                        continue
+            except Exception as e:
+                log(f"[Accessibility] way 2 (role) failed: {str(e)[:60]}", level="warn")
+
+        if not menu_opened:
+            # WAY 3: CSS force-click
+            try:
+                btn = hcaptcha.locator("#menu-info").first
+                await btn.wait_for(state="visible", timeout=3000)
+                await btn.click(force=True, timeout=3000)
+                log("[Accessibility] Force-clicked #menu-info (way 3)")
+                for _ in range(10):
+                    if await _menu_visible(hcaptcha):
+                        menu_opened = True
+                        break
+                    await asyncio.sleep(0.5)
+            except Exception as e:
+                log(f"[Accessibility] way 3 (force) failed: {str(e)[:60]}", level="warn")
+
+        if not menu_opened:
+            # WAY 4: dispatch event
+            try:
+                await hcaptcha.locator("#menu-info").first.dispatch_event("click")
+                log("[Accessibility] Dispatched click (way 4)")
+                for _ in range(10):
+                    if await _menu_visible(hcaptcha):
+                        menu_opened = True
+                        break
+                    await asyncio.sleep(0.5)
+            except Exception as e:
+                log(f"[Accessibility] way 4 (dispatch) failed: {str(e)[:60]}", level="warn")
+
+        if not menu_opened:
+            log("[Accessibility] Menu never opened after all 4 methods", level="warn")
             return False
-        await asyncio.sleep(1.2)
-        if not await _click_accessibility_option(hcaptcha):
+
+        # ── Step B: Menu is open — click Accessibility Challenge option ──
+        await asyncio.sleep(0.5)  # let animation finish
+        clicked_opt = await _click_accessibility_option(hcaptcha)
+        if not clicked_opt:
+            log("[Accessibility] Could not click accessibility option", level="warn")
             return False
-        for _ in range(6):
+
+        # ── Step C: Wait for accessibility challenge input to appear ──
+        for _ in range(12):  # 6 seconds
             if await _accessibility_active(hcaptcha):
+                log("[Accessibility] [OK] Accessibility challenge input detected!")
                 return True
             await asyncio.sleep(0.5)
-        return await _accessibility_active(hcaptcha)
+
+        log("[Accessibility] Accessibility challenge did not open (no input detected)", level="warn")
+        return False
 
     async def _read_question_text() -> str:
         """Read the question straight from the DOM (it is real text —
