@@ -130,14 +130,22 @@ class DiscordAutomation:
             '--no-sandbox',
             '--disable-setuid-sandbox',
             '--disable-webgl',
+            '--disable-dev-shm-usage',
+            '--disable-extensions',
+            '--disable-background-networking',
+            '--mute-audio',
+            '--disable-default-apps',
+            '--disable-sync',
+            '--disable-translate',
             '--disable-features=IsolateOrigins,site-per-process',
+            '--js-flags=--max-old-space-size=256',
         ]
 
         self._ua = random.choice(USER_AGENTS)
         self._browser = await self._playwright.chromium.launch(headless=self.headless, args=args)
 
         ctx_opts = {
-            'viewport': {'width': 1920, 'height': 1080},
+            'viewport': {'width': 860, 'height': 640},
             'user_agent': self._ua,
         }
         if self.proxy:
@@ -176,7 +184,7 @@ class DiscordAutomation:
         try:
             self._tor_enabled = False
             self._context = await self._browser.new_context(
-                viewport={'width': 1920, 'height': 1080},
+                viewport={'width': 860, 'height': 640},
                 user_agent=self._ua,
             )
             await self._context.add_init_script(INIT_SCRIPT)
