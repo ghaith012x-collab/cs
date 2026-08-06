@@ -19,6 +19,8 @@ RUN python -m playwright install chromium
 
 # Copy application files
 COPY app.py server.py captcha_solver.py duckmail.py database.py config.json ./
+COPY fetch_brains.py ./
+COPY models/ models/
 COPY torrc /etc/tor/torrc
 COPY start.sh .
 RUN chmod +x start.sh
