@@ -2080,11 +2080,34 @@ async def solve_hcaptcha_accessibility(page, iframe,
         return False
 
     async def _read_question_text() -> str:
-        """Read the question straight from the DOM.  Aggressive approach:
-        1. Try specific selectors for question text
-        2. Fall back to body.innerText scan
-        3. Last resort: grab ALL visible text from frame"""
+        """Read the question straight from the DOM.  Accessibility challenges
+        are screen-reader friendly — the question image MUST carry
+        alt/aria text.  Priority order:
+        1. img[alt] and aria-* attributes (this is THE question)
+        2. Visible text with question patterns
+        3. All visible text (last resort)"""
         js = """() => {
+            // Pass A: aria / alt text — the actual question, by design
+            const ariaSels = ['[aria-label]', '[aria-labelledby]',
+                              '[aria-describedby]', 'img[alt]', '[role="img"]'];
+            for (const s of ariaSels) {
+                const els = document.querySelectorAll(s);
+                for (const el of els) {
+                    if (el.offsetParent === null) continue;
+                    let t = '';
+                    if (el.getAttribute('alt')) t = el.getAttribute('alt');
+                    else if (el.getAttribute('aria-label')) t = el.getAttribute('aria-label');
+                    else if (el.getAttribute('aria-describedby')) {
+                        const ids = el.getAttribute('aria-describedby').split(/\s+/);
+                        for (const id of ids) {
+                            const ref = document.getElementById(id);
+                            if (ref) t += ' ' + (ref.textContent || '');
+                        }
+                    }
+                    t = (t || '').trim();
+                    if (t.length > 3 && t.length < 600) return t;
+                }
+            }
             // Pass 1: specific selectors with question keywords
             const sels = ['#prompt-text', '.challenge-prompt',
                           '[class*="prompt"]', '[class*="challenge-text"]',
@@ -2247,7 +2270,9 @@ async def solve_hcaptcha_accessibility(page, iframe,
             log(f"[Accessibility] Q{q} local solve failed — trying vision")
         else:
             log(f"[Accessibility] Q{q} no DOM text — trying vision")
-        # vision fallback — capture the question area, not the whole widget
+        # vision fallback — capture the question area, not the whole widget.
+        # Only used when DOM gives nothing; retry once.
+        img_b64 = None
         try:
             img_b64 = await _screenshot_question(hcaptcha)
         except Exception:
@@ -2264,12 +2289,19 @@ async def solve_hcaptcha_accessibility(page, iframe,
             )
             if text:
                 vision_prompt += f"\nOn-screen question text: {text[:300]}"
-            ans = await _ollama_chat(img_b64, vision_prompt)
+            ans = await _ollama_chat(img_b64, vision_prompt, timeout=25.0)
             ans = (ans or "").strip()
             ans = re.sub(r'["\'.,!?;:\-\[\](){}]', '', ans).split('\n')[0].strip()
+            if not ans:
+                # one retry — vision models sometimes fail on first try
+                log(f"[Accessibility] Q{q} Ollama empty — retrying once")
+                ans = await _ollama_chat(img_b64, vision_prompt, timeout=25.0)
+                ans = (ans or "").strip()
+                ans = re.sub(r'["\'.,!?;:\-\[\](){}]', '', ans).split('\n')[0].strip()
             if ans:
                 log(f"[Accessibility] Q{q} Ollama answer: '{ans}'")
                 return ans
+            log(f"[Accessibility] Q{q} Ollama gave no answer", level="warn")
         return None
 
     async def _type_answer(hcaptcha, answer: str) -> bool:
