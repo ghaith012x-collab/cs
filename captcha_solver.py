@@ -2238,10 +2238,15 @@ async def solve_hcaptcha_accessibility(page, iframe,
         m = re.search('["“”](\w{3,})["“”]', text)
         if m:
             return m.group(1)
-        # Strategy 2: Word preceded by "word is" or "word:"
-        m = re.search(r'(?:word|the word)\s+(?:is|:)\s+(\w{3,})', text, re.IGNORECASE)
+        # Strategy 2: Word after "the word X" / "word X" / "word is X" / "word: X"
+        m = re.search(r'(?:the\s+)?word\s+(?:is\s+|:\s+|of\s+)?(\w{3,})',
+                      text, re.IGNORECASE)
         if m:
-            return m.group(1)
+            candidate = m.group(1)
+            # 'of' could be caught as the word if the "word of" form is used;
+            # only accept real content words
+            if candidate.lower() not in ('of', 'the', 'and', 'is', 'a', 'an'):
+                return candidate
         # Strategy 3: ALL-CAPS word (often the target in these puzzles)
         caps = re.findall(r'\b([A-Z]{3,})\b', text)
         if caps:
@@ -2264,16 +2269,18 @@ async def solve_hcaptcha_accessibility(page, iframe,
         t = text.strip().lower()
         orig = text.strip()
 
-        # ── COIN / JAR word problems: extract and sum all numbers ──
+        # ── COIN / JAR word problems: sum all numbers ──
         # "Your jar has 3 coins. On Sunday, you add 6 coins. Then on Saturday,
         #  you add 8 coins. How many coins are there?" → 3+6+8 = 17
+        # Repeats DO count: "put in 5... put in 5" = +5 twice → 9+5+5=19.
         coin_jar = re.search(
             r'(?:jar|coins?|add|put|total|altogether|in\s+all)',
             t, re.IGNORECASE
         )
         if coin_jar:
-            # Extract ALL numbers from the question
-            nums = re.findall(r'(\d+)', orig)
+            # Extract ALL numbers from the question and sum them.
+            # Repeats DO count: "put in 5... put in 5" means +5 twice → 9+5+5=19.
+            nums = re.findall(r'\b(\d+)\b', orig)
             if len(nums) >= 2:
                 total = sum(int(n) for n in nums)
                 log(f"[Accessibility] Coin/jar sum: {'+'.join(nums)} = {total}")
@@ -2297,17 +2304,37 @@ async def solve_hcaptcha_accessibility(page, iframe,
                 log(f"[Accessibility] Math chain: '{full_expr}' = {ans}")
                 return ans
 
-        # ── WORD PUZZLES: "remove first and last letter and write it backwards" ──
+        # ── WORD PUZZLES: "remove/drop first and last letter, write backwards" ──
+        # Loose detection: any of remove/drop/delete/strip/take + first + last
+        # + letter/character. The "write it backwards/reverse" tail varies, so
+        # it is optional. Target word = LAST word of the question sentence.
         word_pat = re.compile(
-            r'(?:remove|delete|strip)\s+(?:the\s+)?(?:first|1st)\s+(?:and\s+)?'
-            r'(?:the\s+)?(?:last)\s+(?:letter|character|char)s?\s+'
-            r'(?:and\s+)?(?:write|spell|type|put)\s+(?:it|them)\s+'
-            r'(?:backwards|in reverse|backward|reversed)',
+            r'(?:remove|drop|delete|strip|take)\s+(?:out\s+)?(?:the\s+)?'
+            r'(?:first|1st|first\s+letter)\s+(?:and|&)\s+(?:the\s+)?'
+            r'(?:last|last\s+letter)\s+(?:letter|character|char|letters|characters)?s?',
             re.IGNORECASE
         )
-        if word_pat.search(orig):
-            # Find the actual word - look for a word that's clearly the target
+        if word_pat.search(orig) or (re.search(r'\bremove\b', t)
+                                     and re.search(r'\bfirst\b', t)
+                                     and re.search(r'\blast\b', t)
+                                     and re.search(r'\bletter', t)):
+            # Strategy A: quoted / "of the word X" / "word is X" / ALL-CAPS
+            # (most reliable — hCaptcha always names the word explicitly)
             word = _find_target_word(orig)
+            # Strategy B: LAST word of the sentence as fallback
+            if not word or len(word) <= 2:
+                words = re.findall(r'[A-Za-z]{2,}', orig)
+                if words:
+                    skip_tail = {'backwards', 'backward', 'reverse', 'reversed',
+                                 'direction', 'remaining', 'them', 'it', 'the',
+                                 'and', 'write', 'spell', 'type', 'put', 'word',
+                                 'letter', 'letters', 'order', 'answer', 'please',
+                                 'from', 'with', 'into', 'your', 'in'}
+                    for w in reversed(words):
+                        if w.lower() in skip_tail:
+                            continue
+                        word = w
+                        break
             if word and len(word) > 2:
                 # Remove first and last letter, then reverse
                 result = word[1:-1][::-1]
@@ -2444,21 +2471,27 @@ async def solve_hcaptcha_accessibility(page, iframe,
         return False
 
     async def _submit_answer(hcaptcha) -> bool:
-        # Try accessible role-based locator first
-        try:
-            btn = hcaptcha.get_by_role("button", name="Submit").first
-            await btn.wait_for(state="visible", timeout=3000)
-            await btn.click(timeout=3000)
-            log("[Accessibility] Submitted via get_by_role button Submit")
-            return True
-        except Exception:
-            pass
+        # The Next button is the primary submit for accessibility challenges.
+        # WAIT 3 seconds before clicking — Skip sits at the same coordinates
+        # as Next and would be clicked instead if we act too fast.
+        log("[Accessibility] Waiting 3s before clicking Next (avoid Skip)")
+        await asyncio.sleep(3)
+        # Try accessible role-based locator: "Next" first, then "Submit"
+        for name in ("Next", "Submit", "Verify", "Continue", "OK"):
+            try:
+                btn = hcaptcha.get_by_role("button", name=name).first
+                await btn.wait_for(state="visible", timeout=3000)
+                await btn.click(timeout=3000)
+                log(f"[Accessibility] Submitted via get_by_role button {name}")
+                return True
+            except Exception:
+                continue
         # Fallback: selector-based submit buttons
         for btn_sel in [
             'button[type="submit"]',
+            'button:has-text("Next")',
             'button:has-text("Submit")',
             'button:has-text("Verify")',
-            'button:has-text("Next")',
             'button:has-text("OK")',
             'button:has-text("Continue")',
             '#submit',
