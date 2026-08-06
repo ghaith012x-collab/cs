@@ -412,6 +412,7 @@ def train_classifier() -> None:
         for x, y in tr_ld:
             x, y = x.to(device), y.to(device)
             lam = 1.0
+            y2 = y
             if random.random() < 0.5:
                 lam = float(np.random.beta(0.2, 0.2))
                 idx = torch.randperm(x.size(0), device=x.device)
