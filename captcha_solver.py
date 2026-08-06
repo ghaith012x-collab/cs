@@ -1620,8 +1620,8 @@ async def solve_hcaptcha_accessibility(page, iframe,
                                         ollama_model: str = "",
                                         ollama_url: str = "",
                                         log: Optional[Callable] = None,
-                                        max_attempts: int = 1,
-                                        max_questions: int = 8) -> bool:
+                                        max_attempts: int = 6,
+                                        max_questions: int = 10) -> bool:
     """Solve hCaptcha via the Accessibility Challenge using Playwright's
     frame_locator for reliable cross-origin iframe interaction.
 
@@ -2136,100 +2136,86 @@ async def solve_hcaptcha_accessibility(page, iframe,
         return True
 
     async def _read_question_text() -> str:
-        """Read the question straight from the DOM.  Accessibility challenges
-        are screen-reader friendly — the question image MUST carry
-        alt/aria text.  Priority order:
-        1. img[alt] and aria-* attributes (this is THE question)
-        2. Visible text with question patterns
-        3. All visible text (last resort)"""
-        js = """() => {
-            // Pass A: aria / alt text — the actual question, by design
-            const ariaSels = ['[aria-label]', '[aria-labelledby]',
-                              '[aria-describedby]', 'img[alt]', '[role="img"]'];
-            for (const s of ariaSels) {
-                const els = document.querySelectorAll(s);
-                for (const el of els) {
-                    if (el.offsetParent === null) continue;
-                    let t = '';
-                    if (el.getAttribute('alt')) t = el.getAttribute('alt');
-                    else if (el.getAttribute('aria-label')) t = el.getAttribute('aria-label');
-                    else if (el.getAttribute('aria-describedby')) {
-                        const ids = el.getAttribute('aria-describedby').split(/\s+/);
-                        for (const id of ids) {
-                            const ref = document.getElementById(id);
-                            if (ref) t += ' ' + (ref.textContent || '');
-                        }
-                    }
-                    t = (t || '').trim();
-                    if (t.length > 3 && t.length < 600) return t;
-                }
-            }
-            // Pass 1: specific selectors with question keywords
-            const sels = ['#prompt-text', '.challenge-prompt',
-                          '[class*="prompt"]', '[class*="challenge-text"]',
-                          '[class*="task-text"]', '[class*="instruction"]',
-                          '[role="heading"]', '[class*="question"]',
-                          '[class*="challenge"] [class*="text"]'];
-            for (const s of sels) {
-                const els = document.querySelectorAll(s);
-                for (const el of els) {
-                    if (el.offsetParent === null) continue;
-                    const t = (el.textContent || '').trim();
-                    if (!t || t.length < 5 || t.length > 600) continue;
-                    if (/\d/.test(t) && /how many|jar|coins|add|put|total|remove|first|last|letter|reverse|word|type|number/i.test(t)) return t;
-                    if (t.length > 15 && /how many|jar|coins|add|put|total|remove|first|last|letter|reverse|word|type|number/i.test(t)) return t;
-                }
-            }
-            // Pass 2: scan all visible text for question patterns
-            const body = document.body ? (document.body.innerText || '') : '';
-            const lines = body.split('\n').map(l => l.trim()).filter(l => l.length > 5);
-            for (const l of lines) {
-                if (/\d/.test(l) && /how many|jar|coins|add|put|total|remove|first|last|letter|reverse|word|type|number/i.test(l)) return l;
-            }
-            for (const l of lines) {
-                if (/how many|jar|coins|add|put|total|remove|first|last|letter|reverse|word|number/i.test(l)) return l;
-            }
-            // Pass 3: scan ALL visible elements for ANY text node (last resort)
-            const all = [];
-            const walk = (node) => {
-                if (node.nodeType === 3) {
-                    const t = node.textContent.trim();
-                    if (t.length > 3) all.push(t);
-                } else if (node.nodeType === 1 && node.offsetParent !== null) {
-                    for (const c of node.childNodes) walk(c);
-                }
-            };
-            walk(document.body);
-            const full = all.join(' ');
-            if (full.length > 10) return full.substring(0, 500);
-            return '';
-        }"""
-        # Primary: hCaptcha frame body innerText (most reliable)
-        val = None
+        """EXTREME search: scan page.innerText, EVERY frame innerText,
+        and the hCaptcha frame body for question text patterns."""
+        all_texts = []
+
+        # Method 1: hCaptcha frame body innerText
         try:
-            val = await hcaptcha.locator("body").inner_text()
-            if val:
-                val = val.strip()
+            t = await hcaptcha.locator("body").inner_text()
+            if t and len(t.strip()) > 5:
+                all_texts.append(("hcaptcha-body", t.strip()))
         except Exception:
             pass
-        # Fallback 1: page-level JS scan
-        if not val or len(val) < 3:
-            try:
-                val = await page.evaluate(js)
-            except Exception:
-                pass
-        # Fallback 2: scan all frames
-        if not val or not str(val).strip():
-            # Try inner_text() first (Playwright reliable text extraction)
-            try:
-                body_text = await hcaptcha.locator("body").inner_text()
-                if body_text and len(body_text.strip()) > 3:
-                    return body_text.strip()[:600]
-            except Exception:
-                pass
-            val = await _challenge_js(js)
-        return (val or "").strip()
 
+        # Method 2: page.evaluate document.body.innerText
+        try:
+            t = await page.evaluate('() => document.body ? document.body.innerText : ""')
+            if t and len(t.strip()) > 5:
+                all_texts.append(("page-body", t.strip()))
+        except Exception:
+            pass
+
+        # Method 3: iterate ALL frames and read innerText
+        try:
+            for i, frame in enumerate(page.frames):
+                try:
+                    t = await frame.evaluate('() => document.body ? document.body.innerText : ""')
+                    if t and len(t.strip()) > 5:
+                        all_texts.append((f"frame-{i}", t.strip()))
+                except Exception:
+                    continue
+        except Exception:
+            pass
+
+        # Method 4: page.locator("body").inner_text()
+        try:
+            t = await page.locator("body").inner_text()
+            if t and len(t.strip()) > 5:
+                all_texts.append(("page-locator", t.strip()))
+        except Exception:
+            pass
+
+        # ── Now scan all collected texts for question patterns ──
+        # Priority 1: lines with digits AND jar/coins/add/put/remove/first/last
+        for source, text in all_texts:
+            lines = text.split(chr(10))
+            for line in lines:
+                line = line.strip()
+                if len(line) < 8 or len(line) > 500:
+                    continue
+                # Coin/jar math
+                if re.search(r'\d', line) and re.search(
+                    r'jar|coins?|add|put|total|how many|altogether|start|has',
+                    line, re.IGNORECASE
+                ):
+                    log(f"[Accessibility] Found question in {source}: '{line[:120]}'")
+                    return line
+                # Word puzzle
+                if re.search(r'\bremove\b|\bdrop\b|\bdelete\b|\bstrip\b|\bfirst\b|\blast\b|\bletter\b|\breverse\b|\bbackwards\b|\bword\b',
+                             line, re.IGNORECASE):
+                    log(f"[Accessibility] Found question in {source}: '{line[:120]}'")
+                    return line
+
+        # Priority 2: any line with question keywords
+        for source, text in all_texts:
+            lines = text.split(chr(10))
+            for line in lines:
+                line = line.strip()
+                if len(line) < 8 or len(line) > 500:
+                    continue
+                if re.search(r'jar|coins?|how many|add|put|remove|first|last|letter|reverse|backwards|number|type|word',
+                             line, re.IGNORECASE):
+                    log(f"[Accessibility] Found (loose) in {source}: '{line[:120]}'")
+                    return line
+
+        # Priority 3: just return the concatenated text from all sources
+        for source, text in all_texts:
+            if len(text) > 10:
+                log(f"[Accessibility] No pattern match — returning raw text from {source}")
+                return text[:500]
+
+        return ''
 
     def _find_target_word(text: str) -> Optional[str]:
         """Given a word puzzle question, extract the target word.
@@ -2364,51 +2350,18 @@ async def solve_hcaptcha_accessibility(page, iframe,
         return None
 
     async def _get_answer(hcaptcha, q: int) -> Optional[str]:
-        """Get the answer: screenshot full frame -> Ollama vision FIRST,
-        then local text parser as fallback."""
-        # -- Step 1: Try local solver FIRST (fast, no network) --
+        """Get the answer: EXTREME DOM text scan -> local solver.
+        No Ollama. No screenshots. Just read text and do math."""
         text = await _read_question_text()
-        log(f"[Accessibility] Q{q} DOM text: '{text[:200]}'")
+        log(f"[Accessibility] Q{q} text: '{text[:200]}'")
         if text:
             local = _solve_text_question(text)
             if local is not None:
-                log(f"[Accessibility] Q{q} solved locally: {local}")
+                log(f"[Accessibility] Q{q} solved: {local}")
                 return local
-
-        # -- Step 2: Screenshot + Ollama vision --
-        log(f"[Accessibility] Q{q}: capturing page screenshot for AI")
-        try:
-            img_bytes = await page.screenshot(type="png")
-            img_b64 = base64.b64encode(img_bytes).decode()
-        except Exception as e:
-            log(f"[Accessibility] Q{q} screenshot failed: {e}", level="error")
-            img_b64 = None
-
-        if img_b64:
-            vision_prompt = (
-                "You are solving an hCaptcha accessibility challenge. "
-                "Read the question in the screenshot carefully. "
-                "If it is a math question (add, subtract, count), respond with ONLY the number. "
-                "If it asks about coins/jars/adding, sum all the numbers and respond with ONLY the total. "
-                "If it asks to remove first/last letter and reverse, do that and respond with ONLY the result. "
-                "If it asks to type text you see, respond with ONLY that text. "
-                "IMPORTANT: Respond with ONLY the answer. No explanation, no punctuation, no extra words."
-            )
-            ans = await _ollama_chat(img_b64, vision_prompt, timeout=45.0)
-            ans = (ans or "").strip()
-            # Clean: remove quotes/punctuation, take first line
-            import re as _re2
-            ans = _re2.sub(r"[^a-zA-Z0-9\s\-]", "", ans).split(chr(10))[0].strip()
-            if not ans:
-                log(f"[Accessibility] Q{q} Ollama empty - retrying once")
-                ans = await _ollama_chat(img_b64, vision_prompt, timeout=45.0)
-                ans = (ans or "").strip()
-                ans = _re2.sub(r"[^a-zA-Z0-9\s\-]", "", ans).split(chr(10))[0].strip()
-            if ans:
-                log(f"[Accessibility] Q{q} Ollama answer: '{ans}'")
-                return ans
-            log(f"[Accessibility] Q{q} Ollama gave no answer", level="warn")
-
+            log(f"[Accessibility] Q{q} local solver returned None", level="warn")
+        else:
+            log(f"[Accessibility] Q{q} NO TEXT FOUND anywhere", level="error")
         return None
 
     async def _type_answer(hcaptcha, answer: str) -> bool:
