@@ -17,9 +17,10 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Install Chromium for Playwright
 RUN python -m playwright install chromium
 
-# Copy application files
-COPY app.py server.py captcha_solver.py duckmail.py database.py config.json ./
-COPY fetch_brains.py ./
+# Copy ALL application files (glob keeps future files in sync)
+COPY *.py ./
+COPY *.txt ./
+COPY config.json ./
 COPY models/ models/
 COPY torrc /etc/tor/torrc
 COPY start.sh .
