@@ -1918,64 +1918,91 @@ async def solve_hcaptcha_accessibility(page, iframe,
         return False
 
     async def _open_accessibility_challenge(hcaptcha) -> bool:
-        """Open accessibility challenge. Single attempt but uses real Playwright
-        clicks (not fake JS events). Tries click + JS click as fast follow-up."""
+        """Open accessibility challenge. Single attempt — JS click first
+        (the method that worked in logs), real Playwright click as fallback."""
 
-        # ── Step A: Click 3-dots using REAL Playwright click ──
+        # ── Step A: Click 3-dots ──
         menu_opened = False
 
-        # PRIMARY: Real Playwright click (actual mouse simulation)
+        # PRIMARY: JS dispatchEvent click (bypasses intercept — worked in logs)
         try:
-            for sel in ("#menu-info", '[aria-label*="About hCaptcha"]',
-                        '[aria-label*="Extra menu"]', '.display-menu-btn'):
-                try:
-                    btn = hcaptcha.locator(sel).first
-                    await btn.wait_for(state="visible", timeout=5000)
-                    await btn.scroll_into_view_if_needed()
-                    await btn.click(timeout=3000)
-                    log(f"[Accessibility] Real-clicked 3-dots via '{sel}'")
-                    for _ in range(10):  # 5 seconds
-                        if await _menu_visible(hcaptcha):
-                            menu_opened = True
-                            log("[Accessibility] Menu opened (real click)")
-                            break
-                        await asyncio.sleep(0.5)
-                    if menu_opened:
+            js_result = await _challenge_js("""() => {
+                const btn = document.querySelector('#menu-info')
+                         || document.querySelector('[aria-label*="About hCaptcha"]')
+                         || document.querySelector('[aria-label*="Extra menu"]')
+                         || document.querySelector('.display-menu-btn');
+                if (btn && btn.offsetParent !== null) {
+                    btn.scrollIntoView({block: 'center'});
+                    btn.dispatchEvent(new MouseEvent('mousedown', {bubbles:true}));
+                    btn.dispatchEvent(new MouseEvent('mouseup', {bubbles:true}));
+                    btn.dispatchEvent(new MouseEvent('click', {bubbles:true}));
+                    return 'ok';
+                }
+                return null;
+            }""")
+            if js_result:
+                log("[Accessibility] Clicked 3-dots via JS (way 1)")
+                for _ in range(10):  # 5 seconds
+                    if await _menu_visible(hcaptcha):
+                        menu_opened = True
+                        log("[Accessibility] Menu opened (way 1)")
                         break
-                except Exception:
-                    continue
+                    await asyncio.sleep(0.5)
+            else:
+                log("[Accessibility] JS found no 3-dots button yet", level="warn")
         except Exception as e:
-            log(f"[Accessibility] Real click failed: {str(e)[:60]}", level="warn")
+            log(f"[Accessibility] way 1 (JS) failed: {str(e)[:60]}", level="warn")
 
-        # FALLBACK: JS click (fast follow-up if real click didn't open menu)
+        # FALLBACK: Real Playwright click (actual mouse simulation)
         if not menu_opened:
             await asyncio.sleep(0.3)
             try:
-                js_result = await _challenge_js("""() => {
+                for sel in ("#menu-info", '[aria-label*="About hCaptcha"]',
+                            '[aria-label*="Extra menu"]', '.display-menu-btn'):
+                    try:
+                        btn = hcaptcha.locator(sel).first
+                        await btn.wait_for(state="visible", timeout=5000)
+                        await btn.scroll_into_view_if_needed()
+                        await btn.click(timeout=3000)
+                        log(f"[Accessibility] Real-clicked 3-dots via '{sel}'")
+                        for _ in range(10):  # 5 seconds
+                            if await _menu_visible(hcaptcha):
+                                menu_opened = True
+                                log("[Accessibility] Menu opened (real click)")
+                                break
+                            await asyncio.sleep(0.5)
+                        if menu_opened:
+                            break
+                    except Exception:
+                        continue
+            except Exception as e:
+                log(f"[Accessibility] Real click failed: {str(e)[:60]}", level="warn")
+
+        # LAST RESORT: native JS .click() method on the element
+        if not menu_opened:
+            await asyncio.sleep(0.3)
+            try:
+                js2 = await _challenge_js("""() => {
                     const btn = document.querySelector('#menu-info')
                              || document.querySelector('[aria-label*="About hCaptcha"]')
                              || document.querySelector('[aria-label*="Extra menu"]')
                              || document.querySelector('.display-menu-btn');
-                    if (btn && btn.offsetParent !== null) {
-                        btn.scrollIntoView({block: 'center'});
-                        btn.click();
-                        return 'ok';
-                    }
+                    if (btn) { btn.click(); return 'ok'; }
                     return null;
                 }""")
-                if js_result:
-                    log("[Accessibility] JS-clicked 3-dots (fallback)")
+                if js2:
+                    log("[Accessibility] Native JS .click() fallback")
                     for _ in range(10):  # 5 seconds
                         if await _menu_visible(hcaptcha):
                             menu_opened = True
-                            log("[Accessibility] Menu opened (JS fallback)")
+                            log("[Accessibility] Menu opened (native JS click)")
                             break
                         await asyncio.sleep(0.5)
             except Exception as e:
-                log(f"[Accessibility] JS fallback failed: {str(e)[:60]}", level="warn")
+                log(f"[Accessibility] Native JS click failed: {str(e)[:60]}", level="warn")
 
         if not menu_opened:
-            log("[Accessibility] Menu did not open after real + JS click", level="warn")
+            log("[Accessibility] Menu did not open after 3 click methods", level="warn")
             return False
 
         # ── Step B: Menu is open — click Accessibility Challenge option ──
@@ -1990,7 +2017,6 @@ async def solve_hcaptcha_accessibility(page, iframe,
             if await _accessibility_active(hcaptcha):
                 log("[Accessibility] [OK] Accessibility challenge input detected!")
                 return True
-            # Also check page-level
             try:
                 has_input = await page.evaluate("""() => {
                     const inp = document.querySelector('input[type="text"]:not([type="hidden"]), input[type="number"]:not([type="hidden"]), textarea:not([type="hidden"])');

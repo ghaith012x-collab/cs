@@ -471,26 +471,15 @@ class DiscordAutomation:
                     self._log(f"[Captcha] Captcha check error: {e}", level="warn")
                 return False
 
-            # Which challenge is showing? A checkbox widget is solvable via the
-            # NoCaptchaAI token API; a drag puzzle must be dragged in-browser.
+            # Which challenge is showing? (only used for logging now)
             mode = await self._detect_challenge_mode(iframe)
             self._log(f"[Captcha] Challenge mode: {mode}")
 
-            drag_result = None
-            if mode == "drag":
-                self._log("[Captcha] Drag puzzle detected - solving in-browser...")
-                drag_result = await self._try_solve_drag(iframe)
-                if drag_result is True:
-                    return True
-
-            if not self._solver.configured:
-                self._log("[Captcha] [FAIL] No API_KEY set - NoCaptchaAI unavailable "
-                          "(set API_KEY to your nocaptchaai.com key)", level="error")
-                return False
-
-            # ── ACCESSIBILITY CHALLENGE — try it first (easiest path) ──
-            # Open menu info then wait 2s between each attempt
-            self._log("[Captcha] Trying accessibility challenge (Ollama vision)...")
+            # ── ACCESSIBILITY CHALLENGE — THE ONLY SOLVER ──
+            # Opens the 3-dots menu and uses the Accessibility Challenge,
+            # which gives a text/audio question that's solvable locally
+            # (math, word puzzles) with Ollama vision as fallback.
+            self._log("[Captcha] Trying accessibility challenge (only solver)...")
             acc_result = await solve_hcaptcha_accessibility(self._page, iframe, log=self._log)
             if acc_result:
                 self._log("[Captcha] [OK] Accessibility challenge solved!")
@@ -503,79 +492,16 @@ class DiscordAutomation:
                 if await read_hcaptcha_token(self._page):
                     await self._click_form_submit()
                     return True
-            else:
-                self._log("[Captcha] Accessibility challenge failed — trying API fallback", level="warn")
-                await asyncio.sleep(2)  # pause before next method
-
-            if await self._past_captcha():
-                self._log(f"[Captcha] Page moved on - at {self._page.url[:50]}")
-                return True
-
-            try:
-                await self.capture_screenshot()
-            except:
-                pass
-
-            # If the first attempt found nothing puzzle-like (widget was still
-            # loading) and it has since settled into a drag puzzle, try again
-            # instead of sending a doomed API task.
-            if drag_result is None and await self._detect_challenge_mode(iframe) == "drag":
-                self._log("[Captcha] Drag puzzle ready now - solving in-browser...")
-                if await self._try_solve_drag(iframe):
-                    return True
-
-            sitekey = await self._extract_sitekey_with_retry(timeout=15.0, poll=3.0)
-            if not sitekey:
-                self._log("[Captcha] Could not extract sitekey from iframe", level="error")
-                return False
-
-            # Discord uses ENTERPRISE hCaptcha: API tasks need the rqdata
-            # payload or they hang forever in "processing".
-            rqdata = await extract_hcaptcha_rqdata(self._page)
-            if rqdata:
-                self._log("[NoCaptchaAI] Enterprise rqdata found - attaching to task")
-            else:
-                self._log("[NoCaptchaAI] No rqdata found - enterprise solve may hang",
-                          level="warn")
-
-            self._log(f"[NoCaptchaAI] Solving hCaptcha (sitekey {sitekey[:16]}...)")
-            token = None
-            for attempt in range(1, 4):
-                try:
-                    token = await self._solver.solve_hcaptcha(sitekey, self._page.url,
-                                                              rqdata=rqdata)
-                except asyncio.TimeoutError:
-                    token = None
-                    self._log(f"[NoCaptchaAI] Attempt {attempt} timed out", level="warn")
-                except Exception as e:
-                    token = None
-                    self._log(f"[NoCaptchaAI] Attempt {attempt} error: {e}", level="error")
-
-                if not token:
-                    if attempt < 3:
-                        self._log(f"[NoCaptchaAI] Attempt {attempt} failed - "
-                                  f"fresh task on attempt {attempt+1}/3...", level="warn")
-                        await asyncio.sleep(1)
-                        continue
-                    break
-
-                await set_hcaptcha_token_on_page(self._page, token)
-                await self._click_form_submit()
+                # Challenge solved but page didn't advance — wait and re-check
                 await asyncio.sleep(3)
                 if await self._past_captcha():
-                    self._log("[NoCaptchaAI] [OK] Captcha passed - Discord accepted the token")
                     return True
-                if await read_hcaptcha_token(self._page):
-                    self._log("[NoCaptchaAI] [OK] Token verified on page")
-                    await self._click_form_submit()
-                    return True
-                self._log(f"[NoCaptchaAI] Token attempt {attempt} did not advance - retrying",
-                          level="warn")
-                token = None
+                return True
+            else:
+                self._log("[Captcha] [FAIL] Accessibility challenge did not solve",
+                          level="error")
                 await asyncio.sleep(2)
-
-            self._log("[NoCaptchaAI] [FAIL] Could not solve hCaptcha", level="error")
-            return False
+                return False
 
         except Exception as e:
             self._log(f"[Captcha] Flow error: {e}", level="error")
