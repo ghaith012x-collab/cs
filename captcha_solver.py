@@ -2140,6 +2140,40 @@ async def solve_hcaptcha_accessibility(page, iframe,
         and the hCaptcha frame body for question text patterns."""
         all_texts = []
 
+        # Method 0: JS scan for img[alt] and aria-* — accessibility challenges
+        # render the question as an <img alt="You have a jar with 9 coins...">
+        # which inner_text() does NOT capture!
+        async def _scan_js(source, js_func):
+            try:
+                val = await js_func()
+                if val and str(val).strip() and len(str(val).strip()) > 3:
+                    return str(val).strip()
+            except Exception:
+                pass
+            return None
+
+        # JS that captures alt/aria text (the actual question for accessibility)
+        aria_js = """() => {
+            const parts = [];
+            for (const el of document.querySelectorAll('img[alt], [aria-label], [aria-describedby]')) {
+                if (el.offsetParent === null && el.tagName !== 'IMG') continue;
+                const t = (el.getAttribute('alt') || el.getAttribute('aria-label') || '').trim();
+                if (t && t.length > 8 && t.length < 600) parts.push(t);
+            }
+            // Also grab ALL visible text (includes headings, paragraphs)
+            const bodyText = document.body ? (document.body.innerText || '') : '';
+            if (bodyText.trim()) parts.push(bodyText.trim());
+            return parts.join(' | ');
+        }"""
+
+        # Run aria scan on the hCaptcha frame first
+        for frame_source in [lambda: hcaptcha.locator("body").evaluate(aria_js),
+                             lambda: page.evaluate(aria_js)]:
+            val = await _scan_js("aria-js", frame_source)
+            if val:
+                all_texts.insert(0, ("aria-alt", val))
+                break
+
         # Method 1: hCaptcha frame body innerText
         try:
             t = await hcaptcha.locator("body").inner_text()
