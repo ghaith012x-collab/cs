@@ -1704,7 +1704,7 @@ async def solve_hcaptcha_accessibility(page, iframe,
 
     # ── Helpers ────────────────────────────────────────────
 
-    async def _ollama_chat(image_b64: str, prompt: str, timeout: float = 20.0) -> str:
+    async def _ollama_chat(image_b64: str, prompt: str, timeout: float = 45.0) -> str:
         """Send image + prompt to Ollama /api/chat (vision models)."""
         try:
             import aiohttp
@@ -2204,7 +2204,14 @@ async def solve_hcaptcha_accessibility(page, iframe,
             if (full.length > 10) return full.substring(0, 500);
             return '';
         }"""
-        val = await _challenge_js(js)
+        # Try page-level first (accessibility text may render outside iframe)
+        val = None
+        try:
+            val = await page.evaluate(js)
+        except Exception:
+            pass
+        if not val or not str(val).strip():
+            val = await _challenge_js(js)
         return (val or "").strip()
 
 
@@ -2316,13 +2323,22 @@ async def solve_hcaptcha_accessibility(page, iframe,
     async def _get_answer(hcaptcha, q: int) -> Optional[str]:
         """Get the answer: screenshot full frame -> Ollama vision FIRST,
         then local text parser as fallback."""
-        # -- Primary: screenshot the PAGE -> Ollama vision --
-        # (page.screenshot always works; FrameLocator has no .screenshot())
+        # -- Step 1: Try local solver FIRST (fast, no network) --
+        text = await _read_question_text()
+        log(f"[Accessibility] Q{q} DOM text: '{text[:200]}'")
+        if text:
+            local = _solve_text_question(text)
+            if local is not None:
+                log(f"[Accessibility] Q{q} solved locally: {local}")
+                return local
+
+        # -- Step 2: Screenshot + Ollama vision --
         log(f"[Accessibility] Q{q}: capturing page screenshot for AI")
         try:
             img_bytes = await page.screenshot(type="png")
             img_b64 = base64.b64encode(img_bytes).decode()
-        except Exception:
+        except Exception as e:
+            log(f"[Accessibility] Q{q} screenshot failed: {e}", level="error")
             img_b64 = None
 
         if img_b64:
@@ -2350,14 +2366,6 @@ async def solve_hcaptcha_accessibility(page, iframe,
                 return ans
             log(f"[Accessibility] Q{q} Ollama gave no answer", level="warn")
 
-        # -- Fallback: DOM text + local solver --
-        text = await _read_question_text()
-        log(f"[Accessibility] Q{q} DOM text: '{text[:200]}'")
-        if text:
-            local = _solve_text_question(text)
-            if local is not None:
-                log(f"[Accessibility] Q{q} solved locally: {local}")
-                return local
         return None
 
     async def _type_answer(hcaptcha, answer: str) -> bool:
