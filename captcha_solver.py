@@ -1493,6 +1493,84 @@ class HCaptchaSolver:
 # hCaptcha Accessibility Challenge Solver (Ollama vision)
 # ═══════════════════════════════════════════════════════════════
 
+async def _dump_clickables(page, frame, iframe_box, log):
+    """Log EVERY clickable element found (iframe + page) with coordinates.
+    Used for debugging — shows exactly what the bot sees and where."""
+    try:
+        page_scroll = await page.evaluate("() => ({x: window.scrollX || 0, y: window.scrollY || 0})")
+        log(f"[Accessibility] Page scroll: ({page_scroll['x']}, {page_scroll['y']})")
+    except Exception:
+        page_scroll = {"x": 0, "y": 0}
+
+    # Dump iframe clickables
+    try:
+        items = await frame.evaluate("""() => {
+            const out = [];
+            const els = document.querySelectorAll('button, [role="button"], a, [aria-label], [title], [class*="dot"], [class*="menu"]');
+            for (const el of els) {
+                if (el.offsetParent === null) continue;
+                const r = el.getBoundingClientRect();
+                if (r.width < 5 || r.height < 5) continue;
+                const t = (el.textContent || '').trim().slice(0, 25);
+                const label = el.getAttribute('aria-label') || el.getAttribute('title') || '';
+                const cls = (el.className && el.className.baseVal !== undefined ? el.className.baseVal : el.className) || '';
+                out.push({
+                    x: Math.round(r.x + r.width/2), y: Math.round(r.y + r.height/2),
+                    w: Math.round(r.width), h: Math.round(r.height),
+                    tag: el.tagName, text: t.slice(0, 20), label: label.slice(0, 30),
+                    cls: String(cls).slice(0, 40),
+                });
+            }
+            return out;
+        }""")
+        log(f"[Accessibility] IFRAME clickables ({len(items or [])}):")
+        for it in (items or [])[:25]:
+            log(f"[Accessibility]   iframe ({it['x']},{it['y']}) {it['w']}x{it['h']} "
+                f"<{it['tag']}> label='{it['label']}' text='{it['text']}' cls='{it['cls']}'")
+    except Exception as e:
+        log(f"[Accessibility] iframe dump error: {e}", level="warn")
+
+    # Dump page clickables (inside the hcaptcha widget container)
+    try:
+        items = await page.evaluate("""() => {
+            const out = [];
+            const scope = document.querySelector('[class*="hcaptcha"], [id*="hcaptcha"], iframe[src*="hcaptcha"]')
+                          ? document : document.body;
+            const els = scope.querySelectorAll('button, [role="button"], a, [aria-label], [class*="dot"], [class*="menu"]');
+            for (const el of els) {
+                if (el.offsetParent === null) continue;
+                const r = el.getBoundingClientRect();
+                if (r.width < 5 || r.height < 5) continue;
+                const t = (el.textContent || '').trim().slice(0, 25);
+                const label = el.getAttribute('aria-label') || el.getAttribute('title') || '';
+                const cls = (el.className && el.className.baseVal !== undefined ? el.className.baseVal : el.className) || '';
+                out.push({
+                    x: Math.round(r.x + r.width/2), y: Math.round(r.y + r.height/2),
+                    w: Math.round(r.width), h: Math.round(r.height),
+                    tag: el.tagName, text: t.slice(0, 20), label: label.slice(0, 30),
+                    cls: String(cls).slice(0, 40),
+                });
+            }
+            return out;
+        }""")
+        log(f"[Accessibility] PAGE clickables ({len(items or [])}):")
+        for it in (items or [])[:25]:
+            log(f"[Accessibility]   page ({it['x']},{it['y']}) {it['w']}x{it['h']} "
+                f"<{it['tag']}> label='{it['label']}' text='{it['text']}' cls='{it['cls']}'")
+    except Exception as e:
+        log(f"[Accessibility] page dump error: {e}", level="warn")
+
+
+async def _click_at(page, x, y, log, desc=""):
+    """Real mouse click at scroll-aware page coordinates."""
+    try:
+        scroll = await page.evaluate("() => window.scrollY || 0")
+    except Exception:
+        scroll = 0
+    log(f"[Accessibility] Clicking {desc} at ({x:.0f},{y:.0f}) (scrollY={scroll:.0f})")
+    await page.mouse.click(x, y)
+
+
 async def solve_hcaptcha_accessibility(page, iframe, 
                                         ollama_model: str = "llava:7b",
                                         ollama_url: str = "http://localhost:11434",
@@ -1584,70 +1662,96 @@ async def solve_hcaptcha_accessibility(page, iframe,
             log("[Accessibility] No content frame", level="error")
             return False
 
-        # ── Step 3: Try clicking 3-dots menu (BOTH inside iframe AND on parent page) ──
+        # ── Step 2b: Find the INNERMOST hCaptcha frame (challenge is nested) ──
+        try:
+            all_frames = page.frames
+            hcap_frames = [f for f in all_frames
+                           if 'hcaptcha' in (f.url or '').lower()]
+            if hcap_frames:
+                # Prefer the deepest / longest URL (actual challenge frame)
+                hcap_frames.sort(key=lambda f: len(f.url or ''), reverse=True)
+                frame = hcap_frames[0]
+                log(f"[Accessibility] Using nested frame: {frame.url[:90]}")
+        except Exception as e:
+            log(f"[Accessibility] frame scan error: {e}", level="warn")
+
+        # ── Step 3: DUMP everything clickable, then click 3-dots ──
+        await _dump_clickables(page, frame, iframe_box, log)
+
         for attempt in range(1, max_attempts + 1):
             log(f"[Accessibility] Attempt {attempt}/{max_attempts}")
 
-            # 3a) Click 3-dots in the iframe — use REAL mouse coordinates, not JS click()
+            # 3a) Click 3-dots — try Playwright locators (auto-scroll, native click)
             menu_clicked = False
-            try:
-                rect = await frame.evaluate("""() => {
-                    const selectors = [
-                        '[aria-label*="Options"]',
-                        '[class*="menu"] [role="button"]',
-                        'button[class*="dots"]',
-                        '[class*="icon"][class*="dots"]',
-                        '.h-captcha-menu > button',
-                        '[class*="challenge"] [role="button"]:last-child',
-                    ];
-                    for (const sel of selectors) {
-                        const el = document.querySelector(sel);
-                        if (el && el.offsetParent !== null) {
-                            const r = el.getBoundingClientRect();
-                            return {x: r.x + r.width/2, y: r.y + r.height/2, w: r.width, h: r.height, sel: sel};
-                        }
-                    }
-                    return null;
-                }""")
-                if rect:
-                    cx = iframe_box['x'] + rect['x']
-                    cy = iframe_box['y'] + rect['y']
-                    log(f"[Accessibility] Clicking 3-dots in iframe at ({cx:.0f},{cy:.0f}) [{rect['sel']}]")
-                    await page.mouse.click(cx, cy)
-                    menu_clicked = True
-            except Exception as e:
-                log(f"[Accessibility] Menu in iframe error: {e}", level="warn")
-
-            # 3b) Also try clicking 3-dots on the PARENT PAGE (hCaptcha renders menu outside iframe)
-            if not menu_clicked:
+            locator_selectors = [
+                '[aria-label*="Options" i]',
+                '[aria-label*="menu" i]',
+                '[title*="Options" i]',
+                'button[class*="dot" i]',
+                '[class*="menu"] [role="button"]',
+                '[class*="icon"][class*="dot" i]',
+                '.h-captcha-menu > button',
+                '[class*="challenge"] [role="button"]:last-child',
+            ]
+            for sel in locator_selectors:
+                if menu_clicked:
+                    break
                 try:
-                    rect = await page.evaluate("""() => {
-                        const all = document.querySelectorAll('[aria-label*="Options"], [class*="menu"], button[class*="dots"]');
-                        for (const el of all) {
-                            if (el.offsetParent !== null) {
-                                const r = el.getBoundingClientRect();
-                                return {x: r.x + r.width/2, y: r.y + r.height/2, w: r.width, h: r.height, tag: el.tagName};
-                            }
-                        }
-                        return null;
-                    }""")
-                    if rect:
-                        log(f"[Accessibility] Clicking 3-dots on page at ({rect['x']:.0f},{rect['y']:.0f}) [{rect['tag']}]")
-                        await page.mouse.click(rect['x'], rect['y'])
+                    loc = frame.locator(sel).first
+                    if await loc.count() and await loc.is_visible():
+                        box = await loc.bounding_box()
+                        log(f"[Accessibility] 3-dots locator '{sel}' found at "
+                            f"({box['x'] + box['width']/2:.0f},{box['y'] + box['height']/2:.0f}) — clicking")
+                        await loc.click(timeout=5000)
                         menu_clicked = True
                 except Exception as e:
-                    log(f"[Accessibility] Menu on page error: {e}", level="warn")
+                    log(f"[Accessibility] 3-dots locator '{sel}': {str(e)[:60]}", level="warn")
+
+            # 3b) Coordinate fallback — click bottom-right of the challenge iframe
+            #     (hCaptcha's 3-dots live in the top-right of the challenge card)
+            if not menu_clicked:
+                try:
+                    # Try top-right corner of iframe (classic hCaptcha dots position)
+                    cx = iframe_box['x'] + iframe_box['width'] - 28
+                    cy = iframe_box['y'] + 24
+                    log(f"[Accessibility] Coordinate fallback: clicking top-right at ({cx:.0f},{cy:.0f})")
+                    await page.mouse.click(cx, cy)
+                    menu_clicked = True
+                except Exception as e:
+                    log(f"[Accessibility] Coord fallback error: {e}", level="warn")
 
             await asyncio.sleep(1.0)
 
-            # 3c) Try clicking "Accessibility Challenge" using REAL mouse coordinates
+            # 3c) Try clicking "Accessibility Challenge" — locators first, coords fallback
             acc_clicked = False
             for context, ctx_name in [(frame, "iframe"), (page, "page")]:
                 if acc_clicked:
                     break
                 try:
+                    # 1) Playwright locator by text
+                    loc = context.get_by_text("accessibility", exact=False).first
+                    if await loc.count():
+                        for _try in range(3):
+                            try:
+                                box = await loc.bounding_box()
+                                log(f"[Accessibility] 'Accessibility' option in {ctx_name} at "
+                                    f"({box['x'] + box['width']/2:.0f},{box['y'] + box['height']/2:.0f}) — clicking")
+                                await loc.click(timeout=4000)
+                                acc_clicked = True
+                                break
+                            except Exception as e:
+                                log(f"[Accessibility] acc option retry: {str(e)[:50]}", level="warn")
+                                await asyncio.sleep(0.8)
+                except Exception as e:
+                    log(f"[Accessibility] acc locator in {ctx_name}: {str(e)[:60]}", level="warn")
+
+                if acc_clicked:
+                    break
+
+                # 2) Coordinate fallback via JS rect scan
+                try:
                     rect = await context.evaluate("""() => {
-                        const links = document.querySelectorAll('a, button, [role="menuitem"], [role="option"]');
+                        const links = document.querySelectorAll('a, button, [role="menuitem"], [role="option"], [class*="option" i]');
                         for (const el of links) {
                             const t = (el.textContent || '').toLowerCase();
                             if (t.includes('accessibility') || t.includes('accessible')) {
