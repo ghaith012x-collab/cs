@@ -714,8 +714,97 @@ class DiscordAutomation:
             self._log("=" * 40)
             self._log(f"Email: {self._email}")
 
-            await self._page.wait_for_selector('input[name="email"]', timeout=15000)
-            await self._page.locator('input[name="email"]').fill(self._email)
+            # ── Handle Discord age gate (birthday modal before form) ──
+            for _ in range(6):
+                try:
+                    age_text = await self._page.evaluate(
+                        "() => (document.body.innerText || '').substring(0, 300)")
+                except Exception:
+                    age_text = ""
+                has_age_gate = any(w in age_text.lower() for w in
+                                   ('birthday', 'date of birth', 'born', 'how old'))
+                has_form = ('email' in age_text.lower() and 'username' in age_text.lower())
+
+                if has_form:
+                    self._log("[Form] Registration form detected — no age gate")
+                    break
+                if has_age_gate:
+                    self._log("[Form] Age gate detected — filling DOB...")
+                    # Discord age gate: pick adult DOB
+                    try:
+                        await self._page.evaluate("""() => {
+                            const pickers = document.querySelectorAll('input, [role="combobox"], [class*="select"]');
+                            for (const p of pickers) {
+                                if (p.offsetParent === null) continue;
+                                const label = (p.getAttribute('aria-label') || p.getAttribute('placeholder') || '').toLowerCase();
+                                // Click and select month/day/year
+                                p.click();
+                                break;
+                            }
+                        }""")
+                    except Exception:
+                        pass
+                    # Try typing DOB fields directly
+                    try:
+                        inputs = self._page.locator('input[type="text"], input:not([type])')
+                        count = await inputs.count()
+                        if count >= 3:
+                            await inputs.nth(0).fill("January")
+                            await inputs.nth(1).fill("15")
+                            await inputs.nth(2).fill("1995")
+                            await self._page.keyboard.press("Enter")
+                    except Exception:
+                        pass
+                    try:
+                        await self._page.keyboard.type("01", delay=30)
+                        await self._page.keyboard.press("Tab")
+                        await self._page.keyboard.type("15", delay=30)
+                        await self._page.keyboard.press("Tab")
+                        await self._page.keyboard.type("1995", delay=30)
+                        await self._page.keyboard.press("Enter")
+                    except Exception:
+                        pass
+                    await asyncio.sleep(2)
+                    continue
+                # Neither form nor age gate — page may still be loading
+                self._log(f"[Form] Waiting for page content... ({_+1}/6)")
+                await asyncio.sleep(1.5)
+
+            # ── Wait for email input with multiple fallback selectors ──
+            email_input = None
+            for selector in (
+                'input[name="email"]',
+                'input[type="email"]',
+                'input[id*="email" i]',
+                'input[aria-label*="email" i]',
+                'input[placeholder*="email" i]',
+                'input[autocomplete="email"]',
+            ):
+                try:
+                    await self._page.wait_for_selector(selector, timeout=8000)
+                    email_input = self._page.locator(selector)
+                    self._log(f"[Form] Email input found: {selector}")
+                    break
+                except Exception:
+                    continue
+
+            if not email_input:
+                # Last resort: type into the first visible text input
+                try:
+                    all_inputs = self._page.locator('input:not([type="hidden"]):not([type="submit"])')
+                    count = await all_inputs.count()
+                    if count > 0:
+                        email_input = all_inputs.first
+                        self._log("[Form] Using first visible input as email", level="warn")
+                except Exception:
+                    pass
+
+            if not email_input:
+                self._log("[Form] No email input found on page", level="error")
+                await self.capture_screenshot()
+                return False
+
+            await email_input.fill(self._email)
             await self._human_pause()
 
             # Generate username
