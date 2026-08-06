@@ -2210,43 +2210,62 @@ async def solve_hcaptcha_accessibility(page, iframe,
         except Exception:
             pass
 
-        # ── Now scan all collected texts for question patterns ──
-        # Priority 1: lines with digits AND jar/coins/add/put/remove/first/last
+        # ── Now scan all collected texts and SCORE lines ──
+        # The instruction line ("Read and answer with 1 word") matches weak
+        # keywords too, so we must pick the line with the MOST question
+        # keywords, not the first line with any keyword.
+        best_line = None
+        best_score = 0
+        best_source = None
+
         for source, text in all_texts:
             lines = text.split(chr(10))
             for line in lines:
                 line = line.strip()
                 if len(line) < 8 or len(line) > 500:
                     continue
-                # Coin/jar math
-                if re.search(r'\d', line) and re.search(
-                    r'jar|coins?|add|put|total|how many|altogether|start|has',
-                    line, re.IGNORECASE
-                ):
-                    log(f"[Accessibility] Found question in {source}: '{line[:120]}'")
-                    return line
-                # Word puzzle
-                if re.search(r'\bremove\b|\bdrop\b|\bdelete\b|\bstrip\b|\bfirst\b|\blast\b|\bletter\b|\breverse\b|\bbackwards\b|\bword\b',
-                             line, re.IGNORECASE):
-                    log(f"[Accessibility] Found question in {source}: '{line[:120]}'")
-                    return line
+                score = 0
+                # STRONG keywords (the actual question uses these):
+                # jar/coins math
+                if re.search(r'\bjar\b|\bcoins?\b|\bhow many\b|\baltogether\b|\bin all\b', line, re.IGNORECASE):
+                    score += 4
+                if re.search(r'\badd\b|\bput\b|\btotal\b|\bhas\b|\bstart with\b', line, re.IGNORECASE):
+                    score += 2
+                # word puzzles
+                if re.search(r'\bremove\b|\bdelet\w*\b|\bdrop\b|\bstrip\b', line, re.IGNORECASE):
+                    score += 4
+                if re.search(r'\bfirst\b', line, re.IGNORECASE):
+                    score += 3
+                if re.search(r'\blast\b', line, re.IGNORECASE):
+                    score += 3
+                if re.search(r'\bletter\w*\b|\bcharacter\w*\b', line, re.IGNORECASE):
+                    score += 3
+                if re.search(r'\breverse\b|\bbackward\w*\b', line, re.IGNORECASE):
+                    score += 3
+                if re.search(r'\bword\b', line, re.IGNORECASE):
+                    score += 2
+                # numbers reinforce a real math question
+                if re.search(r'\b\d+\b', line):
+                    score += 2
+                # Penalize pure instruction lines
+                if re.search(r'^\s*(?:read|answer|respond|type|please|question)\b', line, re.IGNORECASE):
+                    score -= 2
+                if re.search(r'read and answer|answer with|respond with|single word', line, re.IGNORECASE):
+                    score -= 4
 
-        # Priority 2: any line with question keywords
-        for source, text in all_texts:
-            lines = text.split(chr(10))
-            for line in lines:
-                line = line.strip()
-                if len(line) < 8 or len(line) > 500:
-                    continue
-                if re.search(r'jar|coins?|how many|add|put|remove|first|last|letter|reverse|backwards|number|type|word',
-                             line, re.IGNORECASE):
-                    log(f"[Accessibility] Found (loose) in {source}: '{line[:120]}'")
-                    return line
+                if score > best_score:
+                    best_score = score
+                    best_line = line
+                    best_source = source
 
-        # Priority 3: just return the concatenated text from all sources
+        if best_line and best_score >= 4:
+            log(f"[Accessibility] Scored question ({best_score}) from {best_source}: '{best_line[:120]}'")
+            return best_line
+
+        # Priority fallback: concatenated text from any source
         for source, text in all_texts:
             if len(text) > 10:
-                log(f"[Accessibility] No pattern match — returning raw text from {source}")
+                log(f"[Accessibility] No scored question — returning raw text from {source}")
                 return text[:500]
 
         return ''
