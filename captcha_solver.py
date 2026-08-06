@@ -2316,10 +2316,12 @@ async def solve_hcaptcha_accessibility(page, iframe,
     async def _get_answer(hcaptcha, q: int) -> Optional[str]:
         """Get the answer: screenshot full frame -> Ollama vision FIRST,
         then local text parser as fallback."""
-        # -- Primary: screenshot entire hCaptcha frame -> Ollama vision --
-        log(f"[Accessibility] Q{q}: capturing full-frame screenshot for AI")
+        # -- Primary: screenshot the PAGE -> Ollama vision --
+        # (page.screenshot always works; FrameLocator has no .screenshot())
+        log(f"[Accessibility] Q{q}: capturing page screenshot for AI")
         try:
-            img_b64 = await _screenshot_b64(hcaptcha)
+            img_bytes = await page.screenshot(type="png")
+            img_b64 = base64.b64encode(img_bytes).decode()
         except Exception:
             img_b64 = None
 
