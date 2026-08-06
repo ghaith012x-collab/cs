@@ -34,7 +34,7 @@ _start_time = 0.0
 
 # worker_id -> worker state
 _workers: Dict[str, dict] = {}
-WORKER_COUNT = 2
+WORKER_COUNT = 4
 WORKER_IDS = [f"B{i+1}" for i in range(WORKER_COUNT)]
 
 _config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
@@ -98,7 +98,10 @@ async def _worker_capture_loop(wid: str, cfg: dict, stagger: int) -> None:
     """Capture screenshots for this worker, staggered so browsers don't all
     upload at the same time: B1 immediately, B2 after 2s, B3 after 4s..."""
     bot: DiscordAutomation = _workers[wid]["bot"]
-    interval = max(1, int(cfg.get("camera_interval", 3)))
+    base = max(1, int(cfg.get("camera_interval", 3)))
+    # One image every base seconds across ALL browsers: each worker waits
+    # base * len(WORKER_IDS) between its own uploads, staggered base apart.
+    interval = base * len(WORKER_IDS)
     await asyncio.sleep(stagger)
     while _running and bot is not None and bot._page is not None:
         try:
@@ -133,7 +136,7 @@ async def _run_worker(wid: str, cfg: dict, proxy=None) -> None:
             await bot.initialize()
             state["status"] = "running"
             stagger = int(wid[1:]) - 1
-            cam_task = asyncio.create_task(_worker_capture_loop(wid, cfg, stagger * 2))
+            cam_task = asyncio.create_task(_worker_capture_loop(wid, cfg, stagger * int(cfg.get("camera_interval", 3))))
             ok = await bot.start_discord_signup()
             cam_task.cancel()
             acc = bot.get_account()
@@ -532,7 +535,7 @@ function camStatus(w){
 }
 
 function renderCams(){
-  let ids = ['B1','B2','B3','B4','B5'];
+  let ids = ['B1','B2','B3','B4'];
   let html = '';
   ids.forEach(id=>{
     let w = workers[id] || {status:'idle', email:'', proxy:''};
