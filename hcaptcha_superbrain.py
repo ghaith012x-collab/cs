@@ -140,7 +140,7 @@ def fetch_github_tiles() -> Path | None:
         tmp = DATA / "xtekky.tar.gz"
         urllib.request.urlretrieve(url, tmp)
         with tarfile.open(tmp, "r:gz") as t:
-            t.extractall(DATA)
+            t.extractall(DATA, filter='data')
         # repo extracts as DATA/hcaptcha-dataset-main
         for cand in DATA.glob("hcaptcha-dataset*"):
             if cand.is_dir():
