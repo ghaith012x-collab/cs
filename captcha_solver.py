@@ -1728,69 +1728,119 @@ async def solve_hcaptcha_accessibility(page, iframe,
             return False
 
     async def _click_three_dots(hcaptcha) -> bool:
-        """Click the #menu-info 3-dots button — ONE strategy at a time,
-        each spaced 2 seconds apart so the UI can animate/react.
-        Way 2 (aria-label) is the most reliable; tried first.  """
+        """Click the 3-dots menu button — tries 4 methods in rapid sequence:
+        WAY 1: JS evaluate finds & clicks the button (most direct, bypasses intercept).
+        WAY 2: Playwright aria-label / role-based click.
+        WAY 3: CSS selector #menu-info + force-click.
+        WAY 4: Dispatch click event as last resort.
+        Only waits 1.2s between attempts; the widget has already loaded."""
 
-        # ── WAY 2 (most reliable — aria-label button) ──
+        # ── WAY 1: JS evaluation (most reliable — bypasses intercept layers) ──
         try:
-            btn = hcaptcha.get_by_role(
-                "button", name="About hCaptcha & Accessibility Options"
-            ).first
-            await btn.wait_for(state="visible", timeout=10000)
-            await btn.click(timeout=5000)
+            js_result = await _challenge_js("""() => {
+                const btn = document.querySelector('#menu-info')
+                         || document.querySelector('[aria-label*="About hCaptcha"]')
+                         || document.querySelector('[aria-label*="Extra menu"]')
+                         || document.querySelector('.display-menu-btn');
+                if (btn && btn.offsetParent !== null) {
+                    btn.scrollIntoView({block: 'center'});
+                    btn.dispatchEvent(new MouseEvent('mousedown', {bubbles:true}));
+                    btn.dispatchEvent(new MouseEvent('mouseup', {bubbles:true}));
+                    btn.dispatchEvent(new MouseEvent('click', {bubbles:true}));
+                    return 'js_click_ok';
+                }
+                return null;
+            }""")
+            if js_result:
+                log("[Accessibility] Clicked 3-dots via JS (way 1)")
+                await asyncio.sleep(0.5)
+                return True
+        except Exception as e:
+            log(f"[Accessibility] way 1 (JS) failed: {str(e)[:80]}", level="warn")
+
+        await asyncio.sleep(1.2)
+
+        # ── WAY 2: Playwright aria-label / role click ──
+        try:
+            for label in ("About hCaptcha & Accessibility Options",
+                          "Extra menu", "More options", "Menu"):
+                try:
+                    btn = hcaptcha.get_by_role("button", name=label).first
+                    await btn.wait_for(state="visible", timeout=3000)
+                    await btn.click(timeout=2000)
+                    log(f"[Accessibility] Clicked 3-dots via role '{label}' (way 2)")
+                    await asyncio.sleep(0.5)
+                    return True
+                except Exception:
+                    continue
+            # generic label fallback
+            btn = hcaptcha.get_by_label("Extra menu").first
+            await btn.wait_for(state="visible", timeout=2000)
+            await btn.click(timeout=2000)
             log("[Accessibility] Clicked 3-dots via aria-label (way 2)")
             await asyncio.sleep(0.5)
             return True
         except Exception as e:
-            log(f"[Accessibility] aria-label click failed: {str(e)[:80]} — waiting 2s", level="warn")
-            await asyncio.sleep(2.0)
+            log(f"[Accessibility] way 2 (aria-label) failed: {str(e)[:80]}", level="warn")
 
-        # ── WAY 1 (#menu-info CSS selector) ──
+        await asyncio.sleep(1.2)
+
+        # ── WAY 3: CSS selector + force-click ──
         try:
             btn = hcaptcha.locator("#menu-info").first
-            await btn.wait_for(state="visible", timeout=8000)
-            await btn.click(timeout=5000)
-            log("[Accessibility] Clicked #menu-info (way 1)")
-            await asyncio.sleep(0.5)
-            return True
-        except Exception as e:
-            log(f"[Accessibility] #menu-info click failed: {str(e)[:80]} — waiting 2s", level="warn")
-            await asyncio.sleep(2.0)
-
-        # ── WAY 3 (force-click) ──
-        try:
-            btn = hcaptcha.locator("#menu-info").first
-            await btn.click(force=True, timeout=5000)
+            await btn.wait_for(state="visible", timeout=3000)
+            await btn.click(force=True, timeout=3000)
             log("[Accessibility] Force-clicked #menu-info (way 3)")
             await asyncio.sleep(0.5)
             return True
         except Exception as e:
-            log(f"[Accessibility] force-click failed: {str(e)[:80]} — waiting 2s", level="warn")
-            await asyncio.sleep(2.0)
+            log(f"[Accessibility] way 3 (force-click) failed: {str(e)[:80]}", level="warn")
 
-        # ── WAY 4 (dispatch event) ──
+        await asyncio.sleep(1.2)
+
+        # ── WAY 4: Dispatch event on any matching element ──
         try:
             await hcaptcha.locator("#menu-info").first.dispatch_event("click")
             log("[Accessibility] Dispatched click event (way 4)")
             await asyncio.sleep(0.5)
             return True
         except Exception as e:
-            log(f"[Accessibility] dispatch_event failed: {str(e)[:80]}", level="warn")
+            log(f"[Accessibility] way 4 (dispatch) failed: {str(e)[:80]}", level="warn")
 
         return False
 
     async def _click_accessibility_option(hcaptcha) -> bool:
-        """Select 'Accessibility Challenge' from the menu.
-        Polls several seconds — hCaptcha animates the dropdown in."""
+        """Select 'Accessibility Challenge' from the menu — JS-first then Playwright.
+        Faster polling since the 3-dots already opened."""
         deadline = time.time() + 8
         poll = 0
         while time.time() < deadline:
             poll += 1
-            # text-based matches
+            # JS click (most reliable — bypasses animation/overlay issues)
+            try:
+                clicked = await _challenge_js("""() => {
+                    const els = document.querySelectorAll('a, button, li, span, div, [role="menuitem"], [role="button"]');
+                    for (const el of els) {
+                        const t = (el.textContent || '').trim();
+                        if (t && /accessibility/i.test(t) && el.offsetParent !== null) {
+                            el.scrollIntoView({block: 'center'});
+                            el.dispatchEvent(new MouseEvent('mousedown', {bubbles:true}));
+                            el.dispatchEvent(new MouseEvent('mouseup', {bubbles:true}));
+                            el.dispatchEvent(new MouseEvent('click', {bubbles:true}));
+                            return t;
+                        }
+                    }
+                    return null;
+                }""")
+                if clicked:
+                    log(f"[Accessibility] JS-clicked accessibility item: '{clicked}' (poll {poll})")
+                    return True
+            except Exception:
+                pass
+            # text-based match
             try:
                 loc = hcaptcha.get_by_text("Accessibility Challenge", exact=False).first
-                await loc.wait_for(state="visible", timeout=2000)
+                await loc.wait_for(state="visible", timeout=1500)
                 await loc.click(timeout=2000)
                 log(f"[Accessibility] Selected accessibility via text (poll {poll})")
                 return True
@@ -1806,29 +1856,6 @@ async def solve_hcaptcha_accessibility(page, iframe,
                     return True
                 except Exception:
                     pass
-            # JS click on any visible element whose text mentions accessibility
-            try:
-                clicked = await _challenge_js(
-                    """(matcher) => {
-                        const els = document.querySelectorAll('a, button, li, span, div, [role="menuitem"], [role="button"]');
-                        for (const el of els) {
-                            const t = (el.textContent || '').trim();
-                            if (t && t.length < 80 && /accessibility/i.test(t) &&
-                                el.offsetParent !== null &&
-                                !el.querySelector('a, button, [role="menuitem"], [role="button"]')) {
-                                el.click();
-                                return t;
-                            }
-                        }
-                        return null;
-                    }""",
-                    "Accessibility",
-                )
-                if clicked:
-                    log(f"[Accessibility] JS-clicked menu item: '{clicked}'")
-                    return True
-            except Exception:
-                pass
             await asyncio.sleep(0.7)
         return False
 
@@ -2038,10 +2065,21 @@ async def solve_hcaptcha_accessibility(page, iframe,
 
     try:
         # ── Step 1: Locate the hCaptcha challenge iframe via frame_locator ──
-        # This is the KEY fix — frame_locator works with cross-origin iframes
-        # where content_frame() fails.
-        HCAPTCHA_FRAME = 'iframe[title="hCaptcha challenge"]'
-        hcaptcha = page.frame_locator(HCAPTCHA_FRAME)
+        # Use the passed iframe element to build a reliable frame_locator, or
+        # fall back to searching the page for the challenge iframe.
+        hcaptcha = None
+        if iframe is not None:
+            # Derive frame_locator from the iframe element that server.py found
+            try:
+                frame_url = await iframe.get_attribute("src")
+                if frame_url and "hcaptcha.com" in frame_url:
+                    hcaptcha = page.frame_locator(f'iframe[src="{frame_url}"]')
+                    log("[Accessibility] Using passed iframe for frame_locator")
+            except Exception:
+                pass
+        if hcaptcha is None:
+            HCAPTCHA_FRAME = 'iframe[title="hCaptcha challenge"]'
+            hcaptcha = page.frame_locator(HCAPTCHA_FRAME)
 
         # Verify the iframe body is attached (rendered)
         try:
