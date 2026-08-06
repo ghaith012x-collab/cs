@@ -1620,7 +1620,7 @@ async def solve_hcaptcha_accessibility(page, iframe,
                                         ollama_model: str = "",
                                         ollama_url: str = "",
                                         log: Optional[Callable] = None,
-                                        max_attempts: int = 4,
+                                        max_attempts: int = 1,
                                         max_questions: int = 8) -> bool:
     """Solve hCaptcha via the Accessibility Challenge using Playwright's
     frame_locator for reliable cross-origin iframe interaction.
@@ -1922,10 +1922,8 @@ async def solve_hcaptcha_accessibility(page, iframe,
         Click one 3-dots method → wait 5s for menu → click option → detect input.
         If any step fails, retry with next method."""
 
-        # ── Step A: Click 3-dots (one method at a time, detect menu open) ──
+        # ── Step A: Click 3-dots — ONLY WAY 1 (JS click, the one that works) ──
         menu_opened = False
-
-        # WAY 1: JS click
         try:
             js_result = await _challenge_js("""() => {
                 const btn = document.querySelector('#menu-info')
@@ -1949,60 +1947,13 @@ async def solve_hcaptcha_accessibility(page, iframe,
                         log("[Accessibility] Menu opened (way 1)")
                         break
                     await asyncio.sleep(0.5)
+            else:
+                log("[Accessibility] way 1 (JS) found no 3-dots button", level="warn")
         except Exception as e:
             log(f"[Accessibility] way 1 (JS) failed: {str(e)[:60]}", level="warn")
 
         if not menu_opened:
-            # WAY 2: Playwright role click
-            try:
-                for label in ("About hCaptcha & Accessibility Options", "Extra menu", "More options", "Menu"):
-                    try:
-                        btn = hcaptcha.get_by_role("button", name=label).first
-                        await btn.wait_for(state="visible", timeout=3000)
-                        await btn.click(timeout=2000)
-                        log(f"[Accessibility] Clicked 3-dots via role '{label}' (way 2)")
-                        for _ in range(10):
-                            if await _menu_visible(hcaptcha):
-                                menu_opened = True
-                                break
-                            await asyncio.sleep(0.5)
-                        if menu_opened:
-                            break
-                    except Exception:
-                        continue
-            except Exception as e:
-                log(f"[Accessibility] way 2 (role) failed: {str(e)[:60]}", level="warn")
-
-        if not menu_opened:
-            # WAY 3: CSS force-click
-            try:
-                btn = hcaptcha.locator("#menu-info").first
-                await btn.wait_for(state="visible", timeout=3000)
-                await btn.click(force=True, timeout=3000)
-                log("[Accessibility] Force-clicked #menu-info (way 3)")
-                for _ in range(10):
-                    if await _menu_visible(hcaptcha):
-                        menu_opened = True
-                        break
-                    await asyncio.sleep(0.5)
-            except Exception as e:
-                log(f"[Accessibility] way 3 (force) failed: {str(e)[:60]}", level="warn")
-
-        if not menu_opened:
-            # WAY 4: dispatch event
-            try:
-                await hcaptcha.locator("#menu-info").first.dispatch_event("click")
-                log("[Accessibility] Dispatched click (way 4)")
-                for _ in range(10):
-                    if await _menu_visible(hcaptcha):
-                        menu_opened = True
-                        break
-                    await asyncio.sleep(0.5)
-            except Exception as e:
-                log(f"[Accessibility] way 4 (dispatch) failed: {str(e)[:60]}", level="warn")
-
-        if not menu_opened:
-            log("[Accessibility] Menu never opened after all 4 methods", level="warn")
+            log("[Accessibility] Menu did not open after ONE 3-dots click", level="warn")
             return False
 
         # ── Step B: Menu is open — click Accessibility Challenge option ──
@@ -2287,84 +2238,68 @@ async def solve_hcaptcha_accessibility(page, iframe,
                     level="error")
                 return False
 
-        for attempt in range(1, max_attempts + 1):
-            log(f"[Accessibility] Attempt {attempt}/{max_attempts}")
+        # ── ONLY 1 attempt — click 3-dots once, click accessibility once ──
+        if await _token_present():
+            log("[Accessibility] [OK] Already solved — token present!")
+            return True
 
+        # Already active? Don't reopen — jump straight to answering
+        if await _accessibility_active(hcaptcha):
+            log("[Accessibility] Accessibility challenge already active")
+        else:
+            # Open the accessibility challenge — ONE attempt only
+            if not await _open_accessibility_challenge(hcaptcha):
+                log("[Accessibility] Could not open accessibility challenge (1 attempt)",
+                    level="warn")
+                return False
+
+        # ── Answer every question hCaptcha asks, one after another ──
+        # (runs whether the challenge was already active OR freshly opened)
+        for q in range(1, max_questions + 1):
             if await _token_present():
-                log("[Accessibility] [OK] Already solved — token present!")
+                log("[Accessibility] [OK] hCaptcha passed!")
                 return True
 
-            # Already active? Don't reopen — jump straight to answering
-            if await _accessibility_active(hcaptcha):
-                log("[Accessibility] Accessibility challenge already active")
-            else:
-                # ── Close any open menu from a prior failed attempt ──
-                if attempt > 1:
-                    try:
-                        await _challenge_js("""() => {
-                            const menus = document.querySelectorAll('[role="menu"], [role="listbox"], .menu, .dropdown');
-                            menus.forEach(m => { m.style.display = 'none'; m.remove(); });
-                        }""")
-                        log("[Accessibility] Cleaned up stale menus before retry")
-                    except Exception:
-                        pass
-                    await asyncio.sleep(0.5)
-                # Open the accessibility challenge
-                if not await _open_accessibility_challenge(hcaptcha):
-                    log("[Accessibility] Could not open accessibility challenge",
-                        level="warn")
-                    await asyncio.sleep(2.0)  # longer pause before retry
-                    continue
+            answer = await _get_answer(hcaptcha, q)
+            if answer is None:
+                log("[Accessibility] No answer this round", level="warn")
+                break
 
-            # ── Answer every question hCaptcha asks, one after another ──
-            for q in range(1, max_questions + 1):
+            if not await _type_answer(hcaptcha, answer):
+                log("[Accessibility] Could not type answer", level="warn")
+                break
+
+            await asyncio.sleep(0.8)
+
+            if not await _submit_answer(hcaptcha):
+                log("[Accessibility] Could not submit", level="warn")
+                break
+
+            # Wait for the outcome: token (passed) or a NEW question
+            outcome = None
+            for _ in range(10):
+                await asyncio.sleep(0.75)
+                if await _token_present():
+                    outcome = "passed"
+                    break
+                if await _accessibility_active(hcaptcha):
+                    outcome = "next"
+                    break
+            if outcome == "passed":
+                log("[Accessibility] [OK] hCaptcha passed!")
+                return True
+            if outcome is None:
+                log("[Accessibility] Challenge closed — double-checking token",
+                    level="info")
+                await asyncio.sleep(1.0)
                 if await _token_present():
                     log("[Accessibility] [OK] hCaptcha passed!")
                     return True
+                break
+            log(f"[Accessibility] New question detected (Q{q + 1}) — continuing")
 
-                answer = await _get_answer(hcaptcha, q)
-                if answer is None:
-                    log("[Accessibility] No answer this round", level="warn")
-                    break
-
-                if not await _type_answer(hcaptcha, answer):
-                    log("[Accessibility] Could not type answer", level="warn")
-                    break
-
-                await asyncio.sleep(0.8)
-
-                if not await _submit_answer(hcaptcha):
-                    log("[Accessibility] Could not submit", level="warn")
-                    break
-
-                # Wait for the outcome: token (passed) or a NEW question
-                outcome = None
-                for _ in range(10):
-                    await asyncio.sleep(0.75)
-                    if await _token_present():
-                        outcome = "passed"
-                        break
-                    if await _accessibility_active(hcaptcha):
-                        outcome = "next"
-                        break
-                if outcome == "passed":
-                    log("[Accessibility] [OK] hCaptcha passed!")
-                    return True
-                if outcome is None:
-                    log("[Accessibility] Challenge closed — double-checking token",
-                        level="info")
-                    await asyncio.sleep(1.0)
-                    if await _token_present():
-                        log("[Accessibility] [OK] hCaptcha passed!")
-                        return True
-                    break
-                log(f"[Accessibility] New question detected (Q{q + 1}) — continuing")
-
-            log(f"[Accessibility] Attempt {attempt} did not solve — retrying",
-                level="warn")
-            await asyncio.sleep(2.0)
-
-        log("[Accessibility] [FAIL] Could not solve after all attempts", level="error")
+        log("[Accessibility] [FAIL] Could not solve accessibility challenge",
+            level="error")
         return False
 
     except Exception as e:
