@@ -86,10 +86,11 @@ NAV_TIMEOUT_MS = 30000
 
 class DiscordAutomation:
     def __init__(self, headless: bool = False, email: str = "",
-                 proxy: str = "", worker_id: str = "B1"):
+                 proxy=None, worker_id: str = "B1"):
         self.headless = headless
         self.worker_id = worker_id
-        self.proxy = proxy  # e.g. "http://1.2.3.4:8080" or "" for none
+        # proxy: dict {proto, host, port, username, password, key} or None
+        self.proxy = proxy
         self._playwright = None
         self._browser = None
         self._context = None
@@ -140,8 +141,14 @@ class DiscordAutomation:
             'user_agent': self._ua,
         }
         if self.proxy:
-            ctx_opts['proxy'] = {'server': self.proxy}
-            self._log(f"Proxy: {self.proxy}")
+            p = self.proxy
+            server = f"{p.get('proto', 'http')}://{p.get('host')}:{p.get('port')}"
+            proxy_cfg = {'server': server}
+            if p.get('username'):
+                proxy_cfg['username'] = p.get('username')
+                proxy_cfg['password'] = p.get('password', '')
+            ctx_opts['proxy'] = proxy_cfg
+            self._log(f"Proxy: {server} (auth={'yes' if p.get('username') else 'no'})")
         elif _tor_check():
             self._log("[TOR] Rotating IP for new session...")
             if _tor_newnym():

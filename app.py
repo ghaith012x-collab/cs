@@ -111,55 +111,76 @@ async def _worker_capture_loop(wid: str, cfg: dict, stagger: int) -> None:
         await asyncio.sleep(interval)
 
 
-async def _run_worker(wid: str, cfg: dict, proxy: str) -> None:
+async def _run_worker(wid: str, cfg: dict, proxy=None) -> None:
     state = _workers[wid]
     state["status"] = "starting"
-    state["proxy"] = proxy
+    state["proxy"] = proxy.get("key", "direct") if (proxy and isinstance(proxy, dict)) else (proxy or "direct")
     state["started_at"] = time.time()
-    bot = DiscordAutomation(
-        headless=cfg.get("headless", True),
-        proxy=proxy,
-        worker_id=wid,
-    )
-    state["bot"] = bot
-    try:
-        await bot.initialize()
-        state["status"] = "running"
-        stagger = int(wid[1:]) - 1  # B1->0, B2->1 ...
-        cam_task = asyncio.create_task(_worker_capture_loop(wid, cfg, stagger * 2))
-        ok = await bot.start_discord_signup()
-        cam_task.cancel()
-        acc = bot.get_account()
-        state["email"] = acc["email"]
-        state["username"] = acc["username"]
-        state["password"] = acc["password"]
-        state["token"] = acc["token"]
-        if ok and acc["token"]:
-            state["status"] = "done"
-            await db.save_account(
-                email=acc["email"], username=acc["username"],
-                password=acc["password"], token=acc["token"],
-                proxy=acc["proxy"], worker_id=wid,
-            )
-            _log(f"[{wid}] Account saved to DB (token {len(acc['token'])} chars)")
-        elif ok:
-            state["status"] = "done"
-            _log(f"[{wid}] Signup ok but no token yet")
-        else:
-            state["status"] = "error"
-    except Exception as e:
-        state["status"] = "error"
-        state["step"] = f"error: {str(e)[:120]}"
-        _log(f"[{wid}] worker error: {e}")
-    finally:
-        state["finished_at"] = time.time()
-        if _proxies_available and proxy_pool is not None:
-            proxy_pool.release(proxy, ok=state["status"] == "done")
+    max_tries = 3
+    current_proxy = proxy
+
+    for attempt in range(max_tries):
+        if not _running:
+            state["status"] = "stopped"
+            return
+        bot = DiscordAutomation(
+            headless=cfg.get("headless", True),
+            proxy=current_proxy,
+            worker_id=wid,
+        )
+        state["bot"] = bot
         try:
-            await bot.close()
-        except Exception:
-            pass
-        state["bot"] = None
+            await bot.initialize()
+            state["status"] = "running"
+            stagger = int(wid[1:]) - 1
+            cam_task = asyncio.create_task(_worker_capture_loop(wid, cfg, stagger * 2))
+            ok = await bot.start_discord_signup()
+            cam_task.cancel()
+            acc = bot.get_account()
+            state["email"] = acc["email"]
+            state["username"] = acc["username"]
+            state["password"] = acc["password"]
+            state["token"] = acc["token"]
+            if ok and acc["token"]:
+                state["status"] = "done"
+                if _db_available and db is not None:
+                    await db.save_account(
+                        email=acc["email"], username=acc["username"],
+                        password=acc["password"], token=acc["token"],
+                        proxy=state["proxy"], worker_id=wid,
+                    )
+                _log(f"[{wid}] Done - token {len(acc['token'])} chars")
+                return
+            elif ok:
+                state["status"] = "done"
+                _log(f"[{wid}] Signup ok (no token yet)")
+                return
+            _log(f"[{wid}] Failed (attempt {attempt+1}/{max_tries})", level="warn")
+            if attempt < max_tries - 1:
+                try:
+                    ctx = bot._context
+                    if ctx:
+                        await ctx.clear_cookies()
+                except Exception:
+                    pass
+                await asyncio.sleep(3)
+        except Exception as e:
+            state["status"] = "error"
+            _log(f"[{wid}] error: {e}")
+            if attempt < max_tries - 1:
+                _log(f"[{wid}] Retry {attempt+2}/{max_tries}")
+                await asyncio.sleep(3)
+        finally:
+            try:
+                await bot.close()
+            except Exception:
+                pass
+            state["bot"] = None
+
+    state["status"] = "error"
+    state["step"] = "retries exhausted"
+    if _proxies_available and proxy_pool is not None and current_proxy:
+        proxy_pool.release(current_proxy, ok=False)
 
 
 async def _start_all_async(cfg: dict) -> None:
@@ -185,7 +206,7 @@ async def _start_all_async(cfg: dict) -> None:
         proxy = proxy_pool.take() if (_proxies_available and proxy_pool is not None) else None
         if not proxy:
             _log(f"[{wid}] No proxy available - using direct connection")
-        asyncio.create_task(_run_worker(wid, cfg, proxy or ""))
+        asyncio.create_task(_run_worker(wid, cfg, proxy))
 
 
 async def _stop_all_async() -> None:
@@ -199,8 +220,9 @@ async def _stop_all_async() -> None:
             except Exception:
                 pass
             state["bot"] = None
-        if state["status"] not in ("done", "error"):
+        if state["status"] in ("starting", "running"):
             state["status"] = "stopped"
+    _log("[App] All workers stopped")
 
 
 def _run_in_loop(coro) -> Optional[object]:
