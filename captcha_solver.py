@@ -1798,18 +1798,77 @@ async def solve_hcaptcha_accessibility(page, iframe,
         return None
 
     async def _accessibility_active(hcaptcha) -> bool:
-        """True when the accessibility question input is actually visible.
-        ONLY checks the frame_locator with tight selectors — no page-level JS
-        fallback (the hCaptcha frame always contains hidden inputs that would
-        false-match)."""
+        """True when the accessibility challenge UI is actually visible.
+        Uses progressively broader selectors — from tight input selectors
+        to container/text-based detection — to catch all hCaptcha
+        accessibility variants (text input, start screen, cookie prompt).
+        No page-level JS fallback (hidden hCaptcha token inputs false-match)."""
+        # ── Tier 1: Direct input selectors (most specific) ──
+        tier1 = [
+            'input[type="text"]',
+            'input[type="number"]',
+            'textarea',
+            '[role="textbox"]',
+        ]
+        for sel in tier1:
+            try:
+                await hcaptcha.locator(sel).first.wait_for(
+                    state="visible", timeout=1000
+                )
+                return True
+            except Exception:
+                continue
+
+        # ── Tier 2: Accessibility-specific containers & start elements ──
+        tier2 = [
+            '[class*="accessibility"]',
+            '[class*="challenge-container"]',
+            '#prompt-text',
+            '[class*="prompt"]',
+            'h2:has-text("Accessibility")',
+            'button:has-text("Set Accessibility Cookie")',
+            'button:has-text("Start")',
+            '[class*="challenge-text"]',
+            '[class*="task-text"]',
+            '[class*="instruction"]',
+            '[class*="question"]',
+        ]
+        for sel in tier2:
+            try:
+                await hcaptcha.locator(sel).first.wait_for(
+                    state="visible", timeout=800
+                )
+                return True
+            except Exception:
+                continue
+
+        # ── Tier 3: JS-based text content scan inside the hCaptcha frame ──
+        # Look for any visible element containing accessibility-challenge
+        # text patterns, even if the markup uses unexpected classes.
         try:
-            await hcaptcha.locator(
-                'input[type="text"], input[type="number"], [role="textbox"], '
-                '#prompt-text, [class*="prompt"]'
-            ).first.wait_for(state="visible", timeout=2000)
-            return True
+            result = await _challenge_js("""() => {
+                const walker = document.createTreeWalker(
+                    document.body, NodeFilter.SHOW_ELEMENT
+                );
+                let node;
+                while ((node = walker.nextNode())) {
+                    if (node.offsetParent === null) continue;
+                    const t = (node.textContent || '').trim();
+                    if (t.length < 3 || t.length > 200) continue;
+                    if (/how many|jar|coins|add|put|total|remove|first|last|
+                         letter|reverse|word|type|number|accessibility|
+                         challenge|question|answer|submit/i.test(t)) {
+                        return 'found';
+                    }
+                }
+                return null;
+            }""")
+            if result:
+                return True
         except Exception:
-            return False
+            pass
+
+        return False
 
     async def _menu_visible(hcaptcha) -> bool:
         """True when the dropdown menu is open — has visible menu/listbox."""
@@ -2069,14 +2128,93 @@ async def solve_hcaptcha_accessibility(page, iframe,
             log("[Accessibility] Could not click accessibility option", level="warn")
             return False
 
-        # ── Step C: Wait for accessibility challenge input to appear ──
-        for _ in range(12):  # 6 seconds
+        # ── Step C: Smart wait for the accessibility challenge to appear ──
+        # hCaptcha may show an intermediate "Start Challenge"/"Set Cookie"
+        # screen before the actual question input. Handle that here.
+
+        # C1: Wait for ANY accessibility UI to appear (up to 10 seconds)
+        ui_detected = False
+        for _ in range(20):  # 10 seconds
             if await _accessibility_active(hcaptcha):
-                log("[Accessibility] [OK] Accessibility challenge input detected!")
-                return True
+                ui_detected = True
+                break
             await asyncio.sleep(0.5)
 
-        log("[Accessibility] Accessibility challenge did not open (no input detected)", level="warn")
+        if not ui_detected:
+            log("[Accessibility] No accessibility UI appeared after click", level="warn")
+            return False
+
+        log("[Accessibility] Accessibility UI detected — checking for intermediate screens")
+
+        # C2: Handle intermediate "Start Challenge" / cookie screens
+        # hCaptcha often shows a screen with a start button or cookie prompt
+        # before the actual question input appears.
+        for _ in range(6):  # 3 seconds to dismiss intermediates
+            # Check if we're already at the question input
+            try:
+                inp = hcaptcha.locator(
+                    'input[type="text"]:visible, '
+                    'input[type="number"]:visible, '
+                    'textarea:visible, '
+                    '[role="textbox"]:visible'
+                ).first
+                await inp.wait_for(state="visible", timeout=500)
+                log("[Accessibility] [OK] Question input is already visible!")
+                return True
+            except Exception:
+                pass
+
+            # Try clicking any "Start" / "Begin" / cookie button
+            start_clicked = False
+            for btn_sel in [
+                'button:has-text("Start")',
+                'button:has-text("Begin")',
+                'button:has-text("Continue")',
+                'button:has-text("Set Accessibility Cookie")',
+                'button:has-text("OK")',
+                'button:has-text("Next")',
+                '[role="button"]:has-text("Start")',
+            ]:
+                try:
+                    btn = hcaptcha.locator(btn_sel).first
+                    await btn.wait_for(state="visible", timeout=500)
+                    await btn.click(timeout=2000)
+                    log(f"[Accessibility] Clicked '{btn_sel}' intermediate button")
+                    start_clicked = True
+                    await asyncio.sleep(1.0)
+                    break
+                except Exception:
+                    continue
+
+            if not start_clicked:
+                # No button found — maybe the UI is already at the input stage
+                # but using different markup
+                if await _accessibility_active(hcaptcha):
+                    return True
+                await asyncio.sleep(0.5)
+
+        # C3: Final check — wait for the actual question input to appear
+        for _ in range(16):  # 8 seconds
+            try:
+                inp = hcaptcha.locator(
+                    'input[type="text"]:visible, '
+                    'input[type="number"]:visible, '
+                    'textarea:visible, '
+                    '[role="textbox"]:visible'
+                ).first
+                await inp.wait_for(state="visible", timeout=500)
+                log("[Accessibility] [OK] Accessibility challenge input detected!")
+                return True
+            except Exception:
+                pass
+
+            # Broader: just check if ANY accessibility UI is still showing
+            if not await _accessibility_active(hcaptcha):
+                log("[Accessibility] Accessibility UI disappeared — challenge may have closed", level="warn")
+                return False
+            await asyncio.sleep(0.5)
+
+        log("[Accessibility] Accessibility challenge input never appeared", level="warn")
         return False
 
     async def _read_question_text() -> str:
@@ -2133,7 +2271,7 @@ async def solve_hcaptcha_accessibility(page, iframe,
             for (const l of lines) {
                 if (/how many|jar|coins|add|put|total|remove|first|last|letter|reverse|word|number/i.test(l)) return l;
             }
-            // Pass 3: grab ALL visible text (last resort)
+            // Pass 3: scan ALL visible elements for ANY text node (last resort)
             const all = [];
             const walk = (node) => {
                 if (node.nodeType === 3) {
@@ -2289,13 +2427,13 @@ async def solve_hcaptcha_accessibility(page, iframe,
             )
             if text:
                 vision_prompt += f"\nOn-screen question text: {text[:300]}"
-            ans = await _ollama_chat(img_b64, vision_prompt, timeout=25.0)
+            ans = await _ollama_chat(img_b64, vision_prompt, timeout=35.0)
             ans = (ans or "").strip()
             ans = re.sub(r'["\'.,!?;:\-\[\](){}]', '', ans).split('\n')[0].strip()
             if not ans:
                 # one retry — vision models sometimes fail on first try
                 log(f"[Accessibility] Q{q} Ollama empty — retrying once")
-                ans = await _ollama_chat(img_b64, vision_prompt, timeout=25.0)
+                ans = await _ollama_chat(img_b64, vision_prompt, timeout=35.0)
                 ans = (ans or "").strip()
                 ans = re.sub(r'["\'.,!?;:\-\[\](){}]', '', ans).split('\n')[0].strip()
             if ans:
