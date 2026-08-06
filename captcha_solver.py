@@ -1816,13 +1816,33 @@ async def solve_hcaptcha_accessibility(page, iframe,
         poll = 0
         while time.time() < deadline:
             poll += 1
-            # JS click (most reliable — bypasses animation/overlay issues)
+            # JS click — find the exact "Accessibility Challenge" menu item.
+            # MUST be a short-text leaf element (menu item), NOT a container
+            # whose concatenated innerText happens to include the word.
             try:
                 clicked = await _challenge_js("""() => {
-                    const els = document.querySelectorAll('a, button, li, span, div, [role="menuitem"], [role="button"]');
+                    const els = document.querySelectorAll('a, button, li, [role="menuitem"], [role="button"]');
                     for (const el of els) {
+                        if (el.offsetParent === null) continue;
+                        if (el.children.length > 0) continue;  // skip containers
                         const t = (el.textContent || '').trim();
-                        if (t && /accessibility/i.test(t) && el.offsetParent !== null) {
+                        // MUST be a short menu label (under 80 chars), not body text
+                        if (!t || t.length > 80) continue;
+                        // Exact match preferred
+                        if (/^Accessibility Challenge$/i.test(t)) {
+                            el.scrollIntoView({block: 'center'});
+                            el.dispatchEvent(new MouseEvent('mousedown', {bubbles:true}));
+                            el.dispatchEvent(new MouseEvent('mouseup', {bubbles:true}));
+                            el.dispatchEvent(new MouseEvent('click', {bubbles:true}));
+                            return t;
+                        }
+                    }
+                    // Fallback: short text containing "accessibility challenge"
+                    for (const el of els) {
+                        if (el.offsetParent === null || el.children.length > 0) continue;
+                        const t = (el.textContent || '').trim();
+                        if (t.length > 80) continue;
+                        if (/accessibility challenge/i.test(t)) {
                             el.scrollIntoView({block: 'center'});
                             el.dispatchEvent(new MouseEvent('mousedown', {bubbles:true}));
                             el.dispatchEvent(new MouseEvent('mouseup', {bubbles:true}));
