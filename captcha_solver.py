@@ -716,7 +716,6 @@ async def solve_funcaptcha_pixels(page, iframe=None,
                                   log: Optional[Callable] = None) -> bool:
     """Solve a FunCAPTCHA/Arkose tile challenge offline via pixel similarity."""
     log = log or (lambda msg, level="info": None)
-
     if iframe is None:
         for sel in FUNCAPTCHA_SELECTORS:
             try:
@@ -1572,360 +1571,324 @@ async def _click_at(page, x, y, log, desc=""):
 
 
 async def solve_hcaptcha_accessibility(page, iframe, 
-                                        ollama_model: str = "llava:7b",
-                                        ollama_url: str = "http://localhost:11434",
+                                        ollama_model: str = "",
+                                        ollama_url: str = "",
                                         log: Optional[Callable] = None,
                                         max_attempts: int = 4) -> bool:
-    """Solve hCaptcha via the Accessibility Challenge — the easiest path.
+    """Solve hCaptcha via the Accessibility Challenge using Playwright\'s
+    frame_locator for reliable cross-origin iframe interaction.
 
     Flow:
-      1. Click the 3-dots menu in the hCaptcha iframe
-      2. Select "Accessibility Challenge" (text-based, not image puzzle)
-      3. Screenshots the challenge text
-      4. Sends screenshot to an Ollama vision model (llava, minicpm-v, etc.)
-      5. Parses the word answer from the model's response
-      6. Types the answer and submits
+      1. Use frame_locator('iframe[title="hCaptcha challenge"]') for iframe.
+      2. Click #menu-info (the 3-dots) inside the hCaptcha iframe.
+      3. Select "Accessibility Challenge".
+      4. Screenshot and send to Ollama vision model.
+      5. Type answer and submit.
 
     Requirements:
-      - Ollama running with a vision model (e.g. `ollama pull llava:7b`)
-      - Fast GPU recommended for <2s inference
+      - Ollama running with a vision model (e.g. `ollama pull minicpm-v`)
+      - Fast GPU recommended for fast inference
     """
     log = log or (lambda msg, level="info": None)
+
+    # Ollama endpoint/model come from env vars so the bot can reach
+    # a server that actually hosts a vision model (localhost:11434
+    # only works when Ollama runs on the same machine as the bot).
+    if not ollama_url:
+        ollama_url = os.environ.get("OLLAMA_URL") or os.environ.get("OLLAMA_BASE") or "http://localhost:11434"
+    if not ollama_model:
+        ollama_model = os.environ.get("OLLAMA_MODEL") or os.environ.get("OLLAMA_VISION_MODEL") or "minicpm-v"
+    ollama_url = ollama_url.rstrip("/")
+    log(f"[Accessibility] Ollama endpoint: {ollama_url}  model: {ollama_model}")
     import asyncio
     import base64
 
-    async def _ollama_ask(image_b64: str, prompt: str, timeout: float = 15.0) -> str:
-        """Send image + prompt to Ollama, return text answer."""
+    # ── Helpers ────────────────────────────────────────────
+
+    async def _ollama_chat(image_b64: str, prompt: str, timeout: float = 20.0) -> str:
+        """Send image + prompt to Ollama /api/chat (vision models)."""
         try:
             import aiohttp
             payload = {
                 "model": ollama_model,
-                "prompt": prompt,
-                "images": [image_b64],
                 "stream": False,
+                "messages": [{
+                    "role": "user",
+                    "content": prompt,
+                    "images": [image_b64],
+                }],
             }
-            async with aiohttp.ClientSession() as session:
+            async with aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=timeout)
+            ) as session:
                 async with session.post(
-                    f"{ollama_url}/api/generate",
-                    json=payload,
-                    timeout=aiohttp.ClientTimeout(total=timeout),
+                    f"{ollama_url}/api/chat", json=payload
                 ) as resp:
+                    if resp.status != 200:
+                        return ""
                     data = await resp.json()
-                    return (data.get("response") or "").strip()
+                    return data["message"]["content"].strip()
         except Exception as e:
             log(f"[Accessibility] Ollama error: {e}", level="error")
             return ""
 
-    try:
-        # ── Step 0: Re-find the iframe (the passed reference may be stale) ──
-        log("[Accessibility] Re-locating hCaptcha iframe (old ref may be stale)...")
-        for _ in range(6):
+    async def _screenshot_b64(target, selector: str | None = None) -> str:
+        """Capture a screenshot as base64 PNG."""
+        if selector:
             try:
-                fresh_iframe = await page.query_selector('iframe[src*="hcaptcha.com"]')
-                if fresh_iframe:
-                    iframe = fresh_iframe
-                    break
+                el = await target.locator(selector).first.element_handle(timeout=4000)
+                if el:
+                    img = await el.screenshot(type="png")
+                    return base64.b64encode(img).decode()
             except Exception:
                 pass
-            await asyncio.sleep(1.0)
+        img = await target.screenshot(type="png")
+        return base64.b64encode(img).decode()
 
-        # ── Step 1: Find the INNERMOST hCaptcha frame (challenge may be nested) ──
-        #    Do this FIRST — it uses page.frames, no bounding_box needed
+    async def _token_present() -> bool:
         try:
-            all_frames = page.frames
-            hcap_frames = [f for f in all_frames
-                           if 'hcaptcha' in (f.url or '').lower()]
-            if hcap_frames:
-                hcap_frames.sort(key=lambda f: len(f.url or ''), reverse=True)
-                frame = hcap_frames[0]
-                log(f"[Accessibility] Using nested frame: {frame.url[:90]}")
-        except Exception as e:
-            log(f"[Accessibility] frame scan error: {e}", level="warn")
-
-        # ── Step 2: Get content frame (essential — can't proceed without this) ──
-        if not frame:
-            for _retry in range(5):
-                try:
-                    frame = await iframe.content_frame()
-                    if frame:
-                        log("[Accessibility] Content frame ready")
-                        break
-                except Exception:
-                    pass
-                await asyncio.sleep(0.5)
-
-        if not frame:
-            log("[Accessibility] No content frame — cannot proceed", level="error")
+            tok = await page.evaluate(
+                """() => {
+                    const ta = document.querySelector('textarea[name="h-captcha-response"]');
+                    return !!(ta && ta.value && ta.value.length > 20);
+                }"""
+            )
+            return bool(tok)
+        except Exception:
             return False
 
-        # ── Step 3: Get iframe bounding box (best-effort, NOT a blocker) ──
-        iframe_box = None
-        for _retry in range(8):
-            try:
-                iframe_box = await iframe.bounding_box()
-                if iframe_box and iframe_box.get("width", 0) > 10:
-                    log(f"[Accessibility] Iframe ready: {iframe_box['width']:.0f}x{iframe_box['height']:.0f}")
+    # ── Main flow ─────────────────────────────────────────
+
+    try:
+        # ── Step 1: Locate the hCaptcha challenge iframe via frame_locator ──
+        # This is the KEY fix — frame_locator works with cross-origin iframes
+        # where content_frame() fails.
+        HCAPTCHA_FRAME = 'iframe[title="hCaptcha challenge"]'
+        hcaptcha = page.frame_locator(HCAPTCHA_FRAME)
+
+        # Verify the iframe body is attached (rendered)
+        try:
+            await hcaptcha.locator("body").first.wait_for(
+                state="attached", timeout=15000
+            )
+            log("[Accessibility] hCaptcha challenge iframe located via frame_locator")
+        except Exception:
+            log("[Accessibility] hCaptcha challenge iframe not found via frame_locator — "
+                "trying fallback selectors", level="warn")
+            # Fallback: try other iframe selectors
+            for fallback_sel in [
+                'iframe[src*="hcaptcha.com/captcha"]',
+                'iframe[src*="hcaptcha.com"]',
+                'iframe[title*="hCaptcha"]',
+            ]:
+                try:
+                    hcaptcha = page.frame_locator(fallback_sel)
+                    await hcaptcha.locator("body").first.wait_for(
+                        state="attached", timeout=5000
+                    )
+                    log(f"[Accessibility] Found via fallback: {fallback_sel}")
                     break
-            except Exception:
-                pass
-            await asyncio.sleep(1.0)
-            log("[Accessibility] Waiting for iframe to render...", level="warn")
-
-        if not iframe_box or iframe_box.get("width", 0) < 10:
-            log("[Accessibility] WARNING: bounding_box unavailable — will use estimated coords", level="warn")
-            # Fallback: estimate iframe position from viewport
-            try:
-                vp = await page.evaluate("() => ({w: window.innerWidth, h: window.innerHeight})")
-                # hCaptcha challenge is centered in viewport, ~400x500px
-                iframe_box = {
-                    'x': max(0, (vp['w'] - 400) / 2),
-                    'y': max(0, (vp['h'] - 500) / 2),
-                    'width': 400, 'height': 500,
-                }
-                log(f"[Accessibility] Estimated iframe at ({iframe_box['x']:.0f},{iframe_box['y']:.0f})")
-            except Exception:
-                iframe_box = {'x': 100, 'y': 100, 'width': 400, 'height': 500}
-
-        # ── Step 4: DUMP everything clickable, then click 3-dots ──
-        await _dump_clickables(page, frame, iframe_box, log)
+                except Exception:
+                    continue
+            else:
+                log("[Accessibility] Cannot locate any hCaptcha iframe — aborting",
+                    level="error")
+                return False
 
         for attempt in range(1, max_attempts + 1):
             log(f"[Accessibility] Attempt {attempt}/{max_attempts}")
 
-            # 3a) Click 3-dots — try Playwright locators (auto-scroll, native click)
+            # ── Step 2: Click 3-dots menu (#menu-info) ──
             menu_clicked = False
-            locator_selectors = [
-                '[aria-label*="Options" i]',
-                '[aria-label*="menu" i]',
-                '[title*="Options" i]',
-                'button[class*="dot" i]',
-                '[class*="menu"] [role="button"]',
-                '[class*="icon"][class*="dot" i]',
-                '.h-captcha-menu > button',
-                '[class*="challenge"] [role="button"]:last-child',
-            ]
-            for sel in locator_selectors:
-                if menu_clicked:
-                    break
-                try:
-                    loc = frame.locator(sel).first
-                    if await loc.count() and await loc.is_visible():
-                        box = await loc.bounding_box()
-                        log(f"[Accessibility] 3-dots locator '{sel}' found at "
-                            f"({box['x'] + box['width']/2:.0f},{box['y'] + box['height']/2:.0f}) — clicking")
-                        await loc.click(timeout=5000)
-                        menu_clicked = True
-                except Exception as e:
-                    log(f"[Accessibility] 3-dots locator '{sel}': {str(e)[:60]}", level="warn")
 
-            # 3b) Coordinate fallback — click bottom-right of the challenge iframe
-            #     (hCaptcha's 3-dots live in the top-right of the challenge card)
+            # Strategy A: CSS selector #menu-info (the EXACT id)
+            try:
+                btn = hcaptcha.locator("#menu-info").first
+                await btn.wait_for(state="visible", timeout=8000)
+                await btn.click(timeout=5000)
+                log("[Accessibility] Clicked #menu-info (strategy A)")
+                menu_clicked = True
+            except Exception as e:
+                log(f"[Accessibility] #menu-info click failed: {str(e)[:80]}",
+                    level="warn")
+
+            # Strategy B: accessible role with aria-label
             if not menu_clicked:
                 try:
-                    # Try top-right corner of iframe (classic hCaptcha dots position)
-                    cx = iframe_box['x'] + iframe_box['width'] - 28
-                    cy = iframe_box['y'] + 24
-                    log(f"[Accessibility] Coordinate fallback: clicking top-right at ({cx:.0f},{cy:.0f})")
-                    await page.mouse.click(cx, cy)
+                    btn = hcaptcha.get_by_role(
+                        "button",
+                        name="About hCaptcha & Accessibility Options"
+                    ).first
+                    await btn.wait_for(state="visible", timeout=8000)
+                    await btn.click(timeout=5000)
+                    log("[Accessibility] Clicked via aria-label (strategy B)")
                     menu_clicked = True
                 except Exception as e:
-                    log(f"[Accessibility] Coord fallback error: {e}", level="warn")
+                    log(f"[Accessibility] aria-label click failed: {str(e)[:80]}",
+                        level="warn")
 
+            # Strategy C: force-click by bounding box
+            if not menu_clicked:
+                try:
+                    btn = hcaptcha.locator("#menu-info").first
+                    await btn.click(force=True, timeout=5000)
+                    log("[Accessibility] Force-clicked #menu-info (strategy C)")
+                    menu_clicked = True
+                except Exception as e:
+                    log(f"[Accessibility] force-click failed: {str(e)[:80]}",
+                        level="warn")
+
+            # Strategy D: dispatch click event via JS
+            if not menu_clicked:
+                try:
+                    await hcaptcha.locator("#menu-info").first.dispatch_event(
+                        "click"
+                    )
+                    log("[Accessibility] Dispatched click event (strategy D)")
+                    menu_clicked = True
+                except Exception as e:
+                    log(f"[Accessibility] dispatch_event failed: {str(e)[:80]}",
+                        level="warn")
+
+            if not menu_clicked:
+                log("[Accessibility] Could NOT click menu — retrying", level="warn")
+                await asyncio.sleep(1.5)
+                continue
+
+            # Let the dropdown menu animate in
             await asyncio.sleep(1.0)
 
-            # 3c) Try clicking "Accessibility Challenge" — locators first, coords fallback
+            # ── Step 3: Click "Accessibility Challenge" option ──
             acc_clicked = False
-            for context, ctx_name in [(frame, "iframe"), (page, "page")]:
+            acc_strategies = [
+                lambda: hcaptcha.get_by_text("Accessibility Challenge", exact=False).first.click(timeout=5000),
+                lambda: hcaptcha.locator('text="Accessibility Challenge"').first.click(timeout=5000),
+                lambda: hcaptcha.get_by_role("link", name="Accessibility Challenge").click(timeout=5000),
+                lambda: hcaptcha.get_by_role("button", name="Accessibility Challenge").click(timeout=5000),
+            ]
+            for i, strat in enumerate(acc_strategies):
                 if acc_clicked:
                     break
                 try:
-                    # 1) Playwright locator by text
-                    loc = context.get_by_text("accessibility", exact=False).first
-                    if await loc.count():
-                        for _try in range(3):
-                            try:
-                                box = await loc.bounding_box()
-                                log(f"[Accessibility] 'Accessibility' option in {ctx_name} at "
-                                    f"({box['x'] + box['width']/2:.0f},{box['y'] + box['height']/2:.0f}) — clicking")
-                                await loc.click(timeout=4000)
-                                acc_clicked = True
-                                break
-                            except Exception as e:
-                                log(f"[Accessibility] acc option retry: {str(e)[:50]}", level="warn")
-                                await asyncio.sleep(0.8)
-                except Exception as e:
-                    log(f"[Accessibility] acc locator in {ctx_name}: {str(e)[:60]}", level="warn")
-
-                if acc_clicked:
-                    break
-
-                # 2) Coordinate fallback via JS rect scan
-                try:
-                    rect = await context.evaluate("""() => {
-                        const links = document.querySelectorAll('a, button, [role="menuitem"], [role="option"], [class*="option" i]');
-                        for (const el of links) {
-                            const t = (el.textContent || '').toLowerCase();
-                            if (t.includes('accessibility') || t.includes('accessible')) {
-                                if (el.offsetParent !== null) {
-                                    const r = el.getBoundingClientRect();
-                                    return {x: r.x + r.width/2, y: r.y + r.height/2, w: r.width, h: r.height, text: t.slice(0, 40)};
-                                }
-                            }
-                        }
-                        return null;
-                    }""")
-                    if rect:
-                        if ctx_name == "iframe":
-                            cx, cy = iframe_box['x'] + rect['x'], iframe_box['y'] + rect['y']
-                        else:
-                            cx, cy = rect['x'], rect['y']
-                        log(f"[Accessibility] Clicking '{rect['text']}' in {ctx_name} at ({cx:.0f},{cy:.0f})")
-                        await page.mouse.click(cx, cy)
-                        acc_clicked = True
+                    await strat()
+                    log(f"[Accessibility] Selected accessibility (strategy {i+1})")
+                    acc_clicked = True
                 except Exception:
                     pass
 
-            await asyncio.sleep(2.0)
+            if not acc_clicked:
+                log("[Accessibility] Could not select accessibility option", level="warn")
+                await asyncio.sleep(1.0)
+                continue
 
-            # Already solved?
-            try:
-                token = await page.evaluate("""() => {
-                    const ta = document.querySelector('textarea[name="h-captcha-response"]');
-                    return ta && ta.value && ta.value.length > 20 ? ta.value : '';
-                }""")
-                if token:
-                    log("[Accessibility] Already solved — token present!")
-                    return True
-            except Exception:
-                pass
+            # Wait for accessibility challenge to render
+            await asyncio.sleep(3.0)
 
-            # Screenshot the challenge (clip or full-page fallback)
+            # ── Step 4: Check if already solved ──
+            if await _token_present():
+                log("[Accessibility] Already solved — token present!")
+                return True
+
+            # ── Step 5: Screenshot the challenge ──
             try:
-                shot = await page.screenshot(clip={
-                    'x': iframe_box['x'],
-                    'y': iframe_box['y'],
-                    'width': iframe_box['width'],
-                    'height': iframe_box['height'],
-                })
+                img_b64 = await _screenshot_b64(hcaptcha)
             except Exception:
                 try:
-                    log("[Accessibility] Clip screenshot failed — full page fallback", level="warn")
-                    shot = await page.screenshot()
-                except Exception as e:
-                    log(f"[Accessibility] Screenshot error: {e}", level="error")
+                    img_b64 = await _screenshot_b64(page)
+                except Exception:
+                    log("[Accessibility] Screenshot failed", level="error")
                     continue
-            img_b64 = base64.b64encode(shot).decode()
-            log(f"[Accessibility] Screenshot captured ({len(shot)} bytes)")
+            log(f"[Accessibility] Screenshot captured")
 
-            # Ollama vision
+            # ── Step 6: Ollama vision ──
             vision_prompt = (
-                "You are a captcha solver. This is an hCaptcha accessibility challenge. "
-                "Look at the screenshot carefully. "
-                "The challenge usually shows a word, an image of an object, or text instructions "
-                "like 'pick the ____' or 'type the word'. "
-                "Respond with ONLY the single word or short phrase that is the answer. "
-                "No explanation, no punctuation, just the answer."
+                "You are solving an hCaptcha accessibility challenge. "
+                "Look at the image carefully. "
+                "The challenge usually shows a word/phrase to type, "
+                "or asks you to identify an object. "
+                "IMPORTANT: some challenges ask to remove the first and "
+                "last letter of a word and then reverse it. "
+                "For example: 'enemy' -> remove e and y -> 'nem' -> reverse -> 'men'. "
+                "Respond with ONLY the single word or short phrase answer. "
+                "No explanation, no punctuation, no quotes."
             )
-            answer = await _ollama_ask(img_b64, vision_prompt)
-            if not answer:
-                log("[Accessibility] Ollama returned empty — retrying", level="warn")
+            answer = await _ollama_chat(img_b64, vision_prompt)
+            if not answer or len(answer) < 1:
+                log("[Accessibility] Ollama returned empty", level="warn")
                 await asyncio.sleep(1)
                 continue
 
+            # Clean answer
             import re
             answer = re.sub(r'["\'.,!?;:\-\[\](){}]', '', answer).strip()
-            answer = answer.split('\n')[0].split(' ')[0] if answer else ''
-            if not answer or len(answer) < 2:
-                log(f"[Accessibility] Bad answer: '{answer}' — retrying", level="warn")
+            answer = answer.split('\n')[0].strip()
+            if not answer or len(answer) < 1:
+                log(f"[Accessibility] Bad answer after cleaning", level="warn")
                 await asyncio.sleep(1)
                 continue
 
             log(f"[Accessibility] Ollama answer: '{answer}'")
 
-            # Type into input field (try both iframe and page)
+            # ── Step 7: Type answer ──
             typed = False
-            for ctx, ctx_name in [(frame, "iframe"), (page, "page")]:
+            for inp_sel in ['input[type="text"]', 'input', 'textarea', '[role="textbox"]']:
                 if typed:
                     break
                 try:
-                    result = await ctx.evaluate(f"""(answer) => {{
-                        const inputs = document.querySelectorAll('input[type="text"], input:not([type]), textarea');
-                        for (const inp of inputs) {{
-                            if (inp.offsetParent !== null && !inp.readOnly && !inp.disabled) {{
-                                inp.focus();
-                                inp.value = '';
-                                for (const ch of answer) {{
-                                    inp.value += ch;
-                                    inp.dispatchEvent(new Event('input', {{bubbles: true}}));
-                                    inp.dispatchEvent(new KeyboardEvent('keydown', {{bubbles: true}}));
-                                    inp.dispatchEvent(new KeyboardEvent('keyup', {{bubbles: true}}));
-                                }}
-                                inp.dispatchEvent(new Event('change', {{bubbles: true}}));
-                                return inp.tagName + ':' + answer;
-                            }}
-                        }}
-                        return null;
-                    }}""", answer)
-                    if result:
-                        log(f"[Accessibility] Typed '{answer}' into {result} ({ctx_name})")
-                        typed = True
-                except Exception as e:
-                    log(f"[Accessibility] Type in {ctx_name} error: {e}", level="warn")
+                    inp = hcaptcha.locator(inp_sel).first
+                    await inp.wait_for(state="visible", timeout=5000)
+                    await inp.click()
+                    await inp.fill("")
+                    await inp.type(answer, delay=30)
+                    log(f"[Accessibility] Typed '{answer}' into {inp_sel}")
+                    typed = True
+                except Exception:
+                    pass
 
             if not typed:
                 log("[Accessibility] No input found — keyboard fallback", level="warn")
-                await page.keyboard.type(answer, delay=50)
+                try:
+                    await page.keyboard.type(answer, delay=50)
+                    typed = True
+                except Exception:
+                    pass
 
-            await asyncio.sleep(1.0)
+            await asyncio.sleep(0.8)
 
-            # Click submit — try iframe first with real mouse click, then page, then keyboard
+            # ── Step 8: Submit ──
             submit_clicked = False
-            for context, ctx_name in [(frame, "iframe"), (page, "page")]:
+            for btn_sel in [
+                'button[type="submit"]',
+                'button:has-text("Submit")',
+                'button:has-text("Verify")',
+                'button:has-text("Next")',
+                'button:has-text("OK")',
+                '#submit',
+            ]:
                 if submit_clicked:
                     break
                 try:
-                    rect = await context.evaluate("""() => {
-                        const btns = document.querySelectorAll('button, [role="button"]');
-                        for (const b of btns) {
-                            if (b.offsetParent === null) continue;
-                            const t = (b.textContent || '').toLowerCase();
-                            if (t.includes('submit') || t.includes('verify') ||
-                                t.includes('continue') || t.includes('check') ||
-                                t.includes('next') || t.includes('done') ||
-                                t.includes('ok')) {
-                                const r = b.getBoundingClientRect();
-                                return {x: r.x + r.width/2, y: r.y + r.height/2, text: t.slice(0, 20)};
-                            }
-                        }
-                        return null;
-                    }""")
-                    if rect:
-                        if ctx_name == "iframe":
-                            cx, cy = iframe_box['x'] + rect['x'], iframe_box['y'] + rect['y']
-                        else:
-                            cx, cy = rect['x'], rect['y']
-                        log(f"[Accessibility] Clicking submit '{rect['text']}' in {ctx_name} at ({cx:.0f},{cy:.0f})")
-                        await page.mouse.click(cx, cy)
-                        submit_clicked = True
+                    await hcaptcha.locator(btn_sel).first.click(timeout=3000)
+                    log(f"[Accessibility] Submitted via {btn_sel}")
+                    submit_clicked = True
                 except Exception:
                     pass
+
             if not submit_clicked:
-                await page.keyboard.press("Enter")
-            await asyncio.sleep(2.5)
+                try:
+                    await hcaptcha.locator("input").first.press("Enter", timeout=2000)
+                    log("[Accessibility] Submitted via Enter")
+                except Exception:
+                    pass
 
-            # Verify
-            try:
-                token = await page.evaluate("""() => {
-                    const ta = document.querySelector('textarea[name="h-captcha-response"]');
-                    return ta && ta.value && ta.value.length > 20 ? ta.value : '';
-                }""")
-                if token:
-                    log("[Accessibility] [OK] hCaptcha passed!")
-                    return True
-            except Exception:
-                pass
+            await asyncio.sleep(3.0)
 
-            log(f"[Accessibility] Attempt {attempt} didn't solve — retrying", level="warn")
+            # ── Step 9: Verify ──
+            if await _token_present():
+                log("[Accessibility] [OK] hCaptcha passed!")
+                return True
+
+            log(f"[Accessibility] Attempt {attempt} did not solve — retrying", level="warn")
             await asyncio.sleep(1.5)
 
         log("[Accessibility] [FAIL] Could not solve after all attempts", level="error")
