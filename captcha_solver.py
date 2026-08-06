@@ -2536,8 +2536,12 @@ async def solve_hcaptcha_accessibility(page, iframe,
             except Exception:
                 continue
 
-        # ── Fallback 2: selector-based ──
+        # ── Fallback 2: selector-based (aria-label + type) ──
         for btn_sel in [
+            'button[aria-label="Next"]',
+            'button[aria-label="Submit"]',
+            'button[aria-label="Verify"]',
+            'button[type="button"]',
             'button[type="submit"]',
             'button:has-text("Next")',
             'button:has-text("Submit")',
@@ -2561,11 +2565,25 @@ async def solve_hcaptcha_accessibility(page, iframe,
         except Exception:
             pass
 
-        # ── Fallback 4: click center of frame (Next is usually bottom-right) ──
+        # ── Fallback 4: coordinate click on iframe body ──
+        # Next button is reliably at the bottom-right of the iframe
+        try:
+            btn = hcaptcha.locator(
+                'button[aria-label="Next"], button:has-text("Next")'
+            ).first
+            box = await btn.bounding_box()
+            if box:
+                cx = box["x"] + box["width"] / 2
+                cy = box["y"] + box["height"] / 2
+                await page.mouse.click(cx, cy)
+                log(f"[Accessibility] Submitted via coordinate click ({int(cx)},{int(cy)})")
+                return True
+        except Exception:
+            pass
+        # Ultimate fallback: click frame body bottom-right
         try:
             box = await hcaptcha.locator("body").first.bounding_box()
             if box:
-                # Bottom-right area of the frame = Next button position
                 cx = box["x"] + box["width"] - 60
                 cy = box["y"] + box["height"] - 40
                 await page.mouse.click(cx, cy)
