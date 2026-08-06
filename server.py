@@ -471,7 +471,19 @@ class DiscordAutomation:
                 if drag_result is True:
                     return True
 
+            if not self._solver.configured:
+                self._log("[Captcha] [FAIL] No API_KEY set - NoCaptchaAI unavailable "
+                          "(set API_KEY to your nocaptchaai.com key)", level="error")
+                return False
+
+            if mode != "drag" or drag_result is None:
+                # Freshly-mounted widget (or one still loading when the drag
+                # solver looked): let it settle before re-checking/extracting.
+                self._log("[Captcha] Widget detected - waiting 10s for full load...")
+                await asyncio.sleep(10)
+
             # ── ACCESSIBILITY CHALLENGE — Ollama vision, easiest path ──
+            # Must run AFTER the 10s settle wait so the iframe is fully rendered
             self._log("[Captcha] Trying accessibility challenge (Ollama vision)...")
             if await solve_hcaptcha_accessibility(self._page, iframe, log=self._log):
                 self._log("[Captcha] [OK] Accessibility challenge solved!")
@@ -485,17 +497,6 @@ class DiscordAutomation:
                     return True
             else:
                 self._log("[Captcha] Accessibility challenge failed — trying API fallback", level="warn")
-
-            if not self._solver.configured:
-                self._log("[Captcha] [FAIL] No API_KEY set - NoCaptchaAI unavailable "
-                          "(set API_KEY to your nocaptchaai.com key)", level="error")
-                return False
-
-            if mode != "drag" or drag_result is None:
-                # Freshly-mounted widget (or one still loading when the drag
-                # solver looked): let it settle before re-checking/extracting.
-                self._log("[Captcha] Widget detected - waiting 10s for full load...")
-                await asyncio.sleep(10)
 
             if await self._past_captcha():
                 self._log(f"[Captcha] Page moved on - at {self._page.url[:50]}")

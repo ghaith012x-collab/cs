@@ -1539,196 +1539,217 @@ async def solve_hcaptcha_accessibility(page, iframe,
             return ""
 
     try:
-        iframe_box = await iframe.bounding_box()
-        if not iframe_box:
-            log("[Accessibility] No iframe bounding box", level="error")
+        # Retry bounding_box — iframe may not be painted yet
+        iframe_box = None
+        for _ in range(8):
+            try:
+                iframe_box = await iframe.bounding_box()
+                if iframe_box and iframe_box.get("width", 0) > 10:
+                    break
+            except Exception:
+                pass
+            await asyncio.sleep(1.0)
+            log("[Accessibility] Waiting for iframe to render...", level="warn")
+
+        if not iframe_box or iframe_box.get("width", 0) < 10:
+            log("[Accessibility] Iframe never rendered — bounding box unavailable", level="error")
             return False
 
-        frame = await iframe.content_frame()
+        # Retry content_frame too
+        frame = None
+        for _ in range(5):
+            try:
+                frame = await iframe.content_frame()
+                if frame:
+                    break
+            except Exception:
+                pass
+            await asyncio.sleep(0.5)
+
         if not frame:
-            log("[Accessibility] No iframe content frame", level="error")
+            log("[Accessibility] No iframe content frame after retries", level="error")
             return False
 
-        for attempt in range(1, max_attempts + 1):
-            log(f"[Accessibility] Attempt {attempt}/{max_attempts}")
+            for attempt in range(1, max_attempts + 1):
+                log(f"[Accessibility] Attempt {attempt}/{max_attempts}")
 
-            # 1) Click the 3-dots menu to reveal the accessibility option
-            try:
-                menu_clicked = await frame.evaluate("""() => {
-                    // hCaptcha's 3-dots accessibility trigger
-                    const selectors = [
-                        '[aria-label*="Options"]',
-                        '[class*="menu"] [role="button"]',
-                        'button[class*="dots"]',
-                        '[class*="icon"][class*="dots"]',
-                        '.h-captcha-menu > button',
-                        '[class*="challenge"] [role="button"]:last-child',
-                    ];
-                    for (const sel of selectors) {
-                        const el = document.querySelector(sel);
-                        if (el && el.offsetParent !== null) {
-                            el.click();
-                            return sel;
-                        }
-                    }
-                    // Fallback: click bottom-right area of the challenge
-                    return null;
-                }""")
-                if menu_clicked:
-                    log(f"[Accessibility] Menu clicked: {menu_clicked}")
-                await asyncio.sleep(1.0)
-            except Exception as e:
-                log(f"[Accessibility] Menu click error: {e}", level="warn")
-
-            # 2) Click the "Accessibility Challenge" option
-            try:
-                acc_clicked = await frame.evaluate("""() => {
-                    const links = document.querySelectorAll('a, button, [role="menuitem"], [role="option"]');
-                    for (const el of links) {
-                        const t = (el.textContent || '').toLowerCase();
-                        if (t.includes('accessibility') || t.includes('accessible')) {
-                            if (el.offsetParent !== null) {
+                # 1) Click the 3-dots menu to reveal the accessibility option
+                try:
+                    menu_clicked = await frame.evaluate("""() => {
+                        // hCaptcha's 3-dots accessibility trigger
+                        const selectors = [
+                            '[aria-label*="Options"]',
+                            '[class*="menu"] [role="button"]',
+                            'button[class*="dots"]',
+                            '[class*="icon"][class*="dots"]',
+                            '.h-captcha-menu > button',
+                            '[class*="challenge"] [role="button"]:last-child',
+                        ];
+                        for (const sel of selectors) {
+                            const el = document.querySelector(sel);
+                            if (el && el.offsetParent !== null) {
                                 el.click();
-                                return t.slice(0, 40);
+                                return sel;
                             }
                         }
-                    }
-                    return null;
-                }""")
-                if acc_clicked:
-                    log(f"[Accessibility] Selected: {acc_clicked}")
-                await asyncio.sleep(2.0)
-            except Exception as e:
-                log(f"[Accessibility] Select error: {e}", level="warn")
+                        // Fallback: click bottom-right area of the challenge
+                        return null;
+                    }""")
+                    if menu_clicked:
+                        log(f"[Accessibility] Menu clicked: {menu_clicked}")
+                    await asyncio.sleep(1.0)
+                except Exception as e:
+                    log(f"[Accessibility] Menu click error: {e}", level="warn")
 
-            # 3) Wait for the text challenge to render
-            await asyncio.sleep(1.5)
-
-            # 4) Check if we're already past captcha
-            try:
-                token = await page.evaluate("""() => {
-                    const ta = document.querySelector('textarea[name="h-captcha-response"]');
-                    return ta && ta.value && ta.value.length > 20 ? ta.value : '';
-                }""")
-                if token:
-                    log("[Accessibility] Already solved — token present!")
-                    return True
-            except Exception:
-                pass
-
-            # 5) Screenshot the challenge area
-            try:
-                shot = await page.screenshot(clip={
-                    'x': iframe_box['x'],
-                    'y': iframe_box['y'],
-                    'width': iframe_box['width'],
-                    'height': iframe_box['height'],
-                })
-                img_b64 = base64.b64encode(shot).decode()
-                log(f"[Accessibility] Screenshot captured ({len(shot)} bytes)")
-            except Exception as e:
-                log(f"[Accessibility] Screenshot error: {e}", level="error")
-                continue
-
-            # 6) Send to Ollama vision model
-            prompt = (
-                "You are a captcha solver. This is an hCaptcha accessibility challenge. "
-                "Look at the screenshot carefully. "
-                "The challenge usually shows a word, an image of an object, or text instructions "
-                "like 'pick the ____' or 'type the word'. "
-                "Respond with ONLY the single word or short phrase that is the answer. "
-                "No explanation, no punctuation, just the answer."
-            )
-            answer = await _ollama_ask(img_b64, prompt)
-            if not answer:
-                log("[Accessibility] Ollama returned empty — retrying", level="warn")
-                await asyncio.sleep(1)
-                continue
-
-            # Clean the answer: strip quotes, punctuation, extra words
-            import re
-            answer = re.sub(r'["\'.,!?;:\-\[\](){}]', '', answer).strip()
-            # Take only the first word/line if the model rambled
-            answer = answer.split('\n')[0].split(' ')[0] if answer else ''
-            if not answer or len(answer) < 2:
-                log(f"[Accessibility] Bad answer: '{answer}' — retrying", level="warn")
-                await asyncio.sleep(1)
-                continue
-
-            log(f"[Accessibility] Ollama answer: '{answer}'")
-
-            # 7) Type the answer into the input field
-            try:
-                typed = await frame.evaluate(f"""(answer) => {{
-                    const inputs = document.querySelectorAll('input[type="text"], input:not([type]), textarea');
-                    for (const inp of inputs) {{
-                        if (inp.offsetParent !== null && !inp.readOnly && !inp.disabled) {{
-                            inp.focus();
-                            inp.value = '';
-                            // Dispatch input events per character for the challenge
-                            for (const ch of answer) {{
-                                inp.value += ch;
-                                inp.dispatchEvent(new Event('input', {{bubbles: true}}));
-                                inp.dispatchEvent(new KeyboardEvent('keydown', {{bubbles: true}}));
-                                inp.dispatchEvent(new KeyboardEvent('keyup', {{bubbles: true}}));
-                            }}
-                            inp.dispatchEvent(new Event('change', {{bubbles: true}}));
-                            return inp.tagName + ':' + answer;
-                        }}
-                    }}
-                    return null;
-                }}""", answer)
-                if typed:
-                    log(f"[Accessibility] Typed '{answer}' into {typed}")
-                else:
-                    log("[Accessibility] No input field found — trying keyboard type", level="warn")
-                    await page.keyboard.type(answer, delay=50)
-            except Exception as e:
-                log(f"[Accessibility] Type error: {e}", level="warn")
-                await page.keyboard.type(answer, delay=60)
-
-            await asyncio.sleep(1.0)
-
-            # 8) Click submit / continue button
-            try:
-                await frame.evaluate("""() => {
-                    const btns = document.querySelectorAll('button, [role="button"]');
-                    for (const b of btns) {
-                        if (b.offsetParent === null) continue;
-                        const t = (b.textContent || '').toLowerCase();
-                        if (t.includes('submit') || t.includes('verify') ||
-                            t.includes('continue') || t.includes('check') ||
-                            t.includes('next') || t.includes('done') ||
-                            t.includes('ok')) {
-                            b.click();
-                            return t;
+                # 2) Click the "Accessibility Challenge" option
+                try:
+                    acc_clicked = await frame.evaluate("""() => {
+                        const links = document.querySelectorAll('a, button, [role="menuitem"], [role="option"]');
+                        for (const el of links) {
+                            const t = (el.textContent || '').toLowerCase();
+                            if (t.includes('accessibility') || t.includes('accessible')) {
+                                if (el.offsetParent !== null) {
+                                    el.click();
+                                    return t.slice(0, 40);
+                                }
+                            }
                         }
-                    }
-                    return null;
-                }""")
-                await page.keyboard.press("Enter")
-            except Exception:
-                await page.keyboard.press("Enter")
+                        return null;
+                    }""")
+                    if acc_clicked:
+                        log(f"[Accessibility] Selected: {acc_clicked}")
+                    await asyncio.sleep(2.0)
+                except Exception as e:
+                    log(f"[Accessibility] Select error: {e}", level="warn")
 
-            await asyncio.sleep(2.5)
+                # 3) Wait for the text challenge to render
+                await asyncio.sleep(1.5)
 
-            # 9) Verify solved
-            try:
-                token = await page.evaluate("""() => {
-                    const ta = document.querySelector('textarea[name="h-captcha-response"]');
-                    return ta && ta.value && ta.value.length > 20 ? ta.value : '';
-                }""")
-                if token:
-                    log("[Accessibility] [OK] hCaptcha passed — token verified!")
-                    return True
-            except Exception:
-                pass
+                # 4) Check if we're already past captcha
+                try:
+                    token = await page.evaluate("""() => {
+                        const ta = document.querySelector('textarea[name="h-captcha-response"]');
+                        return ta && ta.value && ta.value.length > 20 ? ta.value : '';
+                    }""")
+                    if token:
+                        log("[Accessibility] Already solved — token present!")
+                        return True
+                except Exception:
+                    pass
 
-            log(f"[Accessibility] Attempt {attempt} didn't solve — retrying", level="warn")
-            await asyncio.sleep(1.5)
+                # 5) Screenshot the challenge area
+                try:
+                    shot = await page.screenshot(clip={
+                        'x': iframe_box['x'],
+                        'y': iframe_box['y'],
+                        'width': iframe_box['width'],
+                        'height': iframe_box['height'],
+                    })
+                    img_b64 = base64.b64encode(shot).decode()
+                    log(f"[Accessibility] Screenshot captured ({len(shot)} bytes)")
+                except Exception as e:
+                    log(f"[Accessibility] Screenshot error: {e}", level="error")
+                    continue
 
-        log("[Accessibility] [FAIL] Could not solve after all attempts", level="error")
-        return False
+                # 6) Send to Ollama vision model
+                prompt = (
+                    "You are a captcha solver. This is an hCaptcha accessibility challenge. "
+                    "Look at the screenshot carefully. "
+                    "The challenge usually shows a word, an image of an object, or text instructions "
+                    "like 'pick the ____' or 'type the word'. "
+                    "Respond with ONLY the single word or short phrase that is the answer. "
+                    "No explanation, no punctuation, just the answer."
+                )
+                answer = await _ollama_ask(img_b64, prompt)
+                if not answer:
+                    log("[Accessibility] Ollama returned empty — retrying", level="warn")
+                    await asyncio.sleep(1)
+                    continue
+
+                # Clean the answer: strip quotes, punctuation, extra words
+                import re
+                answer = re.sub(r'["\'.,!?;:\-\[\](){}]', '', answer).strip()
+                # Take only the first word/line if the model rambled
+                answer = answer.split('\n')[0].split(' ')[0] if answer else ''
+                if not answer or len(answer) < 2:
+                    log(f"[Accessibility] Bad answer: '{answer}' — retrying", level="warn")
+                    await asyncio.sleep(1)
+                    continue
+
+                log(f"[Accessibility] Ollama answer: '{answer}'")
+
+                # 7) Type the answer into the input field
+                try:
+                    typed = await frame.evaluate(f"""(answer) => {{
+                        const inputs = document.querySelectorAll('input[type="text"], input:not([type]), textarea');
+                        for (const inp of inputs) {{
+                            if (inp.offsetParent !== null && !inp.readOnly && !inp.disabled) {{
+                                inp.focus();
+                                inp.value = '';
+                                // Dispatch input events per character for the challenge
+                                for (const ch of answer) {{
+                                    inp.value += ch;
+                                    inp.dispatchEvent(new Event('input', {{bubbles: true}}));
+                                    inp.dispatchEvent(new KeyboardEvent('keydown', {{bubbles: true}}));
+                                    inp.dispatchEvent(new KeyboardEvent('keyup', {{bubbles: true}}));
+                                }}
+                                inp.dispatchEvent(new Event('change', {{bubbles: true}}));
+                                return inp.tagName + ':' + answer;
+                            }}
+                        }}
+                        return null;
+                    }}""", answer)
+                    if typed:
+                        log(f"[Accessibility] Typed '{answer}' into {typed}")
+                    else:
+                        log("[Accessibility] No input field found — trying keyboard type", level="warn")
+                        await page.keyboard.type(answer, delay=50)
+                except Exception as e:
+                    log(f"[Accessibility] Type error: {e}", level="warn")
+                    await page.keyboard.type(answer, delay=60)
+
+                await asyncio.sleep(1.0)
+
+                # 8) Click submit / continue button
+                try:
+                    await frame.evaluate("""() => {
+                        const btns = document.querySelectorAll('button, [role="button"]');
+                        for (const b of btns) {
+                            if (b.offsetParent === null) continue;
+                            const t = (b.textContent || '').toLowerCase();
+                            if (t.includes('submit') || t.includes('verify') ||
+                                t.includes('continue') || t.includes('check') ||
+                                t.includes('next') || t.includes('done') ||
+                                t.includes('ok')) {
+                                b.click();
+                                return t;
+                            }
+                        }
+                        return null;
+                    }""")
+                    await page.keyboard.press("Enter")
+                except Exception:
+                    await page.keyboard.press("Enter")
+
+                await asyncio.sleep(2.5)
+
+                # 9) Verify solved
+                try:
+                    token = await page.evaluate("""() => {
+                        const ta = document.querySelector('textarea[name="h-captcha-response"]');
+                        return ta && ta.value && ta.value.length > 20 ? ta.value : '';
+                    }""")
+                    if token:
+                        log("[Accessibility] [OK] hCaptcha passed — token verified!")
+                        return True
+                except Exception:
+                    pass
+
+                log(f"[Accessibility] Attempt {attempt} didn't solve — retrying", level="warn")
+                await asyncio.sleep(1.5)
+
+            log("[Accessibility] [FAIL] Could not solve after all attempts", level="error")
+            return False
 
     except Exception as e:
         log(f"[Accessibility] Fatal error: {e}", level="error")
