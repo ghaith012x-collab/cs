@@ -588,3 +588,7 @@ setInterval(refresh, 2500);
 refresh();
 setInterval(refreshTokens, 15000);
 </script></body></html>"""
+
+
+if __name__ == "__main__":
+    main()
