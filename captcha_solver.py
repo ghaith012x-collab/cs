@@ -1718,14 +1718,41 @@ async def solve_hcaptcha_accessibility(page, iframe,
 
     async def _accessibility_active(hcaptcha) -> bool:
         """True when the accessibility question (input/prompt) is on screen."""
+        # ── Method 1: frame_locator (hcaptcha) ──
         try:
             await hcaptcha.locator(
                 'input[type="text"], input[type="number"], [role="textbox"], '
-                '#prompt-text, [class*="prompt"]'
-            ).first.wait_for(state="visible", timeout=2500)
+                '#prompt-text, [class*="prompt"], '
+                '[class*="answer"], [class*="input"], '
+                'input:not([type="hidden"]), textarea'
+            ).first.wait_for(state="visible", timeout=2000)
             return True
         except Exception:
-            return False
+            pass
+        # ── Method 2: JS page-level check (may be outside the iframe) ──
+        try:
+            result = await _challenge_js("""() => {
+                const sels = [
+                    'input[type="text"]', 'input[type="number"]',
+                    '[role="textbox"]', '#prompt-text', 'textarea',
+                    'input:not([type="hidden"])', '[class*="prompt"]',
+                    '[class*="answer"]', '[class*="challenge-text"]'
+                ];
+                for (const s of sels) {
+                    const el = document.querySelector(s);
+                    if (el && el.offsetParent !== null) return s;
+                }
+                const body = document.body ? document.body.innerText : '';
+                if (body.length > 20 && /accessibility|type the|answer/i.test(body)) {
+                    return 'text_found';
+                }
+                return null;
+            }""")
+            if result:
+                return True
+        except Exception:
+            pass
+        return False
 
     async def _menu_visible(hcaptcha) -> bool:
         """True when the dropdown menu is open — has visible menu/listbox."""
@@ -1986,10 +2013,22 @@ async def solve_hcaptcha_accessibility(page, iframe,
             return False
 
         # ── Step C: Wait for accessibility challenge input to appear ──
-        for _ in range(12):  # 6 seconds
+        # Wait up to 10 seconds (20 polls x 0.5s) — some challenges load slowly
+        for _ in range(20):  # 10 seconds
             if await _accessibility_active(hcaptcha):
                 log("[Accessibility] [OK] Accessibility challenge input detected!")
                 return True
+            # Also check page-level: maybe input is outside the iframe
+            try:
+                has_input = await page.evaluate("""() => {
+                    const inp = document.querySelector('input[type="text"]:not([type="hidden"]), input[type="number"]:not([type="hidden"]), textarea:not([type="hidden"])');
+                    return !!(inp && inp.offsetParent !== null);
+                }""")
+                if has_input:
+                    log("[Accessibility] [OK] Input found at page level!")
+                    return True
+            except Exception:
+                pass
             await asyncio.sleep(0.5)
 
         log("[Accessibility] Accessibility challenge did not open (no input detected)", level="warn")
@@ -2259,11 +2298,22 @@ async def solve_hcaptcha_accessibility(page, iframe,
             if await _accessibility_active(hcaptcha):
                 log("[Accessibility] Accessibility challenge already active")
             else:
-                # Open the accessibility challenge (only once)
+                # ── Close any open menu from a prior failed attempt ──
+                if attempt > 1:
+                    try:
+                        await _challenge_js("""() => {
+                            const menus = document.querySelectorAll('[role="menu"], [role="listbox"], .menu, .dropdown');
+                            menus.forEach(m => { m.style.display = 'none'; m.remove(); });
+                        }""")
+                        log("[Accessibility] Cleaned up stale menus before retry")
+                    except Exception:
+                        pass
+                    await asyncio.sleep(0.5)
+                # Open the accessibility challenge
                 if not await _open_accessibility_challenge(hcaptcha):
                     log("[Accessibility] Could not open accessibility challenge",
                         level="warn")
-                    await asyncio.sleep(1.5)
+                    await asyncio.sleep(2.0)  # longer pause before retry
                     continue
 
             # ── Answer every question hCaptcha asks, one after another ──
