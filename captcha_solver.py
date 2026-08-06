@@ -1717,42 +1717,17 @@ async def solve_hcaptcha_accessibility(page, iframe,
         return None
 
     async def _accessibility_active(hcaptcha) -> bool:
-        """True when the accessibility question (input/prompt) is on screen."""
-        # ── Method 1: frame_locator (hcaptcha) ──
+        """True when the accessibility question (input/prompt) is on screen.
+        Strict selectors only — do NOT match textarea or hidden inputs
+        (those are the hCaptcha token field, always present)."""
         try:
             await hcaptcha.locator(
                 'input[type="text"], input[type="number"], [role="textbox"], '
-                '#prompt-text, [class*="prompt"], '
-                '[class*="answer"], [class*="input"], '
-                'input:not([type="hidden"]), textarea'
-            ).first.wait_for(state="visible", timeout=2000)
+                '#prompt-text, [class*="prompt"]'
+            ).first.wait_for(state="visible", timeout=2500)
             return True
         except Exception:
-            pass
-        # ── Method 2: JS page-level check (may be outside the iframe) ──
-        try:
-            result = await _challenge_js("""() => {
-                const sels = [
-                    'input[type="text"]', 'input[type="number"]',
-                    '[role="textbox"]', '#prompt-text', 'textarea',
-                    'input:not([type="hidden"])', '[class*="prompt"]',
-                    '[class*="answer"]', '[class*="challenge-text"]'
-                ];
-                for (const s of sels) {
-                    const el = document.querySelector(s);
-                    if (el && el.offsetParent !== null) return s;
-                }
-                const body = document.body ? document.body.innerText : '';
-                if (body.length > 20 && /accessibility|type the|answer/i.test(body)) {
-                    return 'text_found';
-                }
-                return null;
-            }""")
-            if result:
-                return True
-        except Exception:
-            pass
-        return False
+            return False
 
     async def _menu_visible(hcaptcha) -> bool:
         """True when the dropdown menu is open — has visible menu/listbox."""
