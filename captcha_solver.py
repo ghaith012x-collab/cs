@@ -2080,25 +2080,28 @@ async def solve_hcaptcha_accessibility(page, iframe,
         return False
 
     async def _read_question_text() -> str:
-        """Read the question straight from the DOM.  Two-pass approach:
-        Pass 1 — look for text that contains question words + numbers
-        (the actual challenge question, not the header).
-        Pass 2 — fall back to the first visible prompt-like text."""
+        """Read the question straight from the DOM.  Aggressive approach:
+        1. Try specific selectors for question text
+        2. Fall back to body.innerText scan
+        3. Last resort: grab ALL visible text from frame"""
         js = """() => {
+            // Pass 1: specific selectors with question keywords
             const sels = ['#prompt-text', '.challenge-prompt',
                           '[class*="prompt"]', '[class*="challenge-text"]',
                           '[class*="task-text"]', '[class*="instruction"]',
                           '[role="heading"]', '[class*="question"]',
-                          '[class*="challenge"] [class*="text"]', 'p', 'span'];
+                          '[class*="challenge"] [class*="text"]'];
             for (const s of sels) {
                 const els = document.querySelectorAll(s);
                 for (const el of els) {
                     if (el.offsetParent === null) continue;
                     const t = (el.textContent || '').trim();
-                    if (!t || t.length < 8 || t.length > 500) continue;
-                    if (/\d/.test(t) && /how many|jar|coins|add|put|total|remove|first|last|letter|reverse|word|type|number|letter/i.test(t)) return t;
+                    if (!t || t.length < 5 || t.length > 600) continue;
+                    if (/\d/.test(t) && /how many|jar|coins|add|put|total|remove|first|last|letter|reverse|word|type|number/i.test(t)) return t;
+                    if (t.length > 15 && /how many|jar|coins|add|put|total|remove|first|last|letter|reverse|word|type|number/i.test(t)) return t;
                 }
             }
+            // Pass 2: scan all visible text for question patterns
             const body = document.body ? (document.body.innerText || '') : '';
             const lines = body.split('\n').map(l => l.trim()).filter(l => l.length > 5);
             for (const l of lines) {
@@ -2107,6 +2110,19 @@ async def solve_hcaptcha_accessibility(page, iframe,
             for (const l of lines) {
                 if (/how many|jar|coins|add|put|total|remove|first|last|letter|reverse|word|number/i.test(l)) return l;
             }
+            // Pass 3: grab ALL visible text (last resort)
+            const all = [];
+            const walk = (node) => {
+                if (node.nodeType === 3) {
+                    const t = node.textContent.trim();
+                    if (t.length > 3) all.push(t);
+                } else if (node.nodeType === 1 && node.offsetParent !== null) {
+                    for (const c of node.childNodes) walk(c);
+                }
+            };
+            walk(document.body);
+            const full = all.join(' ');
+            if (full.length > 10) return full.substring(0, 500);
             return '';
         }"""
         val = await _challenge_js(js)
@@ -2238,13 +2254,13 @@ async def solve_hcaptcha_accessibility(page, iframe,
             img_b64 = None
         if img_b64:
             vision_prompt = (
-                "This is an hCaptcha accessibility challenge screenshot. "
-                "Answer the question shown. If it is a math question respond "
-                "with ONLY the number. If it asks to remove the first and last "
-                "letter of a word and reverse it, do exactly that and respond "
-                "with the resulting word. If it asks to type the text you see, "
-                "type exactly that text. Respond with ONLY the answer. "
-                "No explanation, no punctuation."
+                "You are solving an hCaptcha accessibility challenge. "
+                "Read the question in the screenshot carefully. "
+                "If it is a math question (add, subtract, count), respond with ONLY the number. "
+                "If it asks about coins/jars/adding, sum all the numbers and respond with ONLY the total. "
+                "If it asks to remove first/last letter and reverse, do that and respond with ONLY the result. "
+                "If it asks to type text you see, respond with ONLY that text. "
+                "IMPORTANT: Respond with ONLY the answer. No explanation, no punctuation, no extra words."
             )
             if text:
                 vision_prompt += f"\nOn-screen question text: {text[:300]}"
