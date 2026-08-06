@@ -1492,6 +1492,52 @@ class HCaptchaSolver:
 # hCaptcha Accessibility Challenge Solver (Ollama vision)
 # ═══════════════════════════════════════════════════════════════
 
+def _eval_arithmetic_chain(expr: str) -> Optional[str]:
+    """Evaluate a pure integer arithmetic chain ('5 + 8 + 7', '12 × 3 ÷ 2',
+    '10 - 2 - 3') with standard operator precedence. Accepts ASCII and unicode
+    math symbols (× ÷ − x X). Returns the answer as a string, or None when the
+    expression is not a safe integer expression."""
+    s = expr.replace(" ", "")
+    s = s.replace("×", "*").replace("÷", "/").replace("−", "-")
+    s = s.replace("x", "*").replace("X", "*")
+    if not re.fullmatch(r"[0-9+\-*/]+", s):
+        return None
+    tokens = re.findall(r"\d+|[+\-*/]", s)
+    if len(tokens) < 3 or len(tokens) % 2 == 0:
+        return None
+    nums: List[int] = []
+    ops: List[str] = []
+    for tok in tokens:
+        if tok.isdigit():
+            nums.append(int(tok))
+        else:
+            ops.append(tok)
+    if len(nums) != len(ops) + 1:
+        return None
+    # pass 1: * and / (left to right)
+    i = 0
+    while i < len(ops):
+        if ops[i] in ("*", "/"):
+            a, b = nums[i], nums[i + 1]
+            if ops[i] == "*":
+                nums[i] = a * b
+            else:
+                if b == 0:
+                    return None
+                nums[i] = a // b if a % b == 0 else a / b
+            del nums[i + 1]
+            del ops[i]
+        else:
+            i += 1
+    # pass 2: + and -
+    val = nums[0]
+    for op, b in zip(ops, nums[1:]):
+        val = val + b if op == "+" else val - b
+    if isinstance(val, float) and val.is_integer():
+        val = int(val)
+    return str(val)
+
+
 async def _dump_clickables(page, frame, iframe_box, log):
     """Log EVERY clickable element found (iframe + page) with coordinates.
     Used for debugging — shows exactly what the bot sees and where."""
@@ -1576,7 +1622,7 @@ async def solve_hcaptcha_accessibility(page, iframe,
                                         log: Optional[Callable] = None,
                                         max_attempts: int = 4,
                                         max_questions: int = 8) -> bool:
-    """Solve hCaptcha via the Accessibility Challenge using Playwright\'s
+    """Solve hCaptcha via the Accessibility Challenge using Playwright's
     frame_locator for reliable cross-origin iframe interaction.
 
     Flow:
@@ -1813,50 +1859,151 @@ async def solve_hcaptcha_accessibility(page, iframe,
         if not text:
             return None
         t = text.strip()
-        # word game: remove first & last letter, then reverse
-        m = re.search(r"remove the first and last letter[s]? of ['\"]?([A-Za-z]+)['\"]?", t, re.IGNORECASE)
-        if m and len(m.group(1)) >= 2:
-            return m.group(1)[1:-1][::-1]
-        m = re.search(r"reverse the word ['\"]?([A-Za-z]+)['\"]?", t, re.IGNORECASE)
-        if m:
-            return m.group(1)[::-1]
-        # arithmetic: starts with N, then add/subtract/multiply/divide chain
+
+        # word game: "reverse the word X" or
+        # "remove the first and last letters of X and write it backwards"
+        if re.search(
+            r"remove (?:the )?first (?:and|&) (?:the )?last letter|"
+            r"remove first and last|remove the first letter and the last|"
+            r"\breverse\b|backwards?|write it (?:in reverse|backwards)",
+            t, re.IGNORECASE,
+        ):
+            word = None
+            m = re.search(r"['\"]([A-Za-z]{3,})['\"]", t)
+            if m:
+                word = m.group(1)
+            else:
+                # "word is X" / "words are X" — the word is usually stated at the end
+                m = re.search(r"\b(?:word|words)\s+(?:is|are)\s+['\"]?([A-Za-z]{3,})", t, re.IGNORECASE)
+                if m:
+                    word = m.group(1)
+            if word is None:
+                skip = {"remove", "first", "last", "letter", "letters", "reverse",
+                        "backwards", "backward", "word", "words", "the", "and",
+                        "write", "result", "answer", "please", "it", "them",
+                        "below", "above", "type", "enter", "is", "are", "of", "with"}
+                # "the word X" / "of X" — take the LAST real-word match
+                for pat in (r"\b(?:the word|word)\s+['\"]?([A-Za-z]{3,})",
+                            r"\bof\s+['\"]?([A-Za-z]{3,})"):
+                    m = re.search(pat, t, re.IGNORECASE)
+                    while m:
+                        if m.group(1).lower() not in skip:
+                            word = m.group(1)
+                        m = re.search(pat, t[m.end():], re.IGNORECASE)
+                    if word:
+                        break
+            if word is None:
+                # fallback: last standalone alphabetic token (skip instruction words)
+                toks = re.findall(r"[A-Za-z]{3,}", t)
+                for tok in reversed(toks):
+                    if tok.lower() not in skip:
+                        word = tok
+                        break
+            if word:
+                do_chop = bool(re.search(
+                    r"remove (?:the )?first (?:and|&) (?:the )?last letter|"
+                    r"remove first and last|remove the first letter and the last",
+                    t, re.IGNORECASE,
+                ))
+                if do_chop and len(word) >= 3:
+                    word = word[1:-1]
+                if re.search(r"backwards?|in reverse|\breverse\b", t, re.IGNORECASE) or do_chop:
+                    word = word[::-1]
+                if word:
+                    return word
+
+        # word-problem arithmetic: "Start with N, add X, subtract Y, multiply by Z",
+        # "get 3 more", "4 leave", "2 join", "and 5" — reads the WHOLE question
         start_m = re.search(
             r"(?:starts? with|there are|contains?|has|have|begin with)\s+(\d+)",
             t, re.IGNORECASE,
         )
         if start_m or re.search(r"how many", t, re.IGNORECASE):
             total = int(start_m.group(1)) if start_m else 0
-            ops = re.findall(
-                r"(?:add|plus|gain|receive|collect|put|bring)\s+(\d+)|\n"
-                r"(?:subtract|take away|take|remove|lose|spend|give away)\s+(\d+)|\n"
-                r"(?:multiplied by|multiply by|multiply|times)\s+(\d+)|\n"
-                r"(?:divided by|divide by|divide)\s+(\d+)",
-                t, re.IGNORECASE,
-            )
             parsed_any = bool(start_m)
-            for add_n, sub_n, mul_n, div_n in ops:
+            consumed = []
+            verb_re = re.compile(
+                r"(?:add|plus|gain|receive|collect|put|bring|get|earn|win|find|and)\s+(\d+)|"
+                r"(?:subtract|take away|take|remove|lose|spend|give away|eat|drink|sell|donate|pay)\s+(\d+)|"
+                r"(?:multiplied by|multiply by|multiply|times)\s+(\d+)|"
+                r"(?:divided by|divide by|divide)\s+(\d+)",
+                re.IGNORECASE,
+            )
+            for m in verb_re.finditer(t):
                 parsed_any = True
-                if add_n:
-                    total += int(add_n)
-                elif sub_n:
-                    total -= int(sub_n)
-                elif mul_n:
-                    total *= int(mul_n)
-                elif div_n and int(div_n) != 0:
-                    total = int(total / int(div_n))
+                if m.group(1):
+                    total += int(m.group(1))
+                elif m.group(2):
+                    total -= int(m.group(2))
+                elif m.group(3):
+                    total *= int(m.group(3))
+                elif m.group(4) and int(m.group(4)) != 0:
+                    total = int(total / int(m.group(4)))
+                consumed.append((m.start(), m.end()))
+            # number-first forms: "3 more", "2 fewer", "4 leave", "5 join"
+            numfirst_re = re.compile(
+                r"(\d+)\s+(?:more|additional|extra|again)|"
+                r"(\d+)\s+(?:fewer|less|left|leave|leaves|gone|go(?:es)? away)|"
+                r"(\d+)\s+(?:join|arrive|enter|return|come back|get on|step in|hop on)",
+                re.IGNORECASE,
+            )
+            for m in numfirst_re.finditer(t):
+                if m.group(1):
+                    ns = (m.start(1), m.end(1)); addend = int(m.group(1))
+                elif m.group(2):
+                    ns = (m.start(2), m.end(2)); addend = -int(m.group(2))
+                elif m.group(3):
+                    ns = (m.start(3), m.end(3)); addend = int(m.group(3))
+                else:
+                    continue
+                if any(s <= ns[0] < e for s, e in consumed):
+                    continue  # already counted by a verb+number match
+                total += addend
+                parsed_any = True
             if parsed_any:
                 return str(total)
-        # simple "X + Y", "X - Y", "X * Y"
-        m = re.search(r"(\d+)\s*\+\s*(\d+)", t)
+
+        # "Add 3, 4 and 5" — comma/and separated addends
+        if re.search(r"\badd\b", t, re.IGNORECASE) and not re.search(
+            r"\b(?:subtract|take away|remove|minus|times|multiplied by|multiply|divided by|divide)\b",
+            t, re.IGNORECASE,
+        ):
+            nums = [int(x) for x in re.findall(r"\d+", t)]
+            if len(nums) >= 2:
+                return str(sum(nums))
+
+        # word-based arithmetic chains: "What is 6 plus 7 plus 8?", "6 times 4"
+        chain_re = re.compile(
+            r"-?\d+\s+(?:plus|and|minus|subtract|take away|times|multiplied by|"
+            r"multiply by|divided by|divide by|over)\s+-?\d+"
+            r"(\s+(?:plus|and|minus|subtract|take away|times|multiplied by|"
+            r"multiply by|divided by|divide by|over)\s+-?\d+)*",
+            re.IGNORECASE,
+        )
+        chain_m = chain_re.search(t)
+        if chain_m:
+            expr = chain_m.group(0)
+            expr = re.sub(r"\bplus\b", "+", expr, flags=re.IGNORECASE)
+            expr = re.sub(r"\bminus\b", "-", expr, flags=re.IGNORECASE)
+            expr = re.sub(r"\bsubtract\b", "-", expr, flags=re.IGNORECASE)
+            expr = re.sub(r"\btake away\b", "-", expr, flags=re.IGNORECASE)
+            expr = re.sub(r"\btimes\b", "*", expr, flags=re.IGNORECASE)
+            expr = re.sub(r"\bmultiplied by\b", "*", expr, flags=re.IGNORECASE)
+            expr = re.sub(r"\bmultiply by\b", "*", expr, flags=re.IGNORECASE)
+            expr = re.sub(r"\bdivided by\b", "/", expr, flags=re.IGNORECASE)
+            expr = re.sub(r"\bdivide by\b", "/", expr, flags=re.IGNORECASE)
+            expr = re.sub(r"\bover\b", "/", expr, flags=re.IGNORECASE)
+            expr = re.sub(r"\band\b", "+", expr, flags=re.IGNORECASE)
+            ans = _eval_arithmetic_chain(expr)
+            if ans is not None:
+                return ans
+
+        # symbolic arithmetic: any-length chain ("3 + 5 + 9", "12 × 3 ÷ 2", "10 - 2 - 3")
+        m = re.search(r"-?\d+\s*[+\-×xX*÷/]\s*-?\d+(\s*[+\-×xX*÷/]\s*-?\d+)*", t)
         if m:
-            return str(int(m.group(1)) + int(m.group(2)))
-        m = re.search(r"(\d+)\s*-\s*(\d+)", t)
-        if m:
-            return str(int(m.group(1)) - int(m.group(2)))
-        m = re.search(r"(\d+)\s*(?:x|times|\*)\s*(\d+)", t, re.IGNORECASE)
-        if m:
-            return str(int(m.group(1)) * int(m.group(2)))
+            ans = _eval_arithmetic_chain(m.group(0))
+            if ans is not None:
+                return ans
         return None
 
     async def _get_answer(hcaptcha, q: int) -> Optional[str]:
