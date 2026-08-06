@@ -1826,69 +1826,64 @@ async def solve_hcaptcha_accessibility(page, iframe,
         return False
 
     async def _click_accessibility_option(hcaptcha) -> bool:
-        """Select 'Accessibility Challenge' from the menu — JS-first then Playwright.
-        Faster polling since the 3-dots already opened."""
+        """Select 'Accessibility Challenge' from the already-open menu.
+        Menu items in hCaptcha have child spans — don't skip containers.
+        Just find any visible element with short text matching the label."""
         deadline = time.time() + 8
         poll = 0
         while time.time() < deadline:
             poll += 1
-            # JS click — find the exact "Accessibility Challenge" menu item.
-            # MUST be a short-text leaf element (menu item), NOT a container
-            # whose concatenated innerText happens to include the word.
+            # JS: find ANY visible element whose trimmed text is the menu label.
+            # hCaptcha menu items look like <div role="menuitem"><span>The Label</span></div>
+            # so textContent works but children.length > 0 would wrongly skip them.
             try:
                 clicked = await _challenge_js("""() => {
-                    const els = document.querySelectorAll('a, button, li, [role="menuitem"], [role="button"]');
-                    for (const el of els) {
+                    // Match any element with short text matching the label
+                    const all = document.querySelectorAll('*');
+                    for (const el of all) {
                         if (el.offsetParent === null) continue;
-                        if (el.children.length > 0) continue;  // skip containers
                         const t = (el.textContent || '').trim();
-                        // MUST be a short menu label (under 80 chars), not body text
-                        if (!t || t.length > 80) continue;
-                        // Exact match preferred
+                        if (!t || t.length > 60 || t.length < 8) continue;
                         if (/^Accessibility Challenge$/i.test(t)) {
                             el.scrollIntoView({block: 'center'});
-                            el.dispatchEvent(new MouseEvent('mousedown', {bubbles:true}));
-                            el.dispatchEvent(new MouseEvent('mouseup', {bubbles:true}));
-                            el.dispatchEvent(new MouseEvent('click', {bubbles:true}));
+                            el.click();
                             return t;
                         }
                     }
-                    // Fallback: short text containing "accessibility challenge"
-                    for (const el of els) {
-                        if (el.offsetParent === null || el.children.length > 0) continue;
+                    // Fallback: partial match on short text
+                    for (const el of all) {
+                        if (el.offsetParent === null) continue;
                         const t = (el.textContent || '').trim();
-                        if (t.length > 80) continue;
-                        if (/accessibility challenge/i.test(t)) {
+                        if (t.length > 60 || t.length < 5) continue;
+                        if (/accessibility.*challenge/i.test(t)) {
                             el.scrollIntoView({block: 'center'});
-                            el.dispatchEvent(new MouseEvent('mousedown', {bubbles:true}));
-                            el.dispatchEvent(new MouseEvent('mouseup', {bubbles:true}));
-                            el.dispatchEvent(new MouseEvent('click', {bubbles:true}));
+                            el.click();
                             return t;
                         }
                     }
                     return null;
                 }""")
                 if clicked:
-                    log(f"[Accessibility] JS-clicked accessibility item: '{clicked}' (poll {poll})")
+                    log(f"[Accessibility] JS-clicked menu item: '{clicked}' (poll {poll})")
                     return True
             except Exception:
                 pass
-            # text-based match
+            # Playwright fallback: text match
             try:
                 loc = hcaptcha.get_by_text("Accessibility Challenge", exact=False).first
                 await loc.wait_for(state="visible", timeout=1500)
                 await loc.click(timeout=2000)
-                log(f"[Accessibility] Selected accessibility via text (poll {poll})")
+                log(f"[Accessibility] Clicked via text locator (poll {poll})")
                 return True
             except Exception:
                 pass
-            # role-based matches
+            # Playwright fallback: role match
             for role in ("link", "button", "menuitem"):
                 try:
                     loc = hcaptcha.get_by_role(role, name="Accessibility Challenge").first
                     await loc.wait_for(state="visible", timeout=1500)
                     await loc.click(timeout=2000)
-                    log(f"[Accessibility] Selected accessibility via {role} (poll {poll})")
+                    log(f"[Accessibility] Clicked via role={role} (poll {poll})")
                     return True
                 except Exception:
                     pass
