@@ -1728,43 +1728,57 @@ async def solve_hcaptcha_accessibility(page, iframe,
             return False
 
     async def _click_three_dots(hcaptcha) -> bool:
-        """Click the #menu-info 3-dots button. Returns True on success."""
-        menu_clicked = False
+        """Click the #menu-info 3-dots button — ONE strategy at a time,
+        each spaced 2 seconds apart so the UI can animate/react.
+        Way 2 (aria-label) is the most reliable; tried first.  """
+
+        # ── WAY 2 (most reliable — aria-label button) ──
+        try:
+            btn = hcaptcha.get_by_role(
+                "button", name="About hCaptcha & Accessibility Options"
+            ).first
+            await btn.wait_for(state="visible", timeout=10000)
+            await btn.click(timeout=5000)
+            log("[Accessibility] Clicked 3-dots via aria-label (way 2)")
+            await asyncio.sleep(0.5)
+            return True
+        except Exception as e:
+            log(f"[Accessibility] aria-label click failed: {str(e)[:80]} — waiting 2s", level="warn")
+            await asyncio.sleep(2.0)
+
+        # ── WAY 1 (#menu-info CSS selector) ──
         try:
             btn = hcaptcha.locator("#menu-info").first
             await btn.wait_for(state="visible", timeout=8000)
             await btn.click(timeout=5000)
-            log("[Accessibility] Clicked #menu-info (strategy A)")
-            menu_clicked = True
+            log("[Accessibility] Clicked #menu-info (way 1)")
+            await asyncio.sleep(0.5)
+            return True
         except Exception as e:
-            log(f"[Accessibility] #menu-info click failed: {str(e)[:80]}", level="warn")
-        if not menu_clicked:
-            try:
-                btn = hcaptcha.get_by_role(
-                    "button", name="About hCaptcha & Accessibility Options"
-                ).first
-                await btn.wait_for(state="visible", timeout=8000)
-                await btn.click(timeout=5000)
-                log("[Accessibility] Clicked via aria-label (strategy B)")
-                menu_clicked = True
-            except Exception as e:
-                log(f"[Accessibility] aria-label click failed: {str(e)[:80]}", level="warn")
-        if not menu_clicked:
-            try:
-                btn = hcaptcha.locator("#menu-info").first
-                await btn.click(force=True, timeout=5000)
-                log("[Accessibility] Force-clicked #menu-info (strategy C)")
-                menu_clicked = True
-            except Exception as e:
-                log(f"[Accessibility] force-click failed: {str(e)[:80]}", level="warn")
-        if not menu_clicked:
-            try:
-                await hcaptcha.locator("#menu-info").first.dispatch_event("click")
-                log("[Accessibility] Dispatched click event (strategy D)")
-                menu_clicked = True
-            except Exception as e:
-                log(f"[Accessibility] dispatch_event failed: {str(e)[:80]}", level="warn")
-        return menu_clicked
+            log(f"[Accessibility] #menu-info click failed: {str(e)[:80]} — waiting 2s", level="warn")
+            await asyncio.sleep(2.0)
+
+        # ── WAY 3 (force-click) ──
+        try:
+            btn = hcaptcha.locator("#menu-info").first
+            await btn.click(force=True, timeout=5000)
+            log("[Accessibility] Force-clicked #menu-info (way 3)")
+            await asyncio.sleep(0.5)
+            return True
+        except Exception as e:
+            log(f"[Accessibility] force-click failed: {str(e)[:80]} — waiting 2s", level="warn")
+            await asyncio.sleep(2.0)
+
+        # ── WAY 4 (dispatch event) ──
+        try:
+            await hcaptcha.locator("#menu-info").first.dispatch_event("click")
+            log("[Accessibility] Dispatched click event (way 4)")
+            await asyncio.sleep(0.5)
+            return True
+        except Exception as e:
+            log(f"[Accessibility] dispatch_event failed: {str(e)[:80]}", level="warn")
+
+        return False
 
     async def _click_accessibility_option(hcaptcha) -> bool:
         """Select 'Accessibility Challenge' from the menu.

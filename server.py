@@ -479,11 +479,11 @@ class DiscordAutomation:
             if mode != "drag" or drag_result is None:
                 # Freshly-mounted widget (or one still loading when the drag
                 # solver looked): let it settle before re-checking/extracting.
-                self._log("[Captcha] Widget detected - waiting 10s for full load...")
-                await asyncio.sleep(10)
+                self._log("[Captcha] Widget detected - waiting 12s for full load...")
+                await asyncio.sleep(12)
 
             # ── ACCESSIBILITY CHALLENGE — Ollama vision, easiest path ──
-            # Must run AFTER the 10s settle wait so the iframe is fully rendered
+            # Must run AFTER the 12s settle wait so the iframe is fully rendered
             self._log("[Captcha] Trying accessibility challenge (Ollama vision)...")
             if await solve_hcaptcha_accessibility(self._page, iframe, log=self._log):
                 self._log("[Captcha] [OK] Accessibility challenge solved!")
