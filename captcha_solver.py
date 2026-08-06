@@ -2258,8 +2258,8 @@ async def solve_hcaptcha_accessibility(page, iframe,
         m = re.search('["“”](\w{3,})["“”]', text)
         if m:
             return m.group(1)
-        # Strategy 2: Word after "the word X" / "word X" / "word is X" / "word: X"
-        m = re.search(r'(?:the\s+)?word\s+(?:is\s+|:\s+|of\s+)?(\w{3,})',
+        # Strategy 2: Word after "from the word X" / "the word X" / "word X" / "word is X"
+        m = re.search(r'(?:from\s+)?(?:the\s+)?word\s+(?:is\s+|:\s+|of\s+|mayor\s*)?(\w{3,})',
                       text, re.IGNORECASE)
         if m:
             candidate = m.group(1)
@@ -2329,7 +2329,7 @@ async def solve_hcaptcha_accessibility(page, iframe,
         # + letter/character. The "write it backwards/reverse" tail varies, so
         # it is optional. Target word = LAST word of the question sentence.
         word_pat = re.compile(
-            r'(?:remove|drop|delete|strip|take)\s+(?:out\s+)?(?:the\s+)?'
+            r'(?:remov(?:e|es|ed|ing)?|delet(?:e|es|ed|ing)?|drop|strip|take)\s+(?:out\s+)?(?:the\s+)?'
             r'(?:first|1st|first\s+letter)\s+(?:and|&)\s+(?:the\s+)?'
             r'(?:last|last\s+letter)\s+(?:letter|character|char|letters|characters)?s?',
             re.IGNORECASE
