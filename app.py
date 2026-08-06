@@ -8,8 +8,22 @@ from typing import Dict, List, Optional
 
 from flask import Flask, jsonify, request, Response
 
-import db
-from proxies import pool as proxy_pool
+try:
+    import db
+    _db_available = True
+except ImportError:
+    db = None
+    _db_available = False
+    print("[app] db.py not found - token saving disabled", flush=True)
+
+try:
+    from proxies import pool as proxy_pool
+    _proxies_available = True
+except ImportError:
+    proxy_pool = None
+    _proxies_available = False
+    print("[app] proxies.py not found - direct connections only", flush=True)
+
 from server import DiscordAutomation
 
 # ── Global state (Flask thread + asyncio thread) ──
@@ -139,7 +153,8 @@ async def _run_worker(wid: str, cfg: dict, proxy: str) -> None:
         _log(f"[{wid}] worker error: {e}")
     finally:
         state["finished_at"] = time.time()
-        proxy_pool.release(proxy, ok=state["status"] == "done")
+        if _proxies_available and proxy_pool is not None:
+            proxy_pool.release(proxy, ok=state["status"] == "done")
         try:
             await bot.close()
         except Exception:
@@ -158,15 +173,16 @@ async def _start_all_async(cfg: dict) -> None:
         _workers[wid] = _init_worker(wid)
 
     # Refresh proxy pool (fetch + validate free proxies)
-    _log("[Proxy] Refreshing free proxy pool...")
-    try:
-        await proxy_pool.refresh()
-    except Exception as e:
-        _log(f"[Proxy] refresh error: {e}")
-    _log(f"[Proxy] {proxy_pool.valid_count} working proxies available")
+    if _proxies_available and proxy_pool is not None:
+        _log("[Proxy] Refreshing free proxy pool...")
+        try:
+            await proxy_pool.refresh()
+            _log(f"[Proxy] {proxy_pool.valid_count} working proxies available")
+        except Exception as e:
+            _log(f"[Proxy] refresh error: {e}")
 
     for i, wid in enumerate(WORKER_IDS):
-        proxy = proxy_pool.take()
+        proxy = proxy_pool.take() if (_proxies_available and proxy_pool is not None) else None
         if not proxy:
             _log(f"[{wid}] No proxy available - using direct connection")
         asyncio.create_task(_run_worker(wid, cfg, proxy or ""))
@@ -228,9 +244,10 @@ def handle_stop():
 
 @app.route('/proxies/refresh', methods=['POST'])
 def handle_proxy_refresh():
-    _run_in_loop(proxy_pool.refresh())
-    return jsonify(proxy_pool.stats())
-
+    if _proxies_available and proxy_pool is not None:
+        _run_in_loop(proxy_pool.refresh())
+        return jsonify(proxy_pool.stats())
+    return jsonify({"error": "proxies module not loaded"})
 
 @app.route('/status')
 def handle_status():
@@ -252,7 +269,7 @@ def handle_status():
         "running": _running,
         "uptime": int(time.time() - _start_time) if _start_time else 0,
         "workers": workers,
-        "proxies": proxy_pool.stats(),
+        "proxies": proxy_pool.stats() if (_proxies_available and proxy_pool is not None) else {},
     })
 
 
@@ -316,7 +333,8 @@ def main() -> None:
     t.start()
 
     # Auto-migrate DB (DATABASE_URL from env)
-    _run_in_loop(db.init_db())
+    if _db_available and db is not None:
+        _run_in_loop(db.init_db())
 
     print("=" * 56, flush=True)
     print("  EYES GEN - multi-browser Discord token generator", flush=True)
