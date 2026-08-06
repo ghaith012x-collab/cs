@@ -541,7 +541,7 @@ function renderCams(){
     html += '<div class="cam" id="cam'+id+'">'
       + '<div class="tag">'+id+(proxy?' &middot; '+proxy:'')+'</div>'
       + (st==='live'||st==='done'
-        ? '<img src="/latest?worker='+id+'&t='+Date.now()+'" onerror="this.style.display=\'none\'">'
+        ? '<img src="/latest?worker='+id+'&t='+Date.now()+'" onerror="this.style.display=&#39;none&#39;">'
         : '<div class="ph">'+ (st==='starting'?'starting…':(st==='done'?'finished':'idle')) +'</div>')
       + '<div class="st">'+st+'</div></div>';
   });
@@ -567,7 +567,7 @@ async function refreshTokens(){
         + '<div class="mail">'+(a.email||'')+'</div></div>'
         + '<div style="display:flex;gap:6px;align-items:center">'
         + '<span class="tok-badge '+badge+'">'+st+'</span>'
-        + '<button class="copy" onclick="copyLine(\''+jsEscape(a.token)+'\',this)">COPY</button>'
+        + '<button class="copy" data-token="'+jsEscape(a.token)+'" onclick="copyLine(this.dataset.token,this)">COPY</button>'
         + '</div></div>'
         + '<div class="line">'+a.token+'</div>'
         + '<div class="line" style="color:#6b7aa0">'+(a.email||'')+' : '+(a.password||'')+'</div>'
