@@ -857,200 +857,229 @@ class DiscordAutomation:
             await self._select_dob("Year", year_val)
             await self._human_pause()
 
-            # ── ToS Checkbox — FIND THE CORRECT ONE (Terms of Service, not newsletter) ─
+            # ── ToS Checkbox — FIND THE CORRECT ONE (Terms of Service, not newsletter) ──
             self._log("Checking ToS checkbox...")
             tos_checked = False
 
             try:
-                tos_checked = await self._page.evaluate("""() => {
-                    // Helper: find nearest checkbox sibling/parent
-                    function findNearestCheckbox(el) {
-                        // Check siblings
-                        let sib = el.previousElementSibling || el.nextElementSibling;
-                        while (sib) {
-                            if (sib.tagName === 'INPUT' && sib.type === 'checkbox') return sib;
-                            if (sib.getAttribute('role') === 'checkbox') return sib;
-                            if (sib.querySelector('input[type="checkbox"]')) return sib.querySelector('input[type="checkbox"]');
-                            if (sib.matches('[class*="checkbox"]')) return sib;
-                            sib = sib.nextElementSibling || sib.previousElementSibling;
-                        }
-                        // Check parents
-                        let p = el.parentElement;
-                        for (let i = 0; i < 5 && p; i++) {
-                            const cb = p.querySelector('input[type="checkbox"], [role="checkbox"], [class*="checkbox"]');
-                            if (cb && cb !== el) return cb;
-                            p = p.parentElement;
-                        }
-                        return null;
-                    }
-
-                    // STRATEGY 1: Find checkbox near "Terms of Service" text (MOST ACCURATE)
+                tos_result = await self._page.evaluate("""() => {
+                    // Find ANY text node containing ToS-like keywords
+                    const tosKeywords = ['terms of service', 'terms of use', 'terms & conditions',
+                                        'terms and conditions', 'i have read', 'read and agree',
+                                        'agree to', 'by creating'];
                     const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null);
                     let node;
                     while (node = walker.nextNode()) {
                         const t = node.textContent.trim().toLowerCase();
-                        const tosKeywords = ['terms of service', 'terms of use', 'terms & conditions', 
-                                            'terms and conditions', 'i have read', 'read and agree'];
-                        const hasTos = tosKeywords.some(k => t.includes(k));
-                        if (!hasTos) continue;
-                        
-                        // Found text containing ToS reference — find its checkbox
-                        const cb = findNearestCheckbox(node.parentElement);
-                        if (cb) {
-                            cb.scrollIntoView({block: 'center'});
-                            cb.click();
-                            // Force checked
-                            if (cb.type === 'checkbox') cb.checked = true;
-                            cb.dispatchEvent(new Event('change', { bubbles: true }));
-                            cb.dispatchEvent(new Event('input', { bubbles: true }));
-                            return 'tos_text_' + t.slice(0, 30);
+                        if (!tosKeywords.some(k => t.includes(k))) continue;
+
+                        // Walk UP to find a clickable container that has a checkbox nearby
+                        let el = node.parentElement;
+                        for (let i = 0; i < 10 && el; i++) {
+                            // Look for checkbox inside this container
+                            const cb = el.querySelector('input[type="checkbox"]');
+                            if (cb) {
+                                cb.scrollIntoView({block: 'center'});
+                                cb.click();
+                                cb.checked = true;
+                                cb.dispatchEvent(new Event('change', { bubbles: true }));
+                                cb.dispatchEvent(new Event('input', { bubbles: true }));
+                                return 'found_tos_checkbox';
+                            }
+                            // Also try role=checkbox
+                            const roleCb = el.querySelector('[role="checkbox"]');
+                            if (roleCb) {
+                                roleCb.click();
+                                roleCb.setAttribute('aria-checked', 'true');
+                                roleCb.dispatchEvent(new Event('change', { bubbles: true }));
+                                return 'found_tos_role';
+                            }
+                            el = el.parentElement;
                         }
                     }
 
-                    // STRATEGY 2: Find checkbox with label for="..." reference to ToS
-                    const labels = document.querySelectorAll('label');
-                    for (const lbl of labels) {
-                        const t = lbl.textContent.toLowerCase();
-                        const tosKeywords = ['terms of service', 'terms of use', 'i have read', 'read and agree'];
-                        const hasTos = tosKeywords.some(k => t.includes(k));
-                        if (!hasTos) continue;
-                        
-                        const forId = lbl.getAttribute('for');
-                        if (forId) {
-                            const cb = document.getElementById(forId);
-                            if (cb) { cb.click(); cb.checked = true; return 'label_for_' + forId; }
-                        }
-                        // Check inside label
-                        const innerCb = lbl.querySelector('input[type="checkbox"], [role="checkbox"]');
-                        if (innerCb) { innerCb.click(); innerCb.checked = true; return 'label_inner_cb'; }
-                        // Click label itself
-                        lbl.click();
-                        return 'label_click';
+                    // FALLBACK: check ALL visible unchecked checkboxes (Discord has max 2)
+                    const allCbs = document.querySelectorAll('input[type="checkbox"]');
+                    let checked = 0;
+                    for (const cb of allCbs) {
+                        if (cb.offsetParent === null) continue;
+                        if (cb.checked) continue;
+                        cb.scrollIntoView({block: 'center'});
+                        cb.click();
+                        cb.checked = true;
+                        cb.dispatchEvent(new Event('change', { bubbles: true }));
+                        cb.dispatchEvent(new Event('input', { bubbles: true }));
+                        checked++;
                     }
+                    if (checked > 0) return 'fallback_checked_' + checked;
 
-                    // STRATEGY 3: Last checkbox on the page (Discord puts ToS last)
-                    const allCheckboxes = document.querySelectorAll('input[type="checkbox"]:not([checked])');
-                    if (allCheckboxes.length > 0) {
-                        // Pick the LAST unchecked visible checkbox (most likely ToS)
-                        const lastCb = allCheckboxes[allCheckboxes.length - 1];
-                        if (lastCb.offsetParent !== null) {
-                            lastCb.scrollIntoView({block: 'center'});
-                            lastCb.click();
-                            lastCb.checked = true;
-                            lastCb.dispatchEvent(new Event('change', { bubbles: true }));
-                            lastCb.dispatchEvent(new Event('input', { bubbles: true }));
-                            return 'last_checkbox_' + allCheckboxes.length;
-                        }
+                    // Also try role checkboxes
+                    const roleCbs = document.querySelectorAll('[role="checkbox"]');
+                    for (const rc of roleCbs) {
+                        if (rc.offsetParent === null) continue;
+                        if (rc.getAttribute('aria-checked') === 'true') continue;
+                        rc.click();
+                        rc.setAttribute('aria-checked', 'true');
+                        rc.dispatchEvent(new Event('change', { bubbles: true }));
+                        checked++;
                     }
-
-                    // STRATEGY 4: role=checkbox or class-based
-                    const roles = document.querySelectorAll('[role="checkbox"]:not([aria-checked="true"])');
-                    for (const r of roles) {
-                        if (r.offsetParent !== null) {
-                            r.click(); r.setAttribute('aria-checked', 'true');
-                            return 'role_checkbox';
-                        }
-                    }
-
-                    // STRATEGY 5: Any visible unchecked checkbox
-                    const anyCb = document.querySelectorAll('input[type="checkbox"]');
-                    for (const cb of anyCb) {
-                        if (!cb.checked && cb.offsetParent !== null) {
-                            cb.click(); cb.checked = true;
-                            return 'any_checkbox';
-                        }
-                    }
+                    if (checked > 0) return 'role_fallback_' + checked;
 
                     return 'not_found';
                 }""")
-                if tos_checked and tos_checked != 'not_found':
-                    self._log(f"[OK] ToS checked via JS: {tos_checked}")
+                if tos_result and tos_result != 'not_found':
+                    tos_checked = True
+                    self._log(f"[OK] ToS checked via JS: {tos_result}")
                 else:
-                    self._log("ToS checkbox not found by JS - proceeding")
-                    tos_checked = False
+                    self._log(f"[WARN] ToS checkbox not found by JS ({tos_result}) - trying Playwright locator...")
+                    # Playwright fallback: click any visible checkbox input
+                    try:
+                        checkboxes = self._page.locator('input[type="checkbox"]:visible')
+                        cb_count = await checkboxes.count()
+                        for i in range(cb_count):
+                            cb = checkboxes.nth(i)
+                            is_checked = await cb.is_checked()
+                            if not is_checked:
+                                await cb.scroll_into_view_if_needed()
+                                await cb.check(force=True)
+                                self._log(f"[OK] ToS checkbox {i} checked via Playwright")
+                                tos_checked = True
+                    except Exception as pw_e:
+                        self._log(f"Playwright checkbox fallback error: {pw_e}", level="warn")
             except Exception as e:
-                self._log(f"ToS JS evaluate error: {e}")
+                self._log(f"ToS JS evaluate error: {e}", level="warn")
 
             if tos_checked:
                 self._log("[OK] ToS checkbox checked")
-                await asyncio.sleep(0.3)
             else:
-                self._log("No ToS checkbox found - proceeding anyway")
+                self._log("[WARN] No ToS checkbox found - the Create Account button may be disabled")
 
-            # ── Create Account Button (PURE JS evaluate) ────────
+            # Wait for React to process the checkbox change
+            await asyncio.sleep(1.0)
+
+            # ── Create Account Button — try multiple strategies ────────
             self._log("Clicking Create Account...")
             create_clicked = False
 
-            try:
-                result = await self._page.evaluate("""() => {
-                    // Try visible buttons first
-                    const btns = document.querySelectorAll('button');
-                    for (const btn of btns) {
-                        if (btn.offsetParent === null) continue;
-                        const t = btn.textContent.toLowerCase().trim();
-                        if (t.includes('create account') || t.includes('sign up') || t.includes('continue')) {
-                            btn.scrollIntoView({block: 'center'});
-                            btn.click();
-                            return 'button_' + t.slice(0, 20);
+            for click_attempt in range(4):
+                if create_clicked:
+                    break
+                if click_attempt > 0:
+                    self._log(f"Retrying Create Account click (attempt {click_attempt+1}/4)...")
+                    # Re-check TOS on retry (sometimes React resets it)
+                    if not tos_checked:
+                        try:
+                            checkboxes = self._page.locator('input[type="checkbox"]:visible')
+                            cb_count = await checkboxes.count()
+                            for i in range(cb_count):
+                                if not await checkboxes.nth(i).is_checked():
+                                    await checkboxes.nth(i).scroll_into_view_if_needed()
+                                    await checkboxes.nth(i).check(force=True)
+                                    self._log(f"Re-checked checkbox {i}")
+                                    break
+                        except Exception:
+                            pass
+                    await asyncio.sleep(0.8)
+
+                try:
+                    result = await self._page.evaluate("""() => {
+                        // Strategy 1: Find button by text content (most reliable)
+                        const btns = document.querySelectorAll('button, [role="button"], [type="submit"]');
+                        for (const btn of btns) {
+                            if (btn.offsetParent === null) continue;
+                            // Check if disabled
+                            if (btn.disabled || btn.getAttribute('aria-disabled') === 'true') continue;
+                            const t = (btn.textContent || '').toLowerCase().trim();
+                            const v = (btn.value || '').toLowerCase().trim();
+                            if (t.includes('create account') || t.includes('sign up') || t.includes('continue') ||
+                                v.includes('create account') || v.includes('sign up')) {
+                                btn.scrollIntoView({block: 'center'});
+                                btn.click();
+                                return 'btn_' + t.slice(0, 20);
+                            }
                         }
-                        if (btn.getAttribute('type') === 'submit' && !t.includes(' ')) {
-                            // Don't click generic submit if there's a better match
+
+                        // Strategy 2: Find any submit-type button
+                        for (const btn of btns) {
+                            if (btn.offsetParent === null) continue;
+                            if (btn.disabled || btn.getAttribute('aria-disabled') === 'true') continue;
+                            if (btn.getAttribute('type') === 'submit' || btn.tagName === 'BUTTON') {
+                                const t = btn.textContent.toLowerCase().trim();
+                                if (t.length > 4) {  // has meaningful text
+                                    btn.scrollIntoView({block: 'center'});
+                                    btn.click();
+                                    return 'btntype_' + t.slice(0, 20);
+                                }
+                            }
                         }
-                    }
-                    // Try submit buttons
-                    const submit = document.querySelector('[type="submit"]');
-                    if (submit && submit.offsetParent !== null) {
-                        submit.scrollIntoView({block: 'center'});
-                        submit.click();
-                        return 'submit_btn';
-                    }
-                    // Try role buttons
-                    const roles = document.querySelectorAll('[role="button"]');
-                    for (const r of roles) {
-                        if (r.offsetParent === null) continue;
-                        const t = r.textContent.toLowerCase();
-                        if (t.includes('create account') || t.includes('sign up') || t.includes('continue')) {
-                            r.click();
-                            return 'role_' + t.slice(0, 20);
+
+                        // Strategy 3: Form submit
+                        const forms = document.querySelectorAll('form');
+                        for (const form of forms) {
+                            if (form.offsetParent === null) continue;
+                            if (form.requestSubmit) {
+                                form.requestSubmit();
+                                return 'form_requestSubmit';
+                            }
+                            form.submit();
+                            return 'form_submit';
                         }
-                    }
-                    // Try form submit directly
-                    const form = document.querySelector('form');
-                    if (form) {
-                        if (form.requestSubmit) {
-                            form.requestSubmit();
-                            return 'form_requestSubmit';
-                        }
-                        form.submit();
-                        return 'form_submit';
-                    }
-                    return 'failed';
-                }""")
-                if result and result != 'failed':
-                    create_clicked = True
-                    self._log(f"[OK] Account button clicked: {result}")
-                else:
-                    self._log("Could not find Create Account button via JS", level="warn")
-                    # Last resort: Press Enter on password field
-                    try:
-                        pw = self._page.locator('input[name="password"]')
-                        await asyncio.wait_for(pw.press('Enter'), timeout=2.0)
-                        self._log("Pressed Enter on password")
+
+                        return 'failed';
+                    }""")
+                    if result and result != 'failed':
                         create_clicked = True
-                    except:
+                        self._log(f"[OK] Account button clicked: {result}")
+                        break
+                except Exception as e:
+                    self._log(f"Create Account JS attempt {click_attempt+1} error: {e}", level="warn")
+
+                # Playwright fallback: click the button directly
+                if not create_clicked:
+                    try:
+                        btn_selectors = [
+                            'button:has-text("Create Account")',
+                            'button:has-text("Sign Up")',
+                            'button:has-text("Continue")',
+                            'button[type="submit"]',
+                        ]
+                        for sel in btn_selectors:
+                            try:
+                                btn = self._page.locator(sel).first
+                                if await btn.count() > 0:
+                                    is_disabled = await btn.is_disabled()
+                                    if not is_disabled:
+                                        await btn.scroll_into_view_if_needed()
+                                        await btn.click()
+                                        self._log(f"[OK] Playwright click: {sel}")
+                                        create_clicked = True
+                                        break
+                            except Exception:
+                                continue
+                    except Exception as pw_e:
+                        self._log(f"Playwright button click error: {pw_e}", level="warn")
+
+                # Last resort: Enter key on password field
+                if not create_clicked:
+                    try:
+                        await self._page.locator('input[name="password"]').press('Enter')
+                        self._log("Pressed Enter on password field")
+                        create_clicked = True
+                    except Exception:
                         pass
-            except Exception as e:
-                self._log(f"Create Account JS error: {e}", level="warn")
 
             if create_clicked:
-                self._log("Create Account clicked - waiting...")
+                self._log("[OK] Create Account submitted - waiting for response...")
             else:
-                self._log("WARNING: Could not click Create Account!", level="error")
+                self._log("[FAIL] Could not click Create Account after all attempts!", level="error")
+                await self.capture_screenshot()
+                return False
 
             await asyncio.sleep(3)
             await self.capture_screenshot()
 
             return True
+
 
         except Exception as e:
             self._log(f"Form filling error: {e}", level="error")
