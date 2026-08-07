@@ -269,7 +269,7 @@ INIT_SCRIPT = """
 })();
 """
 
-NAV_TIMEOUT_MS = 30000
+NAV_TIMEOUT_MS = 60000
 
 
 class DiscordAutomation:
@@ -453,20 +453,37 @@ class DiscordAutomation:
             return False
 
     async def _goto_register(self) -> bool:
-        """Navigate to Discord registration with retries and TOR fallback.
+        """Navigate to Discord registration with retries.
 
-        Discord can hang under the TOR proxy or load slowly, so we use a long
-        timeout, keep going if the page is already usable, and drop the proxy
-        if navigation keeps failing.
+        Discord is a heavy React SPA and free proxies are slow. We use a long
+        60s timeout, try 'networkidle' first (waits for JS to settle), fall
+        back to 'domcontentloaded' on retries, and always wait for the React
+        app to render the form after navigation.
         """
         for attempt in range(1, 4):
             try:
-                self._log(f"[Nav] Opening https://discord.com/register (attempt {attempt})...")
+                # First attempt: networkidle (waits for React to finish rendering)
+                # Later attempts: domcontentloaded (faster, page may already be cached)
+                wait_until = 'networkidle' if attempt == 1 else 'domcontentloaded'
+                nav_timeout = NAV_TIMEOUT_MS if attempt == 1 else NAV_TIMEOUT_MS // 2
+                self._log(f"[Nav] Opening https://discord.com/register (attempt {attempt}, wait={wait_until}, timeout={nav_timeout}ms)...")
                 await self._page.goto('https://discord.com/register',
-                                      wait_until='domcontentloaded',
-                                      timeout=NAV_TIMEOUT_MS)
-                self._log("[Nav] Page loaded")
-                return True
+                                      wait_until=wait_until,
+                                      timeout=nav_timeout)
+                self._log("[Nav] Page loaded — waiting for Discord React to render form...")
+                # Discord is a heavy React SPA — poll for the email input
+                for _ in range(10):
+                    try:
+                        cnt = await asyncio.wait_for(
+                            self._page.locator('input[name="email"]').count(), timeout=2.0)
+                        if cnt > 0:
+                            self._log("[Nav] Registration form is now visible")
+                            return True
+                    except Exception:
+                        pass
+                    await asyncio.sleep(1.0)
+                self._log("[Nav] Form did not render in time — treating as failure", level="warn")
+                return False
             except Exception as e:
                 self._log(f"[Nav] goto attempt {attempt} error: {str(e)[:110]}", level="warn")
                 # A timeout may still leave us with a usable page
