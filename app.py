@@ -230,11 +230,15 @@ async def _stop_all_async() -> None:
 
 def _run_in_loop(coro) -> Optional[object]:
     if not _loop:
+        _log("[Loop] Event loop not running!", level="error")
         return None
     try:
         fut = asyncio.run_coroutine_threadsafe(coro, _loop)
         return fut.result(timeout=120)
-    except Exception:
+    except Exception as e:
+        _log(f"[Loop] Error running coroutine: {e}", level="error")
+        import traceback
+        traceback.print_exc()
         return None
 
 
@@ -252,13 +256,16 @@ def handle_root():
 def handle_start():
     global _workers
     if _running:
-        return "Already running"
-    cfg = load_config()
-    threading.Thread(
-        target=lambda: _run_in_loop(_start_all_async(cfg)),
-        daemon=True,
-    ).start()
-    return "Started"
+        return jsonify({"ok": False, "msg": "Already running"})
+    try:
+        cfg = load_config()
+        threading.Thread(
+            target=lambda: _run_in_loop(_start_all_async(cfg)),
+            daemon=True,
+        ).start()
+        return jsonify({"ok": True, "msg": "Started — 1 browser launching"})
+    except Exception as e:
+        return jsonify({"ok": False, "msg": f"Start error: {e}"})
 
 
 @app.route('/stop', methods=['POST'])
@@ -537,10 +544,18 @@ function showTab(name){
 }
 
 async function start(){
+  let btn = document.querySelector('.btn-start');
+  btn.textContent = '...'; btn.disabled = true;
   try{
     let r = await api('/start', {method:'POST'});
-    document.getElementById('statusLine').textContent = await r.text();
-  }catch(e){ document.getElementById('statusLine').textContent = 'Error: '+e.message; }
+    let x = await r.json();
+    document.getElementById('statusLine').textContent = x.msg || 'Unknown';
+    document.getElementById('statusLine').style.color = x.ok ? '#34d399' : '#f87171';
+  }catch(e){
+    document.getElementById('statusLine').textContent = 'Error: '+e.message;
+    document.getElementById('statusLine').style.color = '#f87171';
+  }
+  btn.textContent = 'START'; btn.disabled = false;
 }
 async function stop(){
   try{
