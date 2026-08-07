@@ -453,56 +453,90 @@ class DiscordAutomation:
             return False
 
     async def _goto_register(self) -> bool:
-        """Navigate to Discord registration with retries.
+        """Navigate to Discord registration with multiple retry strategies.
 
-        Discord is a heavy React SPA and free proxies are slow. We use a long
-        60s timeout, try 'networkidle' first (waits for JS to settle), fall
-        back to 'domcontentloaded' on retries, and always wait for the React
-        app to render the form after navigation.
+        Free proxies are slow and Discord is a heavy SPA. We NEVER use
+        'networkidle' because Discord makes constant background requests
+        (websockets, analytics) that prevent it from ever settling.
+
+        Strategy per attempt:
+        - Attempt 1: 'commit' (fastest — just wait for HTTP response), then
+          poll for the React form to render (up to 45s).
+        - Attempt 2: 'domcontentloaded' (DOM parsed), then poll.
+        - Attempt 3: 'load' (all resources), then poll.
+
+        After ANY goto (even if it times out), check if Discord returned a
+        block/error page and log it, then poll for the email input anyway.
         """
-        for attempt in range(1, 4):
+        wait_strategies = [
+            ('commit',      NAV_TIMEOUT_MS),       # fastest — just need the HTML
+            ('domcontentloaded', NAV_TIMEOUT_MS // 2),
+            ('load',        NAV_TIMEOUT_MS // 2),
+        ]
+        for attempt, (wait_until, timeout_ms) in enumerate(wait_strategies, 1):
+            self._log(f"[Nav] Opening Discord /register (attempt {attempt}, wait={wait_until}, timeout={timeout_ms}ms)...")
             try:
-                # First attempt: networkidle (waits for React to finish rendering)
-                # Later attempts: domcontentloaded (faster, page may already be cached)
-                wait_until = 'networkidle' if attempt == 1 else 'domcontentloaded'
-                nav_timeout = NAV_TIMEOUT_MS if attempt == 1 else NAV_TIMEOUT_MS // 2
-                self._log(f"[Nav] Opening https://discord.com/register (attempt {attempt}, wait={wait_until}, timeout={nav_timeout}ms)...")
                 await self._page.goto('https://discord.com/register',
                                       wait_until=wait_until,
-                                      timeout=nav_timeout)
-                self._log("[Nav] Page loaded — waiting for Discord React to render form...")
-                # Discord is a heavy React SPA — poll for the email input
-                for _ in range(10):
-                    try:
-                        cnt = await asyncio.wait_for(
-                            self._page.locator('input[name="email"]').count(), timeout=2.0)
-                        if cnt > 0:
-                            self._log("[Nav] Registration form is now visible")
-                            return True
-                    except Exception:
-                        pass
-                    await asyncio.sleep(1.0)
-                self._log("[Nav] Form did not render in time — treating as failure", level="warn")
-                return False
+                                      timeout=timeout_ms)
             except Exception as e:
-                self._log(f"[Nav] goto attempt {attempt} error: {str(e)[:110]}", level="warn")
-                # A timeout may still leave us with a usable page
+                self._log(f"[Nav] goto error: {str(e)[:100]}", level="warn")
+
+            # Always check what we got — even after a timeout, the page may
+            # have loaded partially and be usable.
+            try:
+                page_title = await asyncio.wait_for(
+                    self._page.title(), timeout=3.0)
+                page_url = self._page.url
+                self._log('[Nav] Current page: title="' + str(page_title)[:60] + '" url=' + str(page_url)[:60])
+            except Exception:
+                page_title = ""
+                page_url = ""
+
+            # Detect Cloudflare / blocks / error pages
+            if any(w in (page_title or "").lower() for w in ('attention required', 'just a moment', 'blocked', '502', '503', 'cloudflare')):
+                self._log('[Nav] [BLOCKED] Discord returned: "' + str(page_title)[:60] + '" - try next attempt', level="warn")
+                if self._tor_enabled and attempt == 2:
+                    self._log("[Nav] Rotating TOR circuit...")
+                    if not await self._rebuild_context_with_tor():
+                        continue
+                await asyncio.sleep(2)
+                continue
+
+            # Poll for the registration form to actually render
+            self._log("[Nav] Polling for Discord React form to render...")
+            for poll_i in range(45):  # up to 45 seconds
                 try:
+                    # Check for email input — the definitive sign the form is ready
                     cnt = await asyncio.wait_for(
-                        self._page.locator('input[name="email"]').count(), timeout=3.0)
+                        self._page.locator('input[name="email"]').count(), timeout=1.5)
                     if cnt > 0:
-                        self._log("[Nav] Page usable despite timeout - continuing")
+                        self._log(f"[Nav] [OK] Registration form rendered! (attempt {attempt}, poll {poll_i+1}s)")
                         return True
                 except Exception:
                     pass
-                if self._tor_enabled:
-                    self._log("[Nav] TOR proxy blocking Discord - rotating circuit",
-                              level="warn")
-                    if not await self._rebuild_context_with_tor():
-                        return False
+                # Also check if Discord redirected us somewhere else (login, etc)
+                try:
+                    cur = self._page.url
+                    if 'discord.com/app' in cur or 'discord.com/channels' in cur:
+                        self._log(f"[Nav] Redirected to {cur[:50]} - already logged in?")
+                        return True
+                except Exception:
+                    pass
+                await asyncio.sleep(1.0)
+
+            self._log(f"[Nav] Form never rendered after 45s of polling (attempt {attempt})", level="warn")
+
+            # Rotate TOR before next attempt if available
+            if self._tor_enabled and attempt < 3:
+                self._log("[Nav] Rotating TOR circuit for next attempt...")
+                if not await self._rebuild_context_with_tor():
                     continue
+                await asyncio.sleep(2)
+            elif attempt < 3:
                 await asyncio.sleep(3)
-        self._log("[Nav] Could not reach Discord registration", level="error")
+
+        self._log("[Nav] [FAIL] Could not reach Discord registration after all attempts", level="error")
         return False
 
     async def capture_screenshot(self) -> str:
@@ -540,8 +574,39 @@ class DiscordAutomation:
 
         try:
             if not await self._goto_register():
-                self._log("[FAIL] Could not navigate to Discord registration", level="error")
-                return False
+                # Fallback: try Discord homepage first, then click to register
+                self._log("[FAIL] Direct /register nav failed - trying Discord homepage fallback...", level="warn")
+                try:
+                    self._log("[Nav] Loading https://discord.com first (fallback)...")
+                    await self._page.goto('https://discord.com',
+                                          wait_until='commit',
+                                          timeout=NAV_TIMEOUT_MS)
+                    await asyncio.sleep(5)
+                    # Try clicking the login/register link on homepage
+                    try:
+                        await self._page.click('a[href*="/register"]', timeout=5000)
+                        self._log("[Nav] Clicked register link on homepage")
+                    except Exception:
+                        self._log("[Nav] No register link - trying direct /register again")
+                        await self._page.goto('https://discord.com/register',
+                                              wait_until='commit',
+                                              timeout=NAV_TIMEOUT_MS)
+                    await asyncio.sleep(5)
+                    # Check if the form appeared after fallback
+                    try:
+                        cnt = await asyncio.wait_for(
+                            self._page.locator('input[name="email"]').count(), timeout=5.0)
+                        if cnt > 0:
+                            self._log("[Nav] [OK] Fallback worked - form is visible!")
+                        else:
+                            self._log("[FAIL] Still no form after fallback - aborting", level="error")
+                            return False
+                    except Exception:
+                        self._log("[FAIL] Page not usable after fallback", level="error")
+                        return False
+                except Exception as e:
+                    self._log(f"[FAIL] Fallback also failed: {e}", level="error")
+                    return False
             await asyncio.sleep(3)
             await self.capture_screenshot()
 
