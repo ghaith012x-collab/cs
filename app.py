@@ -34,7 +34,7 @@ _start_time = 0.0
 
 # worker_id -> worker state
 _workers: Dict[str, dict] = {}
-WORKER_COUNT = 4
+WORKER_COUNT = 1
 WORKER_IDS = [f"B{i+1}" for i in range(WORKER_COUNT)]
 
 _config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")

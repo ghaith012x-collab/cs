@@ -3,7 +3,7 @@
     "username": "",
     "password": "",
     "headless": true,
-    "camera_interval": 3,
+    "camera_interval": 4,
     "web_port": 5000,
     "run_automation": false
 }

@@ -81,16 +81,22 @@ PAST_CAPTCHA_KEYWORDS = ['/channels', '/verify', '/welcome', '/login', '@me', 'd
 
 INIT_SCRIPT = """
 // ==============================================
-// Anti-detection: incognito + humanized fingerprints
+// Anti-detection: incognito + humanized fingerprints v2
 // ==============================================
 (function(){
+  // --- Hide that we're in incognito ---
+  Object.defineProperty(navigator, 'cookieEnabled', { get: () => true });
+
   // --- Canvas fingerprint noise ---
   const origToDataURL = HTMLCanvasElement.prototype.toDataURL;
   HTMLCanvasElement.prototype.toDataURL = function(type) {
     const ctx = this.getContext('2d');
     if (ctx) {
-      const imgData = ctx.getImageData(0, 0, 1, 1);
-      imgData.data[0] = imgData.data[0] ^ (Math.floor(Math.random() * 2));
+      const w = this.width, h = this.height;
+      const imgData = ctx.getImageData(0, 0, Math.min(w, 10), Math.min(h, 10));
+      for (let i = 0; i < Math.min(imgData.data.length, 20); i += 4) {
+        imgData.data[i] = imgData.data[i] ^ (Math.floor(Math.random() * 3) - 1);
+      }
       ctx.putImageData(imgData, 0, 0);
     }
     return origToDataURL.apply(this, arguments);
@@ -99,8 +105,11 @@ INIT_SCRIPT = """
   HTMLCanvasElement.prototype.toBlob = function(cb, type) {
     const ctx = this.getContext('2d');
     if (ctx) {
-      const imgData = ctx.getImageData(0, 0, 1, 1);
-      imgData.data[0] = imgData.data[0] ^ (Math.floor(Math.random() * 2));
+      const w = this.width, h = this.height;
+      const imgData = ctx.getImageData(0, 0, Math.min(w, 10), Math.min(h, 10));
+      for (let i = 0; i < Math.min(imgData.data.length, 20); i += 4) {
+        imgData.data[i] = imgData.data[i] ^ (Math.floor(Math.random() * 3) - 1);
+      }
       ctx.putImageData(imgData, 0, 0);
     }
     return origToBlob.apply(this, arguments);
@@ -179,6 +188,10 @@ INIT_SCRIPT = """
 
   // --- Hide Chrome automation ---
   if (window.chrome) { window.chrome.runtime = {}; }
+  delete window.__nightmare;
+  delete window._phantom;
+  delete window.callPhantom;
+  delete window.Buffer;
   Object.defineProperty(window, 'chrome', { get: () => ({ runtime: {} }), set: () => {} });
 
   // --- Plugins array ---
@@ -197,16 +210,62 @@ INIT_SCRIPT = """
     }
   });
 
+  // --- Mime types ---
+  Object.defineProperty(navigator, 'mimeTypes', {
+    get: () => {
+      const arr = [
+        { type: 'application/pdf', description: 'Portable Document Format', suffixes: 'pdf' },
+        { type: 'text/pdf', description: 'Portable Document Format', suffixes: 'pdf' },
+      ];
+      arr.item = (i) => arr[i];
+      arr.namedItem = (n) => arr.find(x => x.type === n);
+      Object.defineProperty(arr, 'length', { get: () => 2 });
+      return arr;
+    }
+  });
+
   // --- Permissions ---
   const origQuery = window.navigator.permissions.query;
   window.navigator.permissions.query = function(args) {
     if (args.name === 'notifications') return Promise.resolve({ state: 'prompt', onchange: null });
+    if (args.name === 'camera') return Promise.resolve({ state: 'prompt', onchange: null });
+    if (args.name === 'microphone') return Promise.resolve({ state: 'prompt', onchange: null });
     return origQuery.apply(this, arguments);
   };
 
-  // --- Screen ---
+  // --- Battery API spoof ---
+  try {
+    navigator.getBattery = function() {
+      return Promise.resolve({
+        charging: true,
+        chargingTime: 0,
+        dischargingTime: Infinity,
+        level: 0.92 + Math.random() * 0.08,
+        onchargingchange: null,
+        onchargingtimechange: null,
+        ondischargingtimechange: null,
+        onlevelchange: null,
+      });
+    };
+  } catch(e) {}
+
+  // --- Screen (matches random viewport) ---
+  const screenW = screen.width || 1920;
+  const screenH = screen.height || 1080;
   Object.defineProperty(screen, 'colorDepth', { get: () => 24 });
   Object.defineProperty(screen, 'pixelDepth', { get: () => 24 });
+  Object.defineProperty(screen, 'availWidth', { get: () => screenW });
+  Object.defineProperty(screen, 'availHeight', { get: () => screenH - 40 });
+
+  // --- Connection type ---
+  Object.defineProperty(navigator, 'connection', {
+    get: () => ({
+      effectiveType: '4g',
+      rtt: 50,
+      downlink: 10,
+      saveData: false,
+    })
+  });
 })();
 """
 
@@ -255,10 +314,12 @@ class DiscordAutomation:
         self._playwright = await async_playwright().start()
 
         args = [
+            '--incognito',
+            '--no-first-run',
+            '--no-default-browser-check',
             '--disable-blink-features=AutomationDetected',
             '--no-sandbox',
             '--disable-setuid-sandbox',
-            '--disable-webgl',
             '--disable-dev-shm-usage',
             '--disable-extensions',
             '--disable-background-networking',
@@ -266,20 +327,54 @@ class DiscordAutomation:
             '--disable-default-apps',
             '--disable-sync',
             '--disable-translate',
-            '--disable-features=IsolateOrigins,site-per-process',
+            '--disable-component-update',
+            '--disable-features=IsolateOrigins,site-per-process,TranslateUI,OptimizationHints',
+            '--password-store=basic',
+            '--use-mock-keychain',
             '--js-flags=--max-old-space-size=256',
         ]
 
         self._ua = random.choice(USER_AGENTS)
         self._browser = await self._playwright.chromium.launch(headless=self.headless, args=args)
 
-        timezones = ['America/New_York','America/Chicago','America/Denver','America/Los_Angeles','Europe/London','Europe/Berlin','Europe/Paris']
+        timezones = ['America/New_York','America/Chicago','America/Denver','America/Los_Angeles',
+                     'Europe/London','Europe/Berlin','Europe/Paris','Asia/Tokyo','Australia/Sydney']
         tz = random.choice(timezones)
+        locales = ['en-US','en-GB','en-CA','en-AU']
+        loc = random.choice(locales)
+        # Random viewport — common desktop resolutions
+        viewports = [
+            {'width': 860, 'height': 640},
+            {'width': 1024, 'height': 768},
+            {'width': 1280, 'height': 720},
+            {'width': 900, 'height': 700},
+            {'width': 1366, 'height': 768},
+        ]
+        vp = random.choice(viewports)
+        scales = [1, 1.25, 2]
+        dsf = random.choice(scales)
+        # Spoof geolocation (Discord sees this)
+        geos = [
+            {'latitude': 40.7128, 'longitude': -74.0060},   # NYC
+            {'latitude': 34.0522, 'longitude': -118.2437},  # LA
+            {'latitude': 41.8781, 'longitude': -87.6298},   # Chicago
+            {'latitude': 51.5074, 'longitude': -0.1278},    # London
+            {'latitude': 48.8566, 'longitude': 2.3522},     # Paris
+        ]
+        geo = random.choice(geos)
         ctx_opts = {
-            'viewport': {'width': 860, 'height': 640},
+            'viewport': vp,
             'user_agent': self._ua,
             'timezone_id': tz,
-            'locale': 'en-US',
+            'locale': loc,
+            'geolocation': geo,
+            'permissions': ['geolocation'],
+            'device_scale_factor': dsf,
+            'is_mobile': False,
+            'has_touch': False,
+            'color_scheme': random.choice(['dark', 'light', 'no-preference']),
+            'bypass_csp': True,
+            'ignore_https_errors': True,
         }
         if self.proxy:
             p = self.proxy
@@ -291,13 +386,15 @@ class DiscordAutomation:
             ctx_opts['proxy'] = proxy_cfg
             self._log(f"Proxy: {server} (auth={'yes' if p.get('username') else 'no'})")
         elif _tor_check():
-            self._log("[TOR] Rotating IP for new session...")
+            self._log("[TOR] Using TOR SOCKS5 proxy (fallback)...")
             if _tor_newnym():
                 self._log("[TOR] New identity requested")
             ctx_opts['proxy'] = {'server': 'socks5://127.0.0.1:9050'}
             await asyncio.sleep(2)
         else:
-            self._log("[Proxy] None available - using direct connection", level="warn")
+            self._log("[Proxy] [FAIL] No proxy available - cannot proceed", level="error")
+            # Still create context but mark as unprotected
+            pass
 
         self._context = await self._browser.new_context(**ctx_opts)
         self._log(f"User-Agent: {self._ua[:60]}...")
@@ -305,8 +402,8 @@ class DiscordAutomation:
         await self._context.add_init_script(INIT_SCRIPT)
         self._page = await self._context.new_page()
 
-    async def _rebuild_context_without_tor(self) -> bool:
-        """Close the proxied context and reopen with a direct connection."""
+    async def _rebuild_context_with_tor(self) -> bool:
+        """Close the context and reopen WITH a fresh TOR circuit."""
         try:
             if self._page:
                 await self._page.close()
@@ -315,17 +412,30 @@ class DiscordAutomation:
         except Exception:
             pass
         try:
-            self._tor_enabled = False
-            timezones2 = random.choice(['America/New_York','America/Chicago','America/Denver','America/Los_Angeles','Europe/London','Europe/Berlin','Europe/Paris'])
+            if not _tor_check():
+                self._log("[Nav] TOR not available for rebuild", level="error")
+                return False
+            if _tor_newnym():
+                self._log("[Nav] Fresh TOR circuit requested")
+            await asyncio.sleep(2)
+            timezones2 = random.choice(['America/New_York','America/Chicago','America/Denver','America/Los_Angeles','Europe/London','Europe/Berlin','Europe/Paris','Asia/Tokyo'])
+            vp2 = random.choice([
+                {'width': 860, 'height': 640},
+                {'width': 1024, 'height': 768},
+                {'width': 900, 'height': 700},
+            ])
             self._context = await self._browser.new_context(
-                viewport={'width': 860, 'height': 640},
+                viewport=vp2,
                 user_agent=self._ua,
                 timezone_id=timezones2,
                 locale='en-US',
+                proxy={'server': 'socks5://127.0.0.1:9050'},
+                bypass_csp=True,
+                ignore_https_errors=True,
             )
             await self._context.add_init_script(INIT_SCRIPT)
             self._page = await self._context.new_page()
-            self._log("[Nav] Rebuilt browser context WITHOUT TOR proxy")
+            self._log("[Nav] Rebuilt browser context WITH fresh TOR proxy")
             return True
         except Exception as e:
             self._log(f"[Nav] context rebuild failed: {e}", level="error")
@@ -358,11 +468,10 @@ class DiscordAutomation:
                 except Exception:
                     pass
                 if self._tor_enabled:
-                    self._log("[Nav] TOR proxy blocking Discord - switching to direct connection",
+                    self._log("[Nav] TOR proxy blocking Discord - rotating circuit",
                               level="warn")
-                    if not await self._rebuild_context_without_tor():
+                    if not await self._rebuild_context_with_tor():
                         return False
-                    # Direct retry immediately (no need to wait)
                     continue
                 await asyncio.sleep(3)
         self._log("[Nav] Could not reach Discord registration", level="error")
@@ -1250,7 +1359,7 @@ class DiscordAutomation:
     async def _human_pause(self) -> None:
         await asyncio.sleep(random.uniform(0.1, 0.5))
 
-    async def live_camera_loop(self, interval: int = 3) -> None:
+    async def live_camera_loop(self, interval: int = 4) -> None:
         while True:
             await self.capture_screenshot()
             await asyncio.sleep(interval)
