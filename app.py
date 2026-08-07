@@ -604,11 +604,11 @@ function renderCams(){
   ids.forEach(function(id){
     var w = workers[id] || {status:'idle', email:'', proxy:''};
     var st = camStatus(w);
-    var proxy = w.proxy ? w.proxy.replace('://',' ').split(':')[1]||'' : '';
+    var proxy = w.proxy ? w.proxy.replace('://',' ').replace('@',' ').split(' ').pop()||'' : '';
     html += '<div class="cam" id="cam'+id+'" onclick="openLogModal(&quot;'+id+'&quot;)">';
-    html += '<div class="tag">'+id+(proxy?' · '+proxy:'')+'</div>';
+    html += '<div class="tag">'+id+(proxy?' | '+proxy:'')+'</div>';
     if(st==='live'||st==='done'){
-      html += '<img src="/latest?worker='+id+'&t='+Date.now()+'" onerror="this.style.display=none">';
+      html += '<img src="/latest?worker='+id+'&t='+Date.now()+'" onerror="this.style.display=&quot;none&quot;">';
     }else{
       html += '<div class="ph">'+ (st==='starting'?'starting...':(st==='done'?'finished':'idle')) +'</div>';
     }
