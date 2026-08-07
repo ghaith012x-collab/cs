@@ -525,7 +525,7 @@ class DiscordAutomation:
             if not await self._goto_register():
                 self._log("[FAIL] Could not navigate to Discord registration", level="error")
                 return False
-            await asyncio.sleep(5)
+            await asyncio.sleep(3)
             await self.capture_screenshot()
 
             # Fill the form
@@ -711,8 +711,8 @@ class DiscordAutomation:
                 return True
 
             # ── CRITICAL: Always wait 12s for the captcha widget to FULLY load ──
-            self._log("[Captcha] Waiting 12 seconds for captcha widget to fully load...")
-            await asyncio.sleep(12)
+            self._log("[Captcha] Waiting 8 seconds for captcha widget to fully load...")
+            await asyncio.sleep(8)
 
             # Check if already past captcha after waiting
             if await self._past_captcha():

@@ -311,6 +311,25 @@ def handle_latest_screenshot():
     return Response(status=404)
 
 
+@app.route('/worker/<wid>/logs')
+def handle_worker_logs(wid):
+    s = _workers.get(wid)
+    if not s:
+        return jsonify({"logs": [], "status": "unknown"})
+    bot = s.get("bot")
+    logs = bot.get_activity_log() if bot else []
+    return jsonify({
+        "id": wid,
+        "status": s["status"],
+        "email": s.get("email", ""),
+        "username": s.get("username", ""),
+        "proxy": s.get("proxy", ""),
+        "screenshots": s.get("screenshots", 0),
+        "started_at": s.get("started_at", 0),
+        "logs": logs[-200:],  # last 200 entries
+    })
+
+
 @app.route('/tokens')
 def handle_tokens():
     if not _db_available or db is None:
@@ -445,6 +464,17 @@ h3{font-size:12px;color:var(--dim);text-transform:uppercase;letter-spacing:1px;m
 .t-pending{background:#1e2a4a;color:var(--dim)}
 .empty{color:var(--dim);text-align:center;padding:30px 0;font-size:13px}
 .footer{color:#3a4368;font-size:10px;text-align:center;margin-top:18px}
+.modal-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:99;justify-content:center;align-items:center}
+.modal-overlay.on{display:flex}
+.modal{background:var(--card);border:1px solid var(--line);border-radius:16px;width:92vw;max-width:500px;max-height:80vh;overflow:hidden;display:flex;flex-direction:column}
+.modal-head{display:flex;justify-content:space-between;align-items:center;padding:14px 16px;border-bottom:1px solid var(--line)}
+.modal-head h2{font-size:16px;margin:0}
+.modal-close{background:none;border:none;color:var(--dim);font-size:22px;cursor:pointer;padding:0 4px}
+.modal-body{padding:12px 16px;overflow-y:auto;flex:1}
+.modal .log-line{font-family:ui-monospace,Menlo,monospace;font-size:11px;padding:3px 0;border-bottom:1px solid rgba(28,34,64,.5);display:flex;gap:6px}
+.modal .log-time{color:var(--dim);white-space:nowrap;min-width:52px}
+.modal .log-msg{color:var(--txt);word-break:break-all}
+.cam{cursor:pointer}
 </style></head><body>
 
 <h1><span class="dot"></span>EYES GEN</h1>
@@ -477,6 +507,16 @@ h3{font-size:12px;color:var(--dim);text-transform:uppercase;letter-spacing:1px;m
     </div>
   </div>
   <div id="tokList"></div>
+</div>
+
+<div class="modal-overlay" id="logModal" onclick="if(event.target===this)closeLogModal()">
+  <div class="modal">
+    <div class="modal-head">
+      <h2 id="logModalTitle">Worker Logs</h2>
+      <button class="modal-close" onclick="closeLogModal()">&times;</button>
+    </div>
+    <div class="modal-body" id="logModalBody">Loading...</div>
+  </div>
 </div>
 
 <div class="nav">
@@ -535,13 +575,13 @@ function camStatus(w){
 }
 
 function renderCams(){
-  let ids = ['B1','B2','B3','B4'];
+  let ids = ['B1'];
   let html = '';
   ids.forEach(id=>{
     let w = workers[id] || {status:'idle', email:'', proxy:''};
     let st = camStatus(w);
     let proxy = w.proxy ? w.proxy.replace('://',' ').split(':')[1]||'' : '';
-    html += '<div class="cam" id="cam'+id+'">'
+    html += '<div class="cam" id="cam'+id+'" onclick="openLogModal(\''+id+'\')">'
       + '<div class="tag">'+id+(proxy?' &middot; '+proxy:'')+'</div>'
       + (st==='live'||st==='done'
         ? '<img src="/latest?worker='+id+'&t='+Date.now()+'" onerror="this.style.display=&#39;none&#39;">'
@@ -549,6 +589,32 @@ function renderCams(){
       + '<div class="st">'+st+'</div></div>';
   });
   document.getElementById('cams').innerHTML = html;
+}
+
+async function openLogModal(wid){
+  document.getElementById('logModalTitle').textContent = wid + ' Logs';
+  document.getElementById('logModalBody').innerHTML = '<div class="ph">Loading...</div>';
+  document.getElementById('logModal').classList.add('on');
+  try{
+    let r = await api('/worker/'+wid+'/logs');
+    let x = await r.json();
+    document.getElementById('logModalTitle').textContent = wid + ' Logs (' + x.status + ')';
+    if(!x.logs || !x.logs.length){
+      document.getElementById('logModalBody').innerHTML = '<div class="empty">No logs yet</div>';
+      return;
+    }
+    let html = '';
+    x.logs.forEach(l=>{
+      let cls = l.level==='error'?'log-error':(l.level==='warn'?'log-warn':'log-msg');
+      html += '<div class="log-line"><span class="log-time">'+l.time+'</span><span class="'+cls+'">'+l.message+'</span></div>';
+    });
+    document.getElementById('logModalBody').innerHTML = html;
+  }catch(e){
+    document.getElementById('logModalBody').innerHTML = '<div class="empty">Error: '+e.message+'</div>';
+  }
+}
+function closeLogModal(){
+  document.getElementById('logModal').classList.remove('on');
 }
 
 async function refreshTokens(){
