@@ -544,41 +544,50 @@ function showTab(name){
 }
 
 async function start(){
-  let btn = document.querySelector('.btn-start');
+  const btn = document.querySelector('.btn-start');
+  const status = document.getElementById('statusLine');
+  if(!btn) return;
   btn.textContent = '...'; btn.disabled = true;
   try{
-    let r = await api('/start', {method:'POST'});
-    let x = await r.json();
-    document.getElementById('statusLine').textContent = x.msg || 'Unknown';
-    document.getElementById('statusLine').style.color = x.ok ? '#34d399' : '#f87171';
+    const r = await api('/start', {method:'POST'});
+    const x = await r.json();
+    status.textContent = x.msg || 'Unknown';
+    status.style.color = x.ok ? '#34d399' : '#f87171';
   }catch(e){
-    document.getElementById('statusLine').textContent = 'Error: '+e.message;
-    document.getElementById('statusLine').style.color = '#f87171';
+    status.textContent = 'Error: ' + e.message;
+    status.style.color = '#f87171';
   }
   btn.textContent = 'START'; btn.disabled = false;
 }
+
 async function stop(){
+  const btn = document.querySelector('.btn-stop');
+  if(!btn) return;
+  btn.textContent = '...'; btn.disabled = true;
   try{
-    let r = await api('/stop', {method:'POST'});
+    const r = await api('/stop', {method:'POST'});
     document.getElementById('statusLine').textContent = await r.text();
-  }catch(e){ document.getElementById('statusLine').textContent = 'Error: '+e.message; }
+  }catch(e){
+    document.getElementById('statusLine').textContent = 'Error: ' + e.message;
+  }
+  btn.textContent = 'STOP'; btn.disabled = false;
 }
 
 async function refresh(){
   try{
-    let r = await api('/status'); let x = await r.json();
-    let running = x.workers.filter(w=>w.status==='running'||w.status==='starting').length;
+    const r = await api('/status'); const x = await r.json();
+    const running = x.workers.filter(w=>w.status==='running'||w.status==='starting').length;
     document.getElementById('stRunning').textContent = x.running ? running+'/'+x.workers.length : '0';
     document.getElementById('stProxies').textContent = x.proxies ? x.proxies.available : 0;
     if(x.running){
-      let s = document.getElementById('statusLine');
-      s.textContent = '> Running ('+Math.floor(x.uptime/60)+'m) - '+running+' browsers active';
+      const s = document.getElementById('statusLine');
+      s.textContent = '> Running (' + Math.floor(x.uptime/60) + 'm) - ' + running + ' browsers active';
       s.style.color = '#34d399';
     }
     workers = {};
     x.workers.forEach(w=>{ workers[w.id]=w; });
     renderCams();
-  }catch(e){}
+  }catch(e){ console.error('refresh error:', e); }
 }
 
 function camStatus(w){
@@ -590,18 +599,20 @@ function camStatus(w){
 }
 
 function renderCams(){
-  let ids = ['B1'];
-  let html = '';
-  ids.forEach(id=>{
-    let w = workers[id] || {status:'idle', email:'', proxy:''};
-    let st = camStatus(w);
-    let proxy = w.proxy ? w.proxy.replace('://',' ').split(':')[1]||'' : '';
-    html += '<div class="cam" id="cam'+id+'" onclick="openLogModal(\''+id+'\')">'
-      + '<div class="tag">'+id+(proxy?' &middot; '+proxy:'')+'</div>'
-      + (st==='live'||st==='done'
-        ? '<img src="/latest?worker='+id+'&t='+Date.now()+'" onerror="this.style.display=&#39;none&#39;">'
-        : '<div class="ph">'+ (st==='starting'?'starting…':(st==='done'?'finished':'idle')) +'</div>')
-      + '<div class="st">'+st+'</div></div>';
+  var ids = ['B1'];
+  var html = '';
+  ids.forEach(function(id){
+    var w = workers[id] || {status:'idle', email:'', proxy:''};
+    var st = camStatus(w);
+    var proxy = w.proxy ? w.proxy.replace('://',' ').split(':')[1]||'' : '';
+    html += '<div class="cam" id="cam'+id+'" onclick="openLogModal(&quot;'+id+'&quot;)">';
+    html += '<div class="tag">'+id+(proxy?' · '+proxy:'')+'</div>';
+    if(st==='live'||st==='done'){
+      html += '<img src="/latest?worker='+id+'&t='+Date.now()+'" onerror="this.style.display=none">';
+    }else{
+      html += '<div class="ph">'+ (st==='starting'?'starting...':(st==='done'?'finished':'idle')) +'</div>';
+    }
+    html += '<div class="st">'+st+'</div></div>';
   });
   document.getElementById('cams').innerHTML = html;
 }
@@ -611,16 +622,16 @@ async function openLogModal(wid){
   document.getElementById('logModalBody').innerHTML = '<div class="ph">Loading...</div>';
   document.getElementById('logModal').classList.add('on');
   try{
-    let r = await api('/worker/'+wid+'/logs');
-    let x = await r.json();
+    const r = await api('/worker/'+wid+'/logs');
+    const x = await r.json();
     document.getElementById('logModalTitle').textContent = wid + ' Logs (' + x.status + ')';
     if(!x.logs || !x.logs.length){
       document.getElementById('logModalBody').innerHTML = '<div class="empty">No logs yet</div>';
       return;
     }
-    let html = '';
-    x.logs.forEach(l=>{
-      let cls = l.level==='error'?'log-error':(l.level==='warn'?'log-warn':'log-msg');
+    var html = '';
+    x.logs.forEach(function(l){
+      var cls = l.level==='error'?'log-error':(l.level==='warn'?'log-warn':'log-msg');
       html += '<div class="log-line"><span class="log-time">'+l.time+'</span><span class="'+cls+'">'+l.message+'</span></div>';
     });
     document.getElementById('logModalBody').innerHTML = html;
@@ -628,49 +639,52 @@ async function openLogModal(wid){
     document.getElementById('logModalBody').innerHTML = '<div class="empty">Error: '+e.message+'</div>';
   }
 }
+
 function closeLogModal(){
   document.getElementById('logModal').classList.remove('on');
 }
 
 async function refreshTokens(){
   try{
-    let r = await api('/tokens'); let x = await r.json();
+    const r = await api('/tokens'); const x = await r.json();
     document.getElementById('tokCount').textContent = x.valid+' / '+x.count+' valid';
     document.getElementById('tokCount').className = 'badge '+(x.valid>0?'b-done':'b-idle');
     if(!x.accounts || !x.accounts.length){
       document.getElementById('tokList').innerHTML = '<div class="empty">No tokens yet. Press START.</div>';
       return;
     }
-    let html = '';
-    x.accounts.forEach(a=>{
-      let line = a.token;
-      let st = a.status || 'pending';
-      let badge = st==='valid'?'t-valid':(st==='invalid'?'t-invalid':'t-pending');
-      html += '<div class="tok">'
-        + '<div class="top"><div><div class="user">@'+(a.username||'?')+'</div>'
-        + '<div class="mail">'+(a.email||'')+'</div></div>'
-        + '<div style="display:flex;gap:6px;align-items:center">'
-        + '<span class="tok-badge '+badge+'">'+st+'</span>'
-        + '<button class="copy" data-token="'+jsEscape(a.token)+'" onclick="copyLine(this.dataset.token,this)">COPY</button>'
-        + '</div></div>'
-        + '<div class="line">'+a.token+'</div>'
-        + '<div class="line" style="color:#6b7aa0">'+(a.email||'')+' : '+(a.password||'')+'</div>'
-        + '</div>';
+    var html = '';
+    x.accounts.forEach(function(a){
+      var st = a.status || 'pending';
+      var badge = st==='valid'?'t-valid':(st==='invalid'?'t-invalid':'t-pending');
+      var escToken = jsEscape(a.token||'');
+      html += '<div class="tok">';
+      html += '<div class="top"><div><div class="user">@'+(a.username||'?')+'</div>';
+      html += '<div class="mail">'+(a.email||'')+'</div></div>';
+      html += '<div style="display:flex;gap:6px;align-items:center">';
+      html += '<span class="tok-badge '+badge+'">'+st+'</span>';
+      html += '<button class="copy" data-token="'+escToken+'" onclick="copyLine(this.dataset.token,this)">COPY</button>';
+      html += '</div></div>';
+      html += '<div class="line">'+ (a.token||'') +'</div>';
+      html += '<div class="line" style="color:#6b7aa0">'+(a.email||'')+' : '+(a.password||'')+'</div>';
+      html += '</div>';
     });
     document.getElementById('tokList').innerHTML = html;
-  }catch(e){}
+  }catch(e){ console.error('refreshTokens error:', e); }
 }
 
-function jsEscape(s){ return String(s).replace(/\\\\/g,'\\\\\\\\').replace(/'/g,"\\\\'"); }
+function jsEscape(s){
+  return String(s).replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/'/g,'&#39;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
 
 function copyLine(val, btn){
   if(navigator.clipboard && navigator.clipboard.writeText){
-    navigator.clipboard.writeText(val).then(()=>{btn.textContent='COPIED';setTimeout(()=>btn.textContent='COPY',1200);});
-  } else {
-    let ta = document.createElement('textarea'); ta.value = val; document.body.appendChild(ta);
+    navigator.clipboard.writeText(val).then(function(){btn.textContent='COPIED';setTimeout(function(){btn.textContent='COPY'},1200);});
+  }else{
+    var ta = document.createElement('textarea'); ta.value = val; document.body.appendChild(ta);
     ta.select(); try{document.execCommand('copy');}catch(e){}
     document.body.removeChild(ta);
-    btn.textContent='COPIED'; setTimeout(()=>btn.textContent='COPY',1200);
+    btn.textContent='COPIED'; setTimeout(function(){btn.textContent='COPY'},1200);
   }
 }
 
