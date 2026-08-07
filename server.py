@@ -176,7 +176,7 @@ INIT_SCRIPT = """
   const m = mem[Math.floor(Math.random() * mem.length)];
   const t = touches[Math.floor(Math.random() * touches.length)];
 
-  Object.defineProperty(navigator, 'webdriver', { get: () => false });
+  Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
   Object.defineProperty(navigator, 'languages', { get: () => Object.freeze(['en-US', 'en']) });
   Object.defineProperty(navigator, 'platform', { get: () => p });
   Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => c });
@@ -193,6 +193,11 @@ INIT_SCRIPT = """
   delete window.callPhantom;
   delete window.Buffer;
   Object.defineProperty(window, 'chrome', { get: () => ({ runtime: {} }), set: () => {} });
+
+  // --- Delete Playwright-specific properties ---
+  delete window.__playwright;
+  delete window.__pw_manual;
+  delete window.__pw_init;
 
   // --- Plugins array ---
   Object.defineProperty(navigator, 'plugins', {
@@ -272,6 +277,86 @@ INIT_SCRIPT = """
 NAV_TIMEOUT_MS = 60000
 
 
+# ═══════════════════════════════════════════════════════════════
+# Human Behavior Simulation & Fingerprint Randomization
+# ═══════════════════════════════════════════════════════════════
+
+async def human_type(page, selector: str, text: str):
+    """Type with variable speed, occasional pauses, and rare backspaces.
+    Human-like typing with Gaussian-distributed delays."""
+    try:
+        await page.click(selector)
+    except Exception:
+        pass
+    for i, char in enumerate(text):
+        # Base 50-150ms per char with Gaussian distribution
+        delay = max(20, random.gauss(80, 30)) / 1000.0
+        if random.random() < 0.05:  # 5% chance of pause
+            delay += random.gauss(800, 200) / 1000.0
+        if random.random() < 0.02 and i > 0:  # 2% chance of backspace
+            await page.keyboard.press("Backspace")
+            await asyncio.sleep(random.gauss(150, 50) / 1000.0)
+        await page.keyboard.type(char, delay=int(delay * 1000))
+        await asyncio.sleep(delay)
+
+async def human_mouse_move(page, x: int, y: int):
+    """Bezier curve mouse movement instead of instant teleport.
+    Creates a natural, curved mouse path between current position and target."""
+    try:
+        current = await page.evaluate("() => ({x: window.mouseX || 0, y: window.mouseY || 0})")
+    except Exception:
+        current = {'x': x - 100, 'y': y - 50}
+    if not current or current.get('x') == 0:
+        current = {'x': x - 100, 'y': y - 50}
+    steps = random.randint(8, 20)
+    for t in range(1, steps + 1):
+        progress = t / steps
+        # Quadratic bezier with random control point
+        cp_x = (current['x'] + x) / 2 + random.randint(-30, 30)
+        cp_y = (current['y'] + y) / 2 + random.randint(-20, 20)
+        bx = (1-progress)**2 * current['x'] + 2*(1-progress)*progress * cp_x + progress**2 * x
+        by = (1-progress)**2 * current['y'] + 2*(1-progress)*progress * cp_y + progress**2 * y
+        await page.mouse.move(bx, by)
+        await asyncio.sleep(random.gauss(0.008, 0.003))
+
+import hashlib
+
+def generate_fingerprint(worker_id: str, session_seed: str = "") -> dict:
+    """Deterministic but unique fingerprint per worker+session.
+    Returns dict with font, canvas_noise, webgl_vendor, webgl_renderer, etc."""
+    seed_input = f"{worker_id}:{session_seed or time.time()}"
+    seed = hashlib.sha256(seed_input.encode()).hexdigest()
+
+    fonts = ["Arial", "Times New Roman", "Helvetica", "Georgia", "Courier New", "Verdana"]
+    font = fonts[int(seed[:8], 16) % len(fonts)]
+
+    canvas_noise = int(seed[8:16], 16) % 10
+
+    webgl_vendors = [
+        ("Intel Inc.", "Intel Iris Xe Graphics"),
+        ("NVIDIA Corporation", "NVIDIA GeForce GTX 1660"),
+        ("NVIDIA Corporation", "NVIDIA GeForce RTX 3060"),
+        ("AMD", "AMD Radeon RX 580"),
+        ("Google Inc.", "ANGLE (Intel, Intel Iris Xe Graphics)"),
+        ("Google Inc.", "ANGLE (NVIDIA, NVIDIA GeForce RTX 3060)"),
+        ("Intel Inc.", "ANGLE (Intel, Intel(R) UHD Graphics 620)"),
+    ]
+    vendor, renderer = webgl_vendors[int(seed[16:24], 16) % len(webgl_vendors)]
+
+    color_depths = [24, 24, 24, 30]
+    color_depth = color_depths[int(seed[24:32], 16) % len(color_depths)]
+    pixel_ratio = 1.0 + (int(seed[24:32], 16) % 5) / 10  # 1.0 - 1.4
+
+    return {
+        "font": font,
+        "canvas_noise": canvas_noise,
+        "webgl_vendor": vendor,
+        "webgl_renderer": renderer,
+        "color_depth": color_depth,
+        "pixel_ratio": pixel_ratio,
+    }
+
+
 class DiscordAutomation:
     def __init__(self, headless: bool = False, email: str = "",
                  proxy=None, worker_id: str = "B1"):
@@ -339,6 +424,8 @@ class DiscordAutomation:
         ]
 
         self._ua = random.choice(USER_AGENTS)
+        self._fingerprint = generate_fingerprint(self.worker_id)
+        self._log(f"Fingerprint: font={self._fingerprint['font']}, gpu={self._fingerprint['webgl_renderer'][:30]}..., dpr={self._fingerprint['pixel_ratio']}")
         self._browser = await self._playwright.chromium.launch(headless=self.headless, args=args)
 
         timezones = ['America/New_York','America/Chicago','America/Denver','America/Los_Angeles',
@@ -346,17 +433,9 @@ class DiscordAutomation:
         tz = random.choice(timezones)
         locales = ['en-US','en-GB','en-CA','en-AU']
         loc = random.choice(locales)
-        # Random viewport — common desktop resolutions
-        viewports = [
-            {'width': 860, 'height': 640},
-            {'width': 1024, 'height': 768},
-            {'width': 1280, 'height': 720},
-            {'width': 900, 'height': 700},
-            {'width': 1366, 'height': 768},
-        ]
-        vp = random.choice(viewports)
-        scales = [1, 1.25, 2]
-        dsf = random.choice(scales)
+        # Standard desktop viewport (1920x1080) — most common real resolution
+        vp = {'width': 1920, 'height': 1080}
+        dsf = self._fingerprint['pixel_ratio']
         # Spoof geolocation (Discord sees this)
         geos = [
             {'latitude': 40.7128, 'longitude': -74.0060},   # NYC
@@ -410,6 +489,14 @@ class DiscordAutomation:
 
         await self._context.add_init_script(INIT_SCRIPT)
         self._page = await self._context.new_page()
+
+        # ── Set sec-ch-ua headers for realistic Chrome fingerprint ──
+        await self._page.set_extra_http_headers({
+            "sec-ch-ua": '"Not/A)Brand";v="8", "Chromium";v="130", "Google Chrome";v="130"',
+            "sec-ch-ua-mobile": "?0",
+            "sec-ch-ua-platform": '"Windows"',
+            "accept-language": "en-US,en;q=0.9",
+        })
 
     async def _rebuild_context_with_tor(self) -> bool:
         """Close the context and reopen WITH a fresh TOR circuit."""

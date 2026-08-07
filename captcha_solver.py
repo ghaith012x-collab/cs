@@ -1492,6 +1492,186 @@ class HCaptchaSolver:
 # hCaptcha Accessibility Challenge Solver (Ollama vision)
 # ═══════════════════════════════════════════════════════════════
 
+
+# ═══════════════════════════════════════════════════════════════
+# Animal word list — every known animal name (lowercase)
+# Used for hCaptcha "pick the animal" accessibility challenges
+# ═══════════════════════════════════════════════════════════════
+ANIMAL_WORDS = frozenset([
+    "aardvark","abalone","agouti","albatross","alligator","alpaca","anaconda",
+    "angelfish","angelshark","ant","anteater","antelope","ape","aphid",
+    "armadillo","asp","axolotl","baboon","badger","bandicoot","barnacle",
+    "barracuda","basilisk","bass","bat","bear","beaver","bee","beetle",
+    "bilby","binturong","bison","blackbird","blowfish","bluebird","boa",
+    "bobcat","bongo","bonobo","buffalo","bull","bullfrog","bumblebee",
+    "butterfly","caiman","camel","canary","capybara","caracal","cardinal",
+    "caribou","carp","caterpillar","catfish","cattle","centipede",
+    "chameleon","cheetah","chickadee","chicken","chimpanzee","chinchilla",
+    "chipmunk","cicada","clam","clownfish","coati","cobra","cockatoo",
+    "cockroach","cod","collie","conch","condor","coral","cougar","cow",
+    "coyote","coypu","crab","crane","crayfish","cricket","crocodile",
+    "crow","cuckoo","cuttlefish","deer","dingo","dodo","dog","dolphin",
+    "donkey","dove","dragon","dragonfly","dromedary","duck","dugong",
+    "eagle","earthworm","earwig","echidna","eel","egret","eland",
+    "elephant","elk","emu","ermine","falcon","ferret","finch","firefly",
+    "flamingo","flea","flounder","fly","fossa","fox","frog","gar",
+    "gazelle","gecko","gerbil","gibbon","giraffe","gnat","gnu","goat",
+    "goldfinch","goldfish","goose","gopher","gorilla","grasshopper",
+    "grouper","grouse","gull","guppy","haddock","halibut","hamster",
+    "hare","hawk","hedgehog","heron","herring","hippopotamus","hornet",
+    "horse","hummingbird","husky","hyena","hyrax","ibis","iguana",
+    "impala","indri","jackal","jackrabbit","jaguar","jay","jellyfish",
+    "jerboa","kangaroo","katydid","kinkajou","kiwi","koala","kookaburra",
+    "krill","kudu","ladybug","lamprey","lark","leech","lemming","lemur",
+    "leopard","lion","lizard","llama","lobster","locust","loon","loris",
+    "louse","lynx","macaque","macaw","mackerel","maggot","mallard",
+    "mamba","manatee","mandrill","mantis","marmot","marten","meerkat",
+    "mink","minnow","mockingbird","mole","mongoose","monkey","moose",
+    "mosquito","moth","mouse","mule","muskrat","mussel","narwhal",
+    "nautilus","newt","nightingale","numbat","nuthatch","nutria",
+    "ocelot","octopus","okapi","opossum","orangutan","orca","oriole",
+    "ostrich","otter","owl","ox","oyster","panda","pangolin","panther",
+    "parakeet","parrot","peacock","peafowl","pelican","penguin",
+    "pheasant","phoenix","pig","pigeon","pika","piranha","platypus",
+    "pony","porcupine","porpoise","pronghorn","puffin","pug","puma",
+    "python","quail","quetzal","quokka","quoll","rabbit","raccoon",
+    "rat","rattlesnake","raven","reindeer","rhinoceros","robin",
+    "rooster","salamander","salmon","sandpiper","sardine","sawfish",
+    "scallop","scorpion","seahorse","seal","serval","shark","sheep",
+    "shrew","shrimp","silkworm","silverfish","skink","skunk","sloth",
+    "slug","snail","snake","sparrow","spider","sponge","squid",
+    "squirrel","starfish","starling","stingray","stoat","stork",
+    "sturgeon","swan","swordfish","tadpole","tamarin","tapir",
+    "tarantula","tarpon","tarsier","termite","tern","thrush","tiger",
+    "toad","tortoise","toucan","trout","tuatara","tuna","turkey",
+    "turtle","unicorn","vaquita","vicuna","viper","vole","vulture",
+    "wallaby","walrus","warthog","wasp","weasel","whale","wildebeest",
+    "wolf","wolverine","wombat","woodchuck","woodpecker","worm","wren",
+    "yak","zebra","zebu","zorse",
+    # Dinosaurs
+    "allosaurus","ankylosaurus","apatosaurus","brachiosaurus",
+    "brontosaurus","diplodocus","iguanodon","megalodon","plesiosaur",
+    "pterodactyl","pterosaur","stegosaurus","triceratops",
+    "tyrannosaurus","velociraptor",
+    # Mythical/extinct (some captchas include these)
+    "dragon","griffin","phoenix","pegasus","centaur","hydra",
+    "kraken","leviathan","manticore","minotaur","wyvern",
+    "werewolf","yeti","bigfoot","sasquatch","nessie","chupacabra",
+    # Sea creatures / marine
+    "anemone","coral","jellyfish","manowar","nautilus","urchin",
+    "barnacle","limpet","abalone","conch","whelk","cuttlefish",
+    # Birds - additional
+    "albatross","booby","budgerigar","budgie","bustard","cassowary",
+    "cockatiel","cormorant","curlew","dodo","dunlin","falcon",
+    "flamingo","frigatebird","gannet","godwit","guineafowl",
+    "hoopoe","hornbill","jacana","kestrel","kingfisher","kiwi",
+    "lapwing","magpie","martin","merlin","moorhen","myna","oriole",
+    "osprey","owl","oystercatcher","partridge","pelican","penguin",
+    "petrel","plover","puffin","quail","rail","razorbill",
+    "roadrunner","rook","ruff","sanderling","shearwater","shrike",
+    "skua","skylark","snipe","spoonbill","stilt","stint","swallow",
+    "swift","tanager","titmouse","towhee","turnstone","vireo",
+    "vulture","wagtail","warbler","waxwing","weaver","whimbrel",
+    "whipbird","willet","yellowhammer",
+    # Fish - additional
+    "anchovy","anglerfish","arowana","barracuda","blenny","bream",
+    "burbot","butterflyfish","carp","catla","char","chub","cichlid",
+    "coelacanth","damselfish","darter","dory","dragonet","eel",
+    "filefish","flatfish","flounder","goby","grouper","grunion",
+    "gudgeon","guitarfish","gunnel","gurnard","hagfish","hake",
+    "halfbeak","hamlet","hogfish","icefish","jawfish","killifish",
+    "lamprey","ling","lionfish","loach","mackerel","marlin",
+    "mooneye","mudskipper","mullet","needlefish","opah","parrotfish",
+    "perch","pickerel","pike","pilchard","pipefish","plaice",
+    "pompano","pufferfish","pupfish","rattail","remora","roach",
+    "rockfish","rudderfish","sailfish","salmon","scorpionfish",
+    "sculpin","shad","skate","smelt","snapper","snook","sole",
+    "sprat","stickleback","stingray","stonefish","sturgeon",
+    "sunfish","surgeonfish","swordfish","tang","tarpon","tench",
+    "tetra","tilapia","triggerfish","trout","tuna","turbot",
+    "wahoo","walleye","weakfish","whitefish","whiting","wolffish",
+    "wrasse","yellowtail","zander",
+    # Amphibians & Reptiles - additional
+    "adder","agamid","alligator","anole","axolotl","bullfrog",
+    "caiman","caecilian","chameleon","cobra","copperhead",
+    "cottonmouth","dab","frog","gecko","gharial","gila",
+    "iguana","krait","leopardfrog","mamba","monitor","mudpuppy",
+    "newt","racer","racerunner","rattler","salamander","skink",
+    "snake","springpeeper","taipan","terrapin","toad","tortoise",
+    "treefrog","tuatara","turtle","viper","whiptail",
+    # Insects / Bugs - additional
+    "antlion","aphid","backswimmer","bedbug","bee","beetle",
+    "borer","bristletail","bug","bumblebee","caddisfly","chafer",
+    "chigger","cicada","cockroach","crane","cricket","damselfly",
+    "dobsonfly","dragonfly","earwig","fireant","firefly","flea",
+    "fly","fruitfly","gnat","grasshopper","grub","hornet",
+    "horsefly","hoverfly","katydid","lacewing","ladybug",
+    "lanternfly","leafcutter","leafhopper","lice","locust",
+    "longhorn","louse","mantis","mayfly","midge","mite",
+    "mosquito","moth","planthopper","potatobeetle","psyllid",
+    "roach","robberfly","sawfly","scarab","silkworm","silverfish",
+    "springtail","stinkbug","stonefly","termite","thrips","tick",
+    "tsetse","walkingstick","wasp","weevil","whitefly","yellowjacket",
+    # Arachnids
+    "harvestman","mite","scorpion","spider","tarantula","tick",
+    "vinegaroon","whipscorpion","whipspider",
+    # Mollusks
+    "abalone","arkclam","clam","conch","cowrie","cuttlefish",
+    "geoduck","limpet","mussel","nautilus","octopus","oyster",
+    "periwinkle","quahog","razorclam","scallop","slug","snail",
+    "squid","triton","whelk",
+    # Crustaceans
+    "amphipod","barnacle","copepod","crab","crayfish","isopod",
+    "krill","langoustine","lobster","prawn","sandhopper",
+    "shrimp","sowbug","woodlouse",
+    # Mammals - additional (bats, rodents, primates etc)
+    "agouti","alpaca","anteater","armadillo","ayeaye","baboon",
+    "badger","bandicoot","bat","bear","beaver","bilby","binturong",
+    "bison","bobcat","bonobo","buffalo","bushbaby","camel",
+    "capybara","caracal","caribou","cheetah","chimp","chinchilla",
+    "chipmunk","coati","colobus","colugo","cougar","cow",
+    "coyote","coypu","deer","dhole","dingo","dog","dolphin",
+    "donkey","dormouse","dugong","echidna","eland","elephant",
+    "elk","ermine","fennec","ferret","fisher","fossa","fox",
+    "galago","gazelle","genet","gerbil","gibbon","giraffe",
+    "goat","gopher","gorilla","grysbok","guanaco","hamster",
+    "hare","hedgehog","hippo","hippopotamus","horse","human",
+    "hutia","hyena","hyrax","ibex","impala","indri","jackal",
+    "jaguar","jerboa","kangaroo","kinkajou","koala","kudu",
+    "lemming","lemur","leopard","lion","llama","loris","lynx",
+    "macaque","mammoth","manatee","mandrill","margay","marmoset",
+    "marmot","marten","mastodon","meerkat","mink","mole",
+    "mongoose","monkey","moose","mouse","mule","muntjac","muskox",
+    "muskrat","narwhal","numbat","nutria","nyala","ocelot",
+    "okapi","opossum","orangutan","orca","oryx","otter","panda",
+    "pangolin","panther","peccary","pika","platypus","polecat",
+    "pony","porcupine","possum","potoroo","pronghorn","pudu",
+    "puma","quokka","quoll","rabbit","raccoon","rat","reindeer",
+    "rhino","rhinoceros","sable","saiga","seal","serval",
+    "sheep","shrew","siamang","skunk","sloth","solenodon",
+    "springbok","springhare","squirrel","stoat","sugarglider",
+    "sunbear","tamarin","tapir","tarsier","tiger","topi",
+    "uakari","vicuna","vole","wallaby","walrus","warthog",
+    "waterbuck","weasel","whale","wildebeest","wolf","wolverine",
+    "wombat","woodchuck","yak","zebra","zebu","zorilla","zorro",
+    # Dog breeds (sometimes captchas use these)
+    "beagle","boxer","bulldog","chihuahua","collie","dalmatian",
+    "doberman","greyhound","hound","husky","labrador","mastiff",
+    "poodle","pug","retriever","rottweiler","shepherd","spaniel",
+    "terrier","whippet",
+    # Cat breeds
+    "bengal","birman","burmese","calico","persian","siamese",
+    "sphynx","tabby",
+    # Horse breeds / equines
+    "appaloosa","bronco","clydesdale","colt","filly","gelding",
+    "mare","mustang","palomino","pony","stallion",
+    # Collective / generic
+    "amphibian","animal","arachnid","beast","bird","bovine",
+    "bug","canine","cetacean","crustacean","dinosaur","equine",
+    "feline","finch","fish","fowl","insect","invertebrate",
+    "mammal","marsupial","mollusk","primate","raptor","reptile",
+    "rodent","serpent","ungulate","vertebrate",
+])
 def _eval_arithmetic_chain(expr: str) -> Optional[str]:
     """Evaluate a pure integer arithmetic chain ('5 + 8 + 7', '12 × 3 ÷ 2',
     '10 - 2 - 3') with standard operator precedence. Accepts ASCII and unicode
@@ -2244,6 +2424,9 @@ async def solve_hcaptcha_accessibility(page, iframe,
                     score += 3
                 if re.search(r'\bword\b', line, re.IGNORECASE):
                     score += 2
+                # Animal challenge: "pick the word that is an animal"
+                if re.search(r'\banimal\b|\bcreature\b|\bbeast\b|\bliving\b.*\bthing\b|\bwhich\b.*\banimal\b', line, re.IGNORECASE):
+                    score += 5
                 # numbers reinforce a real math question
                 if re.search(r'\b\d+\b', line):
                     score += 2
@@ -2389,6 +2572,25 @@ async def solve_hcaptcha_accessibility(page, iframe,
             if ans is not None:
                 log(f"[Accessibility] Simple math: '{sm.group(0)}' = {ans}")
                 return ans
+
+        # ── ANIMAL WORD puzzle: given 3 words, pick the animal ──
+        # "seal, trash, bucket" → seal is the animal
+        animal_pat = re.search(
+            r'(?:animal|creature|beast|living\s+thing|which\s+one\s+is)',
+            t, re.IGNORECASE
+        )
+        if animal_pat:
+            # Extract all words from the text (3+ letters)
+            words = re.findall(r'\b([a-zA-Z]{3,})\b', orig)
+            # Filter to only animal words
+            candidates = [w for w in words if w.lower() in ANIMAL_WORDS]
+            if candidates:
+                log(f"[Accessibility] Animal challenge: candidates={candidates} from {words}")
+                return candidates[0]
+            # Broader: normalize and check against ANIMAL_WORDS
+            for w in words:
+                if w.lower() in ANIMAL_WORDS:
+                    return w
 
         # ── PURE NUMBER extraction (e.g. "type the number 42") ──
         num_pat = re.search(r'(?:number|digit|num)\s+[iof]*\s*(\d+)', t)
