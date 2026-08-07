@@ -315,8 +315,12 @@ class DiscordAutomation:
 
         args = [
             '--incognito',
+            '--incognito',  # double-enforce private browsing
             '--no-first-run',
             '--no-default-browser-check',
+            '--disable-restore-session-state',
+            '--disable-session-crashed-bubble',
+            '--aggressive-cache-discard',
             '--disable-blink-features=AutomationDetected',
             '--no-sandbox',
             '--disable-setuid-sandbox',
@@ -375,6 +379,11 @@ class DiscordAutomation:
             'color_scheme': random.choice(['dark', 'light', 'no-preference']),
             'bypass_csp': True,
             'ignore_https_errors': True,
+            # Ensure clean incognito — no storage/cookies/state ever persist
+            'storage_state': None,
+            'no_viewport': False,
+            'reduced_motion': 'no-preference',
+            'forced_colors': 'none',
         }
         if self.proxy:
             p = self.proxy
@@ -432,6 +441,8 @@ class DiscordAutomation:
                 proxy={'server': 'socks5://127.0.0.1:9050'},
                 bypass_csp=True,
                 ignore_https_errors=True,
+                storage_state=None,
+                no_viewport=False,
             )
             await self._context.add_init_script(INIT_SCRIPT)
             self._page = await self._context.new_page()
