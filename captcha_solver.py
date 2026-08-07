@@ -290,7 +290,6 @@ class HSWGenerator:
                 "headless": True,
                 "args": [
                     "--no-sandbox", "--disable-dev-shm-usage",
-                    "--disable-blink-features=AutomationControlled",
                     "--disable-web-security",
                     "--window-size=1920,1080",
                 ],
@@ -2500,12 +2499,24 @@ async def solve_hcaptcha_accessibility(page, iframe,
             t, re.IGNORECASE
         )
         if coin_jar:
-            # Extract ALL numbers from the question and sum them.
-            # Repeats DO count: "put in 5... put in 5" means +5 twice → 9+5+5=19.
-            nums = re.findall(r'\b(\d+)\b', orig)
-            if len(nums) >= 2:
-                total = sum(int(n) for n in nums)
-                log(f"[Accessibility] Coin/jar sum: {'+'.join(nums)} = {total}")
+            # SMART: split by sentences, only sum numbers from sentences
+            # about the jar owner (you/your/jar/put/add). Ignores numbers
+            # from other people (friend/they/he/she).
+            sentences = re.split(r'[.!?]', orig)
+            own_nums = []
+            for sent in sentences:
+                s_lower = sent.lower().strip()
+                if any(w in s_lower for w in ('you', 'your', 'jar', "you're", 'put', 'add', 'placed')):
+                    own_nums.extend(re.findall(r'(\d+)', sent))
+                elif any(w in s_lower for w in ('friend', 'they', 'he', 'she', 'them', 'brother', 'sister')):
+                    continue
+                else:
+                    own_nums.extend(re.findall(r'(\d+)', sent))
+            if not own_nums:
+                own_nums = re.findall(r'(\d+)', orig)
+            if len(own_nums) >= 1:
+                total = sum(int(n) for n in own_nums)
+                log(f"[Accessibility] Coin/jar smart sum: {'+'.join(own_nums)} = {total}")
                 return str(total)
 
         # ── MATH: robust chain detection ──
@@ -2530,10 +2541,13 @@ async def solve_hcaptcha_accessibility(page, iframe,
         # Loose detection: any of remove/drop/delete/strip/take + first + last
         # + letter/character. The "write it backwards/reverse" tail varies, so
         # it is optional. Target word = LAST word of the question sentence.
+        # TIGHTER: require that "first" AND "last" are followed by
+        # "letter"/"character" within a few words. Prevents matching
+        # "remove the first item from the list and the last" (no letter).
         word_pat = re.compile(
             r'(?:remov(?:e|es|ed|ing)?|delet(?:e|es|ed|ing)?|drop|strip|take)\s+(?:out\s+)?(?:the\s+)?'
-            r'(?:first|1st|first\s+letter)\s+(?:and|&)\s+(?:the\s+)?'
-            r'(?:last|last\s+letter)\s+(?:letter|character|char|letters|characters)?s?',
+            r'(?:first|1st)\s+(?:letter|character|char)s?\s+(?:and|&)\s+(?:the\s+)?'
+            r'(?:last)\s+(?:letter|character|char)s?',
             re.IGNORECASE
         )
         if word_pat.search(orig) or (re.search(r'\bremove\b', t)

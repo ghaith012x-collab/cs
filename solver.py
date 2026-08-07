@@ -325,8 +325,7 @@ class HSWGenerator:
                 "headless": True,
                 "args": [
                     "--no-sandbox", "--disable-dev-shm-usage",
-                    "--disable-blink-features=AutomationControlled",
-                    # Disable CSP enforcement entirely so hsw.js WASM runs
+                    # CSP disabled for hsw.js WASM
                     "--disable-web-security",
                     "--window-size=1920,1080",
                 ],

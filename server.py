@@ -406,8 +406,7 @@ class DiscordAutomation:
             '--disable-restore-session-state',
             '--disable-session-crashed-bubble',
             '--aggressive-cache-discard',
-            '--disable-blink-features=AutomationDetected',
-            '--no-sandbox',
+                        '--no-sandbox',
             '--disable-setuid-sandbox',
             '--disable-dev-shm-usage',
             '--disable-extensions',
@@ -489,6 +488,40 @@ class DiscordAutomation:
 
         await self._context.add_init_script(INIT_SCRIPT)
         self._page = await self._context.new_page()
+
+        # ── CDP-based evasion (before any page scripts run) ──
+        cdp = await self._context.new_cdp_session(self._page)
+        await cdp.send("Page.addScriptToEvaluateOnNewDocument", {
+            "source": '''
+                Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+                Object.defineProperty(navigator, 'plugins', {get: () => {
+                    const arr = [
+                        {name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer', description: 'Portable Document Format', length: 1},
+                        {name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai', description: '', length: 1},
+                        {name: 'Native Client', filename: 'internal-nacl-plugin', description: '', length: 2},
+                        {name: 'Widevine Content Decryption Module', filename: 'widevinecdmadapter.dll', description: 'Widevine Content Decryption Module', length: 1},
+                    ];
+                    for (const p of arr) {
+                        p.item = (i) => p[i];
+                        p.namedItem = (n) => p.find(x => x.name === n);
+                    }
+                    Object.defineProperty(arr, 'length', {get: () => 4});
+                    arr.item = (i) => arr[i];
+                    arr.namedItem = (n) => arr.find(x => x.name === n);
+                    arr.refresh = () => {};
+                    return arr;
+                }});
+                window.chrome = { runtime: {}, loadTimes: () => {}, csi: () => {}, app: {} };
+                Object.defineProperty(navigator, 'permissions', {
+                    get: () => ({
+                        query: (args) => Promise.resolve({state: args.name === 'notifications' ? 'prompt' : 'prompt', onchange: null})
+                    })
+                });
+                // Override navigator.hardwareConcurrency
+                const hw = [4, 8, 8, 12, 16];
+                Object.defineProperty(navigator, 'hardwareConcurrency', {get: () => hw[Math.floor(Math.random() * hw.length)]});
+            '''
+        })
 
         # ── Set sec-ch-ua headers for realistic Chrome fingerprint ──
         await self._page.set_extra_http_headers({
@@ -1126,6 +1159,21 @@ class DiscordAutomation:
 
     async def _fill_registration_form(self) -> bool:
         try:
+            # ── Human browsing delay: 30-60s of "reading" before interacting ──
+            browse_delay = random.uniform(30, 60)
+            self._log(f"Browsing delay: {browse_delay:.0f}s (human-like reading)...")
+            # Scroll slowly down the page like a human reading
+            scroll_steps = random.randint(4, 8)
+            for s in range(scroll_steps):
+                await self._page.evaluate(f"window.scrollBy(0, {random.randint(100, 400)})")
+                await asyncio.sleep(random.uniform(2.0, 5.0))
+            # Random mouse movement to look human
+            await self._page.mouse.move(
+                random.randint(200, 1600),
+                random.randint(200, 800)
+            )
+            await asyncio.sleep(random.uniform(2.0, 5.0))
+
             self._log("=" * 40)
             self._log("FILLING REGISTRATION FORM")
             self._log("=" * 40)
@@ -1221,8 +1269,10 @@ class DiscordAutomation:
                 await self.capture_screenshot()
                 return False
 
-            await email_input.fill(self._email)
-            await self._human_pause()
+            await email_input.click()
+            await asyncio.sleep(random.uniform(0.4, 0.9))
+            await human_type(self._page, 'input[name="email"]', self._email)
+            await asyncio.sleep(random.uniform(0.5, 1.2))
 
             # Generate username
             consonants = 'bcdfghjklmnpqrstvwxyz'
@@ -1236,14 +1286,19 @@ class DiscordAutomation:
             self._log(f"Display name: {display_name}")
             try:
                 await self._page.wait_for_selector('input[name="global_name"]', timeout=5000)
-                await self._page.locator('input[name="global_name"]').fill(display_name)
+                await self._page.locator('input[name="global_name"]').click()
+                await asyncio.sleep(random.uniform(0.3, 0.7))
+                await human_type(self._page, 'input[name="global_name"]', display_name)
+                await asyncio.sleep(random.uniform(0.4, 1.0))
             except:
                 pass
             await self._human_pause()
 
             self._log(f"Username: {self._username}")
-            await self._page.locator('input[name="username"]').fill(self._username)
-            await self._human_pause()
+            await self._page.locator('input[name="username"]').click()
+            await asyncio.sleep(random.uniform(0.4, 0.9))
+            await human_type(self._page, 'input[name="username"]', self._username)
+            await asyncio.sleep(random.uniform(0.5, 1.2))
 
             # Generate password
             first = random.choice('ABCDEFGHJKLMNPQRSTUVWXYZ')
@@ -1254,8 +1309,10 @@ class DiscordAutomation:
             self._password = first + body + random.choice(specials) + str(random.randint(1, 99))
 
             self._log("Filling password")
-            await self._page.locator('input[name="password"]').fill(self._password)
-            await self._human_pause()
+            await self._page.locator('input[name="password"]').click()
+            await asyncio.sleep(random.uniform(0.4, 0.9))
+            await human_type(self._page, 'input[name="password"]', self._password)
+            await asyncio.sleep(random.uniform(0.5, 1.2))
 
             # DOB
             month_val = random.randint(1, 12)
