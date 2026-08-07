@@ -1159,21 +1159,6 @@ class DiscordAutomation:
 
     async def _fill_registration_form(self) -> bool:
         try:
-            # ── Human browsing delay: 30-60s of "reading" before interacting ──
-            browse_delay = random.uniform(30, 60)
-            self._log(f"Browsing delay: {browse_delay:.0f}s (human-like reading)...")
-            # Scroll slowly down the page like a human reading
-            scroll_steps = random.randint(4, 8)
-            for s in range(scroll_steps):
-                await self._page.evaluate(f"window.scrollBy(0, {random.randint(100, 400)})")
-                await asyncio.sleep(random.uniform(2.0, 5.0))
-            # Random mouse movement to look human
-            await self._page.mouse.move(
-                random.randint(200, 1600),
-                random.randint(200, 800)
-            )
-            await asyncio.sleep(random.uniform(2.0, 5.0))
-
             self._log("=" * 40)
             self._log("FILLING REGISTRATION FORM")
             self._log("=" * 40)
