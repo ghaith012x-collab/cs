@@ -299,8 +299,9 @@ class DiscordAutomation:
             ctx_opts['proxy'] = {'server': 'socks5://127.0.0.1:9050'}
             await asyncio.sleep(2)
         else:
-            self._log("[Direct] No proxy - using direct connection (Railway IP)", level="warn")
+            self._log("[TOR] [FATAL] TOR SOCKS5 (127.0.0.1:9050) NOT reachable - TOR-only mode requires TOR running on this instance", level="error")
             self._tor_enabled = False
+            raise RuntimeError("TOR not available - TOR-only mode requires TOR on 127.0.0.1:9050")
 
         self._context = await self._browser.new_context(**ctx_opts)
         self._log(f"User-Agent: {self._ua[:60]}...")
@@ -334,7 +335,7 @@ class DiscordAutomation:
         self.proxy = new_proxy
         try:
             await self._build_context()
-            label = 'proxy ' + str(new_proxy.get('key','?')[:40]) if new_proxy else 'direct/TOR'
+            label = 'proxy ' + str(new_proxy.get('key','?')[:40]) if new_proxy else 'fresh TOR circuit'
             self._log(f"[Switch] Context rebuilt with {label}")
             return True
         except Exception as e:
@@ -386,8 +387,9 @@ class DiscordAutomation:
         """Navigate to discord.com/register — single attempt, no retries.
 
         If the form doesn't render, we return False immediately so the worker
-        can rotate to the next proxy. Retrying the same URL with the same
-        proxy is pointless — if Discord blocked us, it won't unblock on retry."""
+        can rotate to a fresh TOR circuit. Retrying the same URL on the same
+        circuit is pointless — if Discord blocked that exit node, it won't
+        unblock on retry."""
         url = "https://discord.com/register"
         timeout_ms = 90000
 
@@ -415,7 +417,7 @@ class DiscordAutomation:
             (not page_title and "error" in (page_url or "").lower())
         )
         if dead_proxy:
-            self._log(f"[Nav] DEAD PROXY (url={page_url[:60]}) - returning to worker for next proxy", level="warn")
+            self._log(f"[Nav] TOR CIRCUIT DEAD (url={page_url[:60]}) - rotating to fresh TOR circuit", level="warn")
             return False
 
         # ── Quick body text check (403/Forbidden/Cloudflare) ──
@@ -558,7 +560,7 @@ class DiscordAutomation:
         except Exception:
             pass
 
-        self._log("[Nav] Form did not render within 30s - returning to worker for next proxy", level="warn")
+        self._log("[Nav] Form did not render within 30s - rotating to fresh TOR circuit", level="warn")
         return False
 
     async def capture_screenshot(self) -> str:
