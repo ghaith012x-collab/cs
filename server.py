@@ -612,6 +612,23 @@ class DiscordAutomation:
                 page_url = "(unknown)"
             self._log('[Nav] Page: title="' + str(page_title)[:80] + '" url=' + str(page_url)[:80])
 
+            # ── Dead proxy detection ──
+            # If the proxy can't even reach Discord, the URL will be chrome-error://
+            # or the page will be completely blank. Don't waste time polling.
+            dead_proxy = (
+                "chrome-error://" in (page_url or "") or
+                "about:blank" == (page_url or "") or
+                (not page_title and "error" in (page_url or "").lower())
+            )
+            if dead_proxy:
+                self._log(f"[Nav] DEAD PROXY on attempt {attempt} (url={page_url[:60]}) - skipping to next attempt", level="warn")
+                if self._tor_enabled and attempt < 3:
+                    await self._rebuild_context_with_tor()
+                    await asyncio.sleep(2)
+                elif attempt < 3:
+                    await asyncio.sleep(2)
+                continue  # on attempt 3, continue ends the loop -> return False
+
             # ── Cloudflare / block detection ──
             blocked_keywords = ["attention required", "just a moment", "blocked",
                                "cloudflare", "ddos-guard", "captcha",
