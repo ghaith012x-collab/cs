@@ -2805,60 +2805,101 @@ async def solve_hcaptcha_accessibility(page, iframe,
             log(f"[Accessibility] Ollama text error: {e}", level="warn")
             return ""
 
+    def _clean_llm_answer(raw: str) -> str:
+        """Normalize an LLM answer: lowercase, strip punctuation,
+        keep up to 3 words (captcha answers can be phrases like
+        'dog food' or 'living room'). Returns '' if empty."""
+        if not raw:
+            return ""
+        # Lowercase, drop quotes/brackets/periods but keep word separators
+        s = re.sub(r"[\"'`\[\](){}<>]", "", raw)
+        s = s.replace(".", " ").replace(",", " ").replace(";", " ").replace(":", " ")
+        s = s.replace("\n", " ").replace("\t", " ").replace("-", " ")
+        words = [w for w in s.lower().split() if re.search(r"[a-z0-9]", w)]
+        if not words:
+            return ""
+        # Drop filler words that sometimes leak out
+        stop = {"the", "a", "an", "is", "are", "it", "of", "to", "in", "for",
+                "answer", "with", "and", "or", "be", "please"}
+        cleaned = [w for w in words if w not in stop]
+        if not cleaned:
+            return ""
+        return " ".join(cleaned[:3])
+
     async def _llm_answer_question(question: str, timeout: float = 40.0) -> str:
-        """Ask ANY LLM for a single-word answer. Tries in order:
-        1. Ollama (OLLAMA_URL env) — the existing vision/text endpoint
-        2. OpenAI-compatible endpoint (LLM_API_URL, LLM_API_KEY, LLM_MODEL env)
-        Returns the answer or empty string."""
+        """Layer 3: ask ANY LLM for the answer to an unknown question.
+        Tries in order (each with up to 2 retries):
+        1. Ollama (OLLAMA_URL env)
+        2. OpenAI-compatible endpoint (LLM_API_URL + LLM_API_KEY + LLM_MODEL env)
+        Returns the cleaned answer or empty string."""
         import asyncio
 
-        # ── Option 1: Ollama ──
-        if ollama_url:
-            ans = await _ollama_answer_text(question, timeout=timeout)
-            if ans:
-                return ans
+        question = (question or "").strip()[:500]
+        if not question:
+            return ""
 
-        # ── Option 2: OpenAI-compatible endpoint ──
         api_url = os.environ.get("LLM_API_URL") or os.environ.get("OPENAI_BASE_URL") or ""
         api_key = os.environ.get("LLM_API_KEY") or os.environ.get("OPENAI_API_KEY") or ""
         model = os.environ.get("LLM_MODEL") or "gpt-4o-mini"
-        if not api_url:
+
+        # Log once if NOTHING is configured — user needs to know Layer 3 is inert
+        if not ollama_url and not api_url:
+            log("[Accessibility] [WARN] Unknown question and NO LLM configured — "
+                "set OLLAMA_URL or LLM_API_URL/LLM_API_KEY/LLM_MODEL to solve any question",
+                level="warn")
             return ""
-        try:
-            import aiohttp
-            endpoint = api_url.rstrip("/")
-            if not endpoint.endswith("/chat/completions"):
-                endpoint += "/chat/completions"
-            headers = {"Content-Type": "application/json"}
-            if api_key:
-                headers["Authorization"] = "Bearer " + api_key
-            payload = {
-                "model": model,
-                "messages": [
-                    {"role": "system", "content": (
-                        "You are solving a CAPTCHA accessibility question. "
-                        "Answer with exactly ONE word, number, or short phrase. "
-                        "No punctuation, no explanation, no quotes, lowercase."
-                    )},
-                    {"role": "user", "content": "Question: " + question},
-                ],
-                "temperature": 0,
-                "max_tokens": 20,
-            }
-            async with aiohttp.ClientSession(
-                timeout=aiohttp.ClientTimeout(total=timeout)
-            ) as session:
-                async with session.post(endpoint, json=payload, headers=headers) as resp:
-                    if resp.status != 200:
-                        log(f"[Accessibility] LLM API error {resp.status}", level="warn")
-                        return ""
-                    data = await resp.json()
-                    content = data["choices"][0]["message"]["content"]
-                    m = re.search(r"[a-z0-9]+", content.strip().lower())
-                    return m.group(0) if m else ""
-        except Exception as e:
-            log(f"[Accessibility] LLM API error: {e}", level="warn")
-            return ""
+
+        for attempt in range(1, 3):  # up to 2 attempts per provider round
+            # ── Option 1: Ollama ──
+            if ollama_url:
+                ans = await _ollama_answer_text(question, timeout=timeout)
+                cleaned = _clean_llm_answer(ans)
+                if cleaned:
+                    return cleaned
+
+            # ── Option 2: OpenAI-compatible endpoint ──
+            if api_url:
+                try:
+                    import aiohttp
+                    endpoint = api_url.rstrip("/")
+                    if not endpoint.endswith("/chat/completions"):
+                        endpoint += "/chat/completions"
+                    headers = {"Content-Type": "application/json"}
+                    if api_key:
+                        headers["Authorization"] = "Bearer " + api_key
+                    payload = {
+                        "model": model,
+                        "messages": [
+                            {"role": "system", "content": (
+                                "You are solving a CAPTCHA accessibility question. "
+                                "Answer with exactly ONE word, number, or short phrase. "
+                                "No punctuation, no explanation, no quotes, lowercase."
+                            )},
+                            {"role": "user", "content": "Question: " + question},
+                        ],
+                        "temperature": 0,
+                        "max_tokens": 20,
+                    }
+                    async with aiohttp.ClientSession(
+                        timeout=aiohttp.ClientTimeout(total=timeout)
+                    ) as session:
+                        async with session.post(endpoint, json=payload, headers=headers) as resp:
+                            if resp.status != 200:
+                                log(f"[Accessibility] LLM API error {resp.status}", level="warn")
+                            else:
+                                data = await resp.json()
+                                raw = data["choices"][0]["message"]["content"]
+                                cleaned = _clean_llm_answer(raw)
+                                if cleaned:
+                                    return cleaned
+                except Exception as e:
+                    log(f"[Accessibility] LLM API error: {e}", level="warn")
+
+            if attempt == 1:
+                log("[Accessibility] LLM returned nothing — retrying once...", level="warn")
+                await asyncio.sleep(1.0)
+
+        return ""
 
     async def _screenshot_b64(target, selector: str | None = None) -> str:
         """Capture a screenshot as base64 PNG."""
@@ -3597,21 +3638,26 @@ async def solve_hcaptcha_accessibility(page, iframe,
         return None
 
     async def _get_answer(hcaptcha, q: int) -> Optional[str]:
-        """Get the answer: EXTREME DOM text scan -> local solver.
-        No Ollama. No screenshots. Just read text and do math."""
+        """Get the answer with 3 layers:
+        Layer 1: regex patterns (513)   — exact phrasings
+        Layer 2: semantic topic table   — any phrasing containing topics
+        Layer 3: LLM fallback           — ANY unknown question → Ollama / OpenAI-compatible"""
         text = await _read_question_text()
         log(f"[Accessibility] Q{q} text: '{text[:200]}'")
         if text:
+            # ── Layers 1+2: local KB ──
             local = _solve_text_question(text)
             if local is not None:
-                log(f"[Accessibility] Q{q} solved: {local}")
+                log(f"[Accessibility] Q{q} solved locally: {local}")
                 return local
-            log(f"[Accessibility] Q{q} local solver returned None — trying LLM", level="warn")
-            # LLM fallback for natural-language questions the KB misses
-            ans = await _llm_answer_question(text[:400])
+
+            # ── Layer 3: unknown question → LLM ──
+            log(f"[Accessibility] Q{q} UNKNOWN question (no local match) — calling Layer 3 LLM", level="warn")
+            ans = await _llm_answer_question(text)
             if ans:
-                log(f"[Accessibility] Q{q} LLM answered: {ans}")
+                log(f"[Accessibility] Q{q} Layer 3 LLM answered: {ans}")
                 return ans
+            log(f"[Accessibility] Q{q} Layer 3 could not answer either", level="error")
         else:
             log(f"[Accessibility] Q{q} NO TEXT FOUND anywhere", level="error")
         return None
