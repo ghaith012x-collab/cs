@@ -79,200 +79,8 @@ USER_AGENTS = [
 
 PAST_CAPTCHA_KEYWORDS = ['/channels', '/verify', '/welcome', '/login', '@me', 'discord.com/app']
 
-INIT_SCRIPT = """
-// ==============================================
-// Anti-detection: incognito + humanized fingerprints v2
-// ==============================================
-(function(){
-  // --- Hide that we're in incognito ---
-  Object.defineProperty(navigator, 'cookieEnabled', { get: () => true });
+INIT_SCRIPT = """// ==============================================// Minimal anti-detection — only what matters// NO canvas/audio/WebGL noise (those break Discord's React)// ==============================================(function(){  // --- #1 most important: hide webdriver ---  Object.defineProperty(navigator, 'webdriver', { get: () => undefined });  // --- Fake navigator properties ---  const platforms = ['Win32', 'Win32', 'MacIntel', 'Linux x86_64'];  const cores = [4, 8, 8, 12, 16, 16];  const mem = [4, 8, 8, 16, 16, 32];  const touches = [0, 0, 0, 0, 0, 0, 5];  const p = platforms[Math.floor(Math.random() * platforms.length)];  const c = cores[Math.floor(Math.random() * cores.length)];  const m = mem[Math.floor(Math.random() * mem.length)];  const t = touches[Math.floor(Math.random() * touches.length)];  Object.defineProperty(navigator, 'languages', { get: () => Object.freeze(['en-US', 'en']) });  Object.defineProperty(navigator, 'platform', { get: () => p });  Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => c });  Object.defineProperty(navigator, 'deviceMemory', { get: () => m });  Object.defineProperty(navigator, 'maxTouchPoints', { get: () => t });  Object.defineProperty(navigator, 'vendor', { get: () => 'Google Inc.' });  // --- #2: Fake plugins array (empty = bot, must have 3+) ---  Object.defineProperty(navigator, 'plugins', {    get: () => {      const arr = [        { name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },        { name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai', description: '' },        { name: 'Native Client', filename: 'internal-nacl-plugin', description: '' },      ];      arr.item = (i) => arr[i];      arr.namedItem = (n) => arr.find(x => x.name === n);      arr.refresh = () => {};      Object.defineProperty(arr, 'length', { get: () => 3 });      return arr;    }  });  // --- #3: Fake mimeTypes ---  Object.defineProperty(navigator, 'mimeTypes', {    get: () => {      const arr = [        { type: 'application/pdf', description: 'Portable Document Format', suffixes: 'pdf' },        { type: 'text/pdf', description: 'Portable Document Format', suffixes: 'pdf' },      ];      arr.item = (i) => arr[i];      arr.namedItem = (n) => arr.find(x => x.type === n);      Object.defineProperty(arr, 'length', { get: () => 2 });      return arr;    }  });  // --- #4: chrome.runtime must exist ---  Object.defineProperty(window, 'chrome', { get: () => ({ runtime: {} }), set: () => {} });  // --- Delete automation traces ---  delete window.__playwright;  delete window.__pw_manual;  delete window.__pw_init;  delete window.__nightmare;  delete window._phantom;  delete window.callPhantom;  delete window.Buffer;  delete window.emit;  delete window.spawn;  delete window.webdriver;  delete window.domAutomation;  delete window.domAutomationController;  // --- permissions.query must work ---  const origQuery = window.navigator.permissions.query;  if (origQuery) {    window.navigator.permissions.query = (parameters) => (      parameters.name === 'notifications'        ? Promise.resolve({ state: Notification.permission, onchange: null })        : origQuery(parameters)    );  }})();"""
 
-  // --- Canvas fingerprint noise ---
-  const origToDataURL = HTMLCanvasElement.prototype.toDataURL;
-  HTMLCanvasElement.prototype.toDataURL = function(type) {
-    const ctx = this.getContext('2d');
-    if (ctx) {
-      const w = this.width, h = this.height;
-      const imgData = ctx.getImageData(0, 0, Math.min(w, 10), Math.min(h, 10));
-      for (let i = 0; i < Math.min(imgData.data.length, 20); i += 4) {
-        imgData.data[i] = imgData.data[i] ^ (Math.floor(Math.random() * 3) - 1);
-      }
-      ctx.putImageData(imgData, 0, 0);
-    }
-    return origToDataURL.apply(this, arguments);
-  };
-  const origToBlob = HTMLCanvasElement.prototype.toBlob;
-  HTMLCanvasElement.prototype.toBlob = function(cb, type) {
-    const ctx = this.getContext('2d');
-    if (ctx) {
-      const w = this.width, h = this.height;
-      const imgData = ctx.getImageData(0, 0, Math.min(w, 10), Math.min(h, 10));
-      for (let i = 0; i < Math.min(imgData.data.length, 20); i += 4) {
-        imgData.data[i] = imgData.data[i] ^ (Math.floor(Math.random() * 3) - 1);
-      }
-      ctx.putImageData(imgData, 0, 0);
-    }
-    return origToBlob.apply(this, arguments);
-  };
-
-  // --- WebGL fingerprint ---
-  const vendors = ['Google Inc. (Intel)', 'Google Inc. (NVIDIA)', 'Google Inc. (AMD)', 'Google Inc.'];
-  const renderers = [
-    'ANGLE (Intel, Intel(R) UHD Graphics 620 Direct3D11 vs_5_0 ps_5_0)',
-    'ANGLE (NVIDIA, NVIDIA GeForce RTX 3060 Direct3D11 vs_5_0 ps_5_0)',
-    'ANGLE (AMD, AMD Radeon RX 580 Direct3D11 vs_5_0 ps_5_0)',
-    'ANGLE (Intel, Intel(R) Iris Xe Graphics Direct3D11 vs_5_0 ps_5_0)',
-    'ANGLE (NVIDIA, NVIDIA GeForce GTX 1660 Direct3D11 vs_5_0 ps_5_0)',
-  ];
-  const pick = Math.floor(Math.random() * vendors.length);
-  const vendor = vendors[pick];
-  const renderer = renderers[pick];
-  try {
-    const getParam = WebGLRenderingContext.prototype.getParameter;
-    WebGLRenderingContext.prototype.getParameter = function(p) {
-      if (p === 37445) return vendor;   // UNMASKED_VENDOR_WEBGL
-      if (p === 37446) return renderer; // UNMASKED_RENDERER_WEBGL
-      return getParam.call(this, p);
-    };
-    const getParam2 = WebGL2RenderingContext.prototype.getParameter;
-    WebGL2RenderingContext.prototype.getParameter = function(p) {
-      if (p === 37445) return vendor;
-      if (p === 37446) return renderer;
-      return getParam2.call(this, p);
-    };
-  } catch(e) {}
-
-  // --- AudioContext fingerprint ---
-  try {
-    const origGetChannelData = AudioBuffer.prototype.getChannelData;
-    AudioBuffer.prototype.getChannelData = function(channel) {
-      const data = origGetChannelData.call(this, channel);
-      for (let i = 0; i < Math.min(data.length, 10); i++) {
-        data[i] = data[i] + (Math.random() * 1e-10 - 5e-11);
-      }
-      return data;
-    };
-    const origCreateAnalyser = AudioContext.prototype.createAnalyser;
-    AudioContext.prototype.createAnalyser = function() {
-      const analyser = origCreateAnalyser.call(this);
-      const origGetFloatFreq = analyser.getFloatFrequencyData;
-      analyser.getFloatFrequencyData = function(arr) {
-        origGetFloatFreq.call(this, arr);
-        for (let i = 0; i < Math.min(arr.length, 5); i++) {
-          arr[i] = arr[i] + (Math.random() * 1e-10 - 5e-11);
-        }
-      };
-      return analyser;
-    };
-  } catch(e) {}
-
-  // --- Navigator properties ---
-  const platforms = ['Win32', 'Win32', 'MacIntel', 'Linux x86_64'];
-  const cores = [4, 8, 8, 12, 16, 16];
-  const mem = [4, 8, 8, 16, 16, 32];
-  const touches = [0, 0, 0, 0, 0, 0, 5];
-  const p = platforms[Math.floor(Math.random() * platforms.length)];
-  const c = cores[Math.floor(Math.random() * cores.length)];
-  const m = mem[Math.floor(Math.random() * mem.length)];
-  const t = touches[Math.floor(Math.random() * touches.length)];
-
-  Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-  Object.defineProperty(navigator, 'languages', { get: () => Object.freeze(['en-US', 'en']) });
-  Object.defineProperty(navigator, 'platform', { get: () => p });
-  Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => c });
-  Object.defineProperty(navigator, 'deviceMemory', { get: () => m });
-  Object.defineProperty(navigator, 'maxTouchPoints', { get: () => t });
-  Object.defineProperty(navigator, 'vendor', { get: () => 'Google Inc.' });
-  Object.defineProperty(navigator, 'productSub', { get: () => '20030107' });
-  Object.defineProperty(navigator, 'appVersion', { get: () => navigator.userAgent.replace('Mozilla/', '') });
-
-  // --- Hide Chrome automation ---
-  if (window.chrome) { window.chrome.runtime = {}; }
-  delete window.__nightmare;
-  delete window._phantom;
-  delete window.callPhantom;
-  delete window.Buffer;
-  Object.defineProperty(window, 'chrome', { get: () => ({ runtime: {} }), set: () => {} });
-
-  // --- Delete Playwright-specific properties ---
-  delete window.__playwright;
-  delete window.__pw_manual;
-  delete window.__pw_init;
-
-  // --- Plugins array ---
-  Object.defineProperty(navigator, 'plugins', {
-    get: () => {
-      const arr = [
-        { name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
-        { name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai', description: '' },
-        { name: 'Native Client', filename: 'internal-nacl-plugin', description: '' },
-      ];
-      arr.item = (i) => arr[i];
-      arr.namedItem = (n) => arr.find(x => x.name === n);
-      arr.refresh = () => {};
-      Object.defineProperty(arr, 'length', { get: () => 3 });
-      return arr;
-    }
-  });
-
-  // --- Mime types ---
-  Object.defineProperty(navigator, 'mimeTypes', {
-    get: () => {
-      const arr = [
-        { type: 'application/pdf', description: 'Portable Document Format', suffixes: 'pdf' },
-        { type: 'text/pdf', description: 'Portable Document Format', suffixes: 'pdf' },
-      ];
-      arr.item = (i) => arr[i];
-      arr.namedItem = (n) => arr.find(x => x.type === n);
-      Object.defineProperty(arr, 'length', { get: () => 2 });
-      return arr;
-    }
-  });
-
-  // --- Permissions ---
-  const origQuery = window.navigator.permissions.query;
-  window.navigator.permissions.query = function(args) {
-    if (args.name === 'notifications') return Promise.resolve({ state: 'prompt', onchange: null });
-    if (args.name === 'camera') return Promise.resolve({ state: 'prompt', onchange: null });
-    if (args.name === 'microphone') return Promise.resolve({ state: 'prompt', onchange: null });
-    return origQuery.apply(this, arguments);
-  };
-
-  // --- Battery API spoof ---
-  try {
-    navigator.getBattery = function() {
-      return Promise.resolve({
-        charging: true,
-        chargingTime: 0,
-        dischargingTime: Infinity,
-        level: 0.92 + Math.random() * 0.08,
-        onchargingchange: null,
-        onchargingtimechange: null,
-        ondischargingtimechange: null,
-        onlevelchange: null,
-      });
-    };
-  } catch(e) {}
-
-  // --- Screen (matches random viewport) ---
-  const screenW = screen.width || 1920;
-  const screenH = screen.height || 1080;
-  Object.defineProperty(screen, 'colorDepth', { get: () => 24 });
-  Object.defineProperty(screen, 'pixelDepth', { get: () => 24 });
-  Object.defineProperty(screen, 'availWidth', { get: () => screenW });
-  Object.defineProperty(screen, 'availHeight', { get: () => screenH - 40 });
-
-  // --- Connection type ---
-  Object.defineProperty(navigator, 'connection', {
-    get: () => ({
-      effectiveType: '4g',
-      rtt: 50,
-      downlink: 10,
-      saveData: false,
-    })
-  });
-})();
-"""
 
 NAV_TIMEOUT_MS = 60000
 
@@ -499,31 +307,10 @@ class DiscordAutomation:
         await self._context.add_init_script(INIT_SCRIPT)
         self._page = await self._context.new_page()
 
+        # CDP-level webdriver removal — runs BEFORE init scripts, catches early checks
         cdp = await self._context.new_cdp_session(self._page)
         await cdp.send("Page.addScriptToEvaluateOnNewDocument", {
-            "source": ("""
-                Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
-                Object.defineProperty(navigator, 'plugins', {get: () => {
-                    const arr = [
-                        {name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer', description: 'Portable Document Format', length: 1},
-                        {name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai', description: '', length: 1},
-                        {name: 'Native Client', filename: 'internal-nacl-plugin', description: '', length: 2},
-                        {name: 'Widevine Content Decryption Module', filename: 'widevinecdmadapter.dll', description: 'Widevine Content Decryption Module', length: 1},
-                    ];
-                    for (const p of arr) { p.item = (i) => p[i]; p.namedItem = (n) => p.find(x => x.name === n); }
-                    Object.defineProperty(arr, 'length', {get: () => 4});
-                    arr.item = (i) => arr[i];
-                    arr.namedItem = (n) => arr.find(x => x.name === n);
-                    arr.refresh = () => {};
-                    return arr;
-                }});
-                window.chrome = { runtime: {}, loadTimes: () => {}, csi: () => {}, app: {} };
-                Object.defineProperty(navigator, 'permissions', {
-                    get: () => ({ query: (args) => Promise.resolve({state: args.name === 'notifications' ? 'prompt' : 'prompt', onchange: null}) })
-                });
-                const hw = [4, 8, 8, 12, 16];
-                Object.defineProperty(navigator, 'hardwareConcurrency', {get: () => hw[Math.floor(Math.random() * hw.length)]});
-            """)
+            "source": "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
         })
         await self._page.set_extra_http_headers({
             "sec-ch-ua": '"Not/A)Brand";v="8", "Chromium";v="130", "Google Chrome";v="130"',
@@ -596,189 +383,164 @@ class DiscordAutomation:
             return False
 
     async def _goto_register(self) -> bool:
-        """Navigate to discord.com/register — simple, reliable.
+        """Navigate to discord.com/register — single attempt, no retries.
 
-        Discord is a React SPA. The key insight: just navigate and wait.
-        We use a generous timeout because free proxies are slow.  After
-        the page loads we verify the React app-mount rendered and check
-        for Cloudflare blocks.
-        """
+        If the form doesn't render, we return False immediately so the worker
+        can rotate to the next proxy. Retrying the same URL with the same
+        proxy is pointless — if Discord blocked us, it won't unblock on retry."""
         url = "https://discord.com/register"
-        timeout_ms = 90000  # 90 seconds — free proxies need this
+        timeout_ms = 90000
 
-        for attempt in range(1, 4):
-            self._log(f"[Nav] Navigating to {url} (attempt {attempt}/3, timeout={timeout_ms}ms)...")
+        self._log(f"[Nav] Navigating to {url} (timeout={timeout_ms}ms)...")
+        try:
+            await self._page.goto(url, wait_until="load", timeout=timeout_ms)
+            self._log("[Nav] Page loaded successfully")
+        except Exception as e:
+            err = str(e)[:120]
+            self._log(f"[Nav] Page.goto error: {err}", level="warn")
+
+        # ── Check what we got ──
+        try:
+            page_title = await asyncio.wait_for(self._page.title(), timeout=3.0)
+            page_url = await asyncio.wait_for(self._page.evaluate("location.href"), timeout=3.0)
+        except Exception:
+            page_title = "(unknown)"
+            page_url = "(unknown)"
+        self._log('[Nav] Page: title="' + str(page_title)[:80] + '" url=' + str(page_url)[:80])
+
+        # ── Dead proxy (cannot reach Discord at all) ──
+        dead_proxy = (
+            "chrome-error://" in (page_url or "") or
+            "about:blank" == (page_url or "") or
+            (not page_title and "error" in (page_url or "").lower())
+        )
+        if dead_proxy:
+            self._log(f"[Nav] DEAD PROXY (url={page_url[:60]}) - returning to worker for next proxy", level="warn")
+            return False
+
+        # ── Quick body text check (403/Forbidden/Cloudflare) ──
+        try:
+            body_text = await asyncio.wait_for(
+                self._page.evaluate("document.body ? document.body.innerText.substring(0, 500) : ''"),
+                timeout=3.0)
+            if body_text and any(kw in body_text.lower() for kw in ("forbidden", "403 forbidden", "access denied", "cloudflare", "attention required")):
+                self._log(f"[Nav] BLOCKED — body contains: {body_text[:100]}", level="warn")
+                return False
+        except Exception:
+            pass
+
+        # ── Block keywords in title ──
+        blocked_keywords = ["attention required", "just a moment", "blocked",
+                           "cloudflare", "ddos-guard", "captcha",
+                           "checking your browser", "verify you are human",
+                           "forbidden", "403", "access denied",
+                           "you do not have permission", "error 1020"]
+        title_lower = (page_title or "").lower()
+        if any(kw in title_lower for kw in blocked_keywords):
+            self._log('[Nav] BLOCKED by Cloudflare/firewall (title: "' + str(page_title)[:60] + '")', level="warn")
+            return False
+
+        # ── Check if Discord SPA shell loaded ──
+        try:
+            app_mount = await asyncio.wait_for(
+                self._page.evaluate("document.querySelector('#app-mount') !== null"),
+                timeout=5.0)
+            if app_mount:
+                self._log("[Nav] Discord SPA app-mount detected")
+        except Exception:
+            app_mount = False
+
+        # ── Poll for form elements ──
+        # Discord uses aria-label on inputs, not name/id — use broad selectors
+        self._log("[Nav] Waiting for registration form to render...")
+        for poll_sec in range(1, 31):
             try:
-                await self._page.goto(url, wait_until="load", timeout=timeout_ms)
-                self._log(f"[Nav] Page loaded successfully (attempt {attempt})")
-                # Quick check: did we actually get Discord or a block page?
-                try:
-                    body_text = await asyncio.wait_for(
-                        self._page.evaluate("document.body ? document.body.innerText.substring(0, 500) : ''"),
-                        timeout=3.0)
-                    if body_text and any(kw in body_text.lower() for kw in ("forbidden", "403 forbidden", "access denied", "cloudflare", "attention required")):
-                        self._log(f"[Nav] Page body contains block text! Content: {body_text[:120]}", level="warn")
-                        if self._tor_enabled and attempt < 3:
-                            self._log("[Nav] Rotating TOR circuit...")
-                            await self._rebuild_context_with_tor()
-                            await asyncio.sleep(2)
-                        elif attempt < 3:
-                            await asyncio.sleep(1)
-                        continue  # skip polling, go straight to next attempt
-                except Exception:
-                    pass
-            except Exception as e:
-                err = str(e)[:120]
-                self._log(f"[Nav] Page.goto error (attempt {attempt}): {err}", level="warn")
-                # Even after timeout, the page may have partially loaded. Check.
-
-            # ── Check what we got ──
-            try:
-                page_title = await asyncio.wait_for(self._page.title(), timeout=3.0)
-                page_url = await asyncio.wait_for(self._page.evaluate("location.href"), timeout=3.0)
-            except Exception:
-                page_title = "(unknown)"
-                page_url = "(unknown)"
-            self._log('[Nav] Page: title="' + str(page_title)[:80] + '" url=' + str(page_url)[:80])
-
-            # ── Dead proxy detection ──
-            # If the proxy can't even reach Discord, the URL will be chrome-error://
-            # or the page will be completely blank. Don't waste time polling.
-            dead_proxy = (
-                "chrome-error://" in (page_url or "") or
-                "about:blank" == (page_url or "") or
-                (not page_title and "error" in (page_url or "").lower())
-            )
-            if dead_proxy:
-                self._log(f"[Nav] DEAD PROXY (url={page_url[:60]}) - returning to worker for next proxy", level="warn")
-                return False  # no retries with same dead proxy — let caller rotate
-
-            # ── Cloudflare / block detection ──
-            blocked_keywords = ["attention required", "just a moment", "blocked",
-                               "cloudflare", "ddos-guard", "captcha",
-                               "checking your browser", "verify you are human",
-                               "forbidden", "403", "access denied",
-                               "you do not have permission", "error 1020"]
-            title_lower = (page_title or "").lower()
-            if any(kw in title_lower for kw in blocked_keywords):
-                self._log('[Nav] BLOCKED by Cloudflare/firewall (title: "' + str(page_title)[:60] + '")', level="warn")
-                if self._tor_enabled and attempt < 3:
-                    self._log("[Nav] Rotating TOR circuit...")
-                    await self._rebuild_context_with_tor()
-                    await asyncio.sleep(3)
-                elif attempt < 3:
-                    self._log("[Nav] Waiting 5s before retry...")
-                    await asyncio.sleep(5)
-                continue
-
-            # ── Check if Discord SPA rendered ──
-            try:
-                app_mount = await asyncio.wait_for(
-                    self._page.evaluate("document.querySelector('#app-mount') !== null"),
-                    timeout=5.0)
-                if app_mount:
-                    self._log("[Nav] Discord SPA app-mount detected")
-            except Exception:
-                app_mount = False
-
-            # -- Poll for any registration form element --
-            # Discord may show: email form, age gate, username picker, QR code, or
-            # phone number prompt depending on the proxy geo and IP reputation.
-            self._log("[Nav] Waiting for registration form to render...")
-            form_found = False
-            for poll_sec in range(1, 31):  # up to 30 seconds
-                try:
-                    checks = await asyncio.wait_for(self._page.evaluate("""() => {
-                        const body = document.body;
-                        if (!body) return JSON.stringify({error: "no-body"});
-                        const text = body.innerText || "";
-                        const email = document.querySelector('input[name="email"], input[type="email"], input[id*="email" i]');
-                        const username = document.querySelector('input[name="username"]');
-                        const password = document.querySelector('input[name="password"], input[type="password"]');
-                        const hasAge = /birthday|date of birth|born|how old/i.test(text.substring(0, 400));
-                        const hasMonth = document.querySelector('[class*="month" i], [aria-label*="month" i], select');
-                        const isLogin = /login|sign in|welcome back/i.test(text.substring(0, 400));
-                        const hasQR = document.querySelector('img[src*="qr" i], [class*="qr" i], canvas');
-                        const continueBtn = document.querySelector('button[type="submit"]');
-                        const hasAppMount = document.querySelector("#app-mount") !== null;
-                        return JSON.stringify({
-                            email: email !== null,
-                            username: username !== null,
-                            password: password !== null,
-                            ageGate: hasAge || hasMonth !== null,
-                            isLogin: isLogin,
-                            hasQR: hasQR,
-                            hasButton: continueBtn !== null,
-                            hasAppMount: hasAppMount,
-                            textPreview: text.substring(0, 250)
-                        });
-                    }"""), timeout=2.0)
-                    state = json.loads(checks)
-                except Exception:
-                    state = None
-
-                if state:
-                    if state.get("email") and state.get("username"):
-                        self._log(f"[Nav] SUCCESS! Full form rendered after {poll_sec}s (attempt {attempt})")
-                        return True
-                    if state.get("email") and state.get("password"):
-                        self._log(f"[Nav] SUCCESS! Email+password form rendered after {poll_sec}s")
-                        return True
-                    if state.get("ageGate"):
-                        self._log(f"[Nav] Age gate detected after {poll_sec}s - returning true, form filler handles it")
-                        form_found = True
-                        break
-                    if state.get("isLogin"):
-                        self._log(f"[Nav] Login page detected - Discord redirected us from register->login. Text: {str(state.get('textPreview',''))[:120]}")
-                        if poll_sec >= 10:
-                            break
-                    if state.get("hasQR"):
-                        self._log(f"[Nav] QR code page detected - Discord wants phone verification. Text: {str(state.get('textPreview',''))[:120]}")
-                    if poll_sec % 5 == 0:
-                        preview = str(state.get('textPreview', ''))[:100]
-                        self._log(f"[Nav] Poll {poll_sec}s: email={state.get('email')} ageGate={state.get('ageGate')} login={state.get('isLogin')} text={preview}")
-
-                # Check for redirect to app
-                try:
-                    cur = await asyncio.wait_for(
-                        self._page.evaluate("location.href"), timeout=1.0)
-                    if "discord.com/app" in cur or "discord.com/channels" in cur:
-                        self._log(f"[Nav] Redirected to app: {cur[:60]}")
-                        return True
-                except Exception:
-                    pass
-                await asyncio.sleep(1.0)
-
-            if form_found:
-                return True
-
-            # Dump final page state for debugging
-            try:
-                debug = await asyncio.wait_for(self._page.evaluate("""() => {
+                checks = await asyncio.wait_for(self._page.evaluate("""() => {
                     const body = document.body;
+                    if (!body) return JSON.stringify({error: "no-body"});
+                    const text = body.innerText || "";
+                    // Broad selectors — Discord uses aria-label, not name
+                    const email = document.querySelector('input[name="email"], input[type="email"], input[aria-label*="email" i], input[aria-label*="Email"], input[id*="email" i]');
+                    const username = document.querySelector('input[name="username"], input[aria-label*="username" i], input[aria-label*="display" i]');
+                    const password = document.querySelector('input[name="password"], input[type="password"], input[aria-label*="password" i]');
+                    const hasAge = /birthday|date of birth|born|how old/i.test(text.substring(0, 400));
+                    const hasMonth = document.querySelector('[class*="month" i], [aria-label*="month" i], select');
+                    const isLogin = /login|sign in|welcome back/i.test(text.substring(0, 400));
+                    const hasQR = document.querySelector('img[src*="qr" i], [class*="qr" i]');
+                    const continueBtn = document.querySelector('button[type="submit"], button[class*="continue" i]');
+                    const allInputs = document.querySelectorAll('input');
+                    const allButtons = document.querySelectorAll('button');
                     return JSON.stringify({
-                        title: document.title,
-                        url: location.href,
-                        bodyText: body ? body.innerText.substring(0, 600) : "no-body",
-                        inputs: Array.from(document.querySelectorAll("input")).map(function(e) { return {
-                            type: e.type, name: e.name, id: e.id,
-                            placeholder: e.placeholder, visible: e.offsetParent !== null
-                        }; }).slice(0, 10),
-                        buttons: Array.from(document.querySelectorAll("button")).map(function(e) { return {
-                            text: e.innerText, type: e.type, visible: e.offsetParent !== null
-                        }; }).slice(0, 5)
+                        email: email !== null,
+                        username: username !== null,
+                        password: password !== null,
+                        ageGate: hasAge || hasMonth !== null,
+                        isLogin: isLogin,
+                        hasQR: hasQR,
+                        hasButton: continueBtn !== null,
+                        hasAppMount: document.querySelector("#app-mount") !== null,
+                        inputCount: allInputs.length,
+                        buttonCount: allButtons.length,
+                        textPreview: text.substring(0, 250)
                     });
-                }"""), timeout=3.0)
-                debug_state = json.loads(debug)
-                self._log(f"[Nav] DEBUG page state: {json.dumps(debug_state)[:500]}")
-            except Exception as e:
-                self._log(f"[Nav] DEBUG failed: {e}")
+                }"""), timeout=2.0)
+                state = json.loads(checks)
+            except Exception:
+                state = None
 
-            self._log(f"[Nav] Form did not render within 30s (attempt {attempt})", level="warn")
-            if attempt < 3:
-                await asyncio.sleep(3)
+            if state:
+                # Log every 5s with input/button counts for debugging
+                if poll_sec % 5 == 0:
+                    self._log(f"[Nav] Poll {poll_sec}s: email={state.get('email')} ageGate={state.get('ageGate')} login={state.get('isLogin')} inputs={state.get('inputCount')} buttons={state.get('buttonCount')} text={state.get('textPreview','')[:60]}")
 
-        self._log("[Nav] FAILED: Could not reach Discord /register after 3 attempts", level="error")
+                if state.get("email") and state.get("username"):
+                    self._log(f"[Nav] SUCCESS! Full form rendered after {poll_sec}s")
+                    return True
+                if state.get("email") and state.get("password"):
+                    self._log(f"[Nav] SUCCESS! Email+password form rendered after {poll_sec}s")
+                    return True
+                if state.get("ageGate"):
+                    self._log(f"[Nav] Age gate detected after {poll_sec}s - returning true, form filler handles it")
+                    return True
+
+                if state.get("isLogin") and poll_sec >= 10:
+                    self._log(f"[Nav] Login page detected (redirected from register)")
+                    break
+
+            # Check for redirect to app
+            try:
+                cur = await asyncio.wait_for(self._page.evaluate("location.href"), timeout=1.0)
+                if "discord.com/app" in cur or "discord.com/channels" in cur:
+                    self._log(f"[Nav] Redirected to app: {cur[:60]}")
+                    return True
+            except Exception:
+                pass
+            await asyncio.sleep(1.0)
+
+        # ── Form never rendered — dump page state for debugging ──
+        try:
+            dump = await asyncio.wait_for(self._page.evaluate("""() => {
+                const inputs = Array.from(document.querySelectorAll('input')).slice(0, 20).map(function(e) { return {
+                    type: e.type, name: e.name, id: e.id, ariaLabel: e.getAttribute('aria-label') || '',
+                    placeholder: e.placeholder || '', visible: e.offsetParent !== null
+                }; });
+                const buttons = Array.from(document.querySelectorAll('button')).slice(0, 10).map(function(e) { return {
+                    text: (e.innerText || '').substring(0, 40), type: e.type, visible: e.offsetParent !== null
+                }; });
+                return JSON.stringify({
+                    title: document.title,
+                    url: location.href,
+                    bodyText: (document.body?.innerText || '').substring(0, 200),
+                    inputs: inputs,
+                    buttons: buttons,
+                    hasAppMount: document.querySelector('#app-mount') !== null
+                });
+            }"""), timeout=2.0)
+            self._log(f"[Nav] DEBUG page state: {dump}")
+        except Exception:
+            pass
+
+        self._log("[Nav] Form did not render within 30s - returning to worker for next proxy", level="warn")
         return False
 
     async def capture_screenshot(self) -> str:
