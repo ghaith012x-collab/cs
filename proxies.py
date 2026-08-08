@@ -20,28 +20,8 @@ from typing import Dict, List, Optional
 import aiohttp
 
 # ── Public free-proxy sources (raw text) ──
-PROXY_SOURCES = [
-    "https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/protocols/http/data.txt",
-    "https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/protocols/socks5/data.txt",
-    "https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/protocols/socks4/data.txt",
-    "https://cdn.jsdelivr.net/gh/proxyscrape/free-proxy-list@main/proxies/protocols/http/data.txt",
-    "https://cdn.jsdelivr.net/gh/proxyscrape/free-proxy-list@main/proxies/protocols/socks5/data.txt",
-    "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt",
-    "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/socks5.txt",
-    "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt",
-    "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks4.txt",
-    "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks5.txt",
-    "https://raw.githubusercontent.com/clarketm/proxy-list/master/proxy-list-raw.txt",
-    "https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&proxy_format=protocolipport&format=text",
-]
-
-# Local proxy files in the repo that should also be loaded (user uploads)
-LOCAL_PROXY_FILES = [
-    # Restricted ISP proxies — loaded first, given priority
-    "ips-isp_proxy52026-08-08T18_08_53.473Z.txt",
-    # Fallback ISP proxy pool
-    "ips-isp_proxy12026-08-08T17_28_57.556Z.txt",
-]
+PROXY_SOURCES = []  # no free proxy fetching — TOR only
+LOCAL_PROXY_FILES = []  # no proxy files — TOR only
 
 # Auth proxy format: user:pass@host:port
 _AUTH_RE = re.compile(r"^([^:]+):([^@]+)@([^:]+):(\d+)$")
