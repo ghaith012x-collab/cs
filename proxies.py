@@ -37,6 +37,9 @@ PROXY_SOURCES = [
 
 # Local proxy files in the repo that should also be loaded (user uploads)
 LOCAL_PROXY_FILES = [
+    # Restricted ISP proxies — loaded first, given priority
+    "ips-isp_proxy52026-08-08T18_08_53.473Z.txt",
+    # Fallback ISP proxy pool
     "ips-isp_proxy12026-08-08T17_28_57.556Z.txt",
 ]
 
