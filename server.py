@@ -423,18 +423,36 @@ class DiscordAutomation:
             body_text = await asyncio.wait_for(
                 self._page.evaluate("document.body ? document.body.innerText.substring(0, 500) : ''"),
                 timeout=3.0)
-            if body_text and any(kw in body_text.lower() for kw in ("forbidden", "403 forbidden", "access denied", "cloudflare", "attention required")):
+            if body_text and any(kw in body_text.lower() for kw in (
+                "forbidden", "403 forbidden", "access denied", "cloudflare",
+                "attention required", "rate limit", "ratelimited", "rate limited",
+                "too many requests", "slowdown", "try again later", "429",
+            )):
                 self._log(f"[Nav] BLOCKED — body contains: {body_text[:100]}", level="warn")
                 return False
         except Exception:
             pass
+
+        # ── Rate-limit detection — rotate TOR circuit fast ──
+        # Discord/Cloudflare throttle abused TOR exit nodes with 429s that
+        # render as "rate limited / too many requests" text on the page.
+        try:
+            rl_text = (body_text or "").lower()
+        except Exception:
+            rl_text = ""
+        if any(kw in rl_text for kw in ("rate limit", "ratelimited", "rate limited",
+                                        "too many requests", "slowdown", "429")):
+            self._log("[Nav] RATE LIMITED (429) - rotating TOR circuit", level="warn")
+            return False
 
         # ── Block keywords in title ──
         blocked_keywords = ["attention required", "just a moment", "blocked",
                            "cloudflare", "ddos-guard", "captcha",
                            "checking your browser", "verify you are human",
                            "forbidden", "403", "access denied",
-                           "you do not have permission", "error 1020"]
+                           "you do not have permission", "error 1020",
+                           "rate limit", "ratelimited", "rate limited",
+                           "too many requests", "slowdown", "try again later"]
         title_lower = (page_title or "").lower()
         if any(kw in title_lower for kw in blocked_keywords):
             self._log('[Nav] BLOCKED by Cloudflare/firewall (title: "' + str(page_title)[:60] + '")', level="warn")

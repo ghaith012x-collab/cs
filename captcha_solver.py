@@ -1671,6 +1671,297 @@ ANIMAL_WORDS = frozenset([
     "mammal","marsupial","mollusk","primate","raptor","reptile",
     "rodent","serpent","ungulate","vertebrate",
 ])
+# ── Knowledge-base solver for hCaptcha accessibility NL questions ──
+# Covers: rooms, colors, animal sounds, counting/legs, calendar, nature,
+# object function, opposites, and "which of these is a/an X" pickers.
+
+KNOWLEDGE_QUESTIONS = [
+    # ── Rooms ──
+    (r"room.*(?:has|with) a sink|sink for washing dishes|wash.*dishes", "kitchen"),
+    (r"room.*cook|room.*prepar(e|ing) food", "kitchen"),
+    (r"room.*refrigerator|room.*fridge", "kitchen"),
+    (r"room.*(?:has|with) a bed|room.*sleep", "bedroom"),
+    (r"room.*(?:shower|bath|bathtub|bath tub)|room.*brush.*teeth", "bathroom"),
+    (r"room.*(?:sofa|couch|watch tv|watch television)", "living room"),
+    (r"room.*(?:eat dinner|dining table|dining)", "dining room"),
+    (r"room.*(?:laundry|washing machine)", "laundry room"),
+    (r"room.*(?:read|books)", "library"),
+    (r"room.*(?:work|desk|office)", "office"),
+    # ── Colors ──
+    (r"color.*sky|color.*ocean|color.*sea|color.*water", "blue"),
+    (r"color.*grass|color.*(?:leaf|leaves)", "green"),
+    (r"color.*snow|color.*cloud|color.*milk", "white"),
+    (r"color.*banana|color.*sun|color.*lemon", "yellow"),
+    (r"color.*blood|color.*strawberr|color.*stop sign", "red"),
+    (r"color.*orange|color.*carrot|color.*pumpkin", "orange"),
+    (r"color.*chocolate|color.*(?:tree|trunk)|color.*brown", "brown"),
+    (r"color.*coal|color.*night sky|color.*crow", "black"),
+    (r"color.*elephant", "gray"),
+    (r"color.*apple", "red"),
+    (r"color.*grape|color.*eggplant|color.*plum", "purple"),
+    (r"color.*pink|color.*flamingo|color.*pig", "pink"),
+    (r"what color.*sky", "blue"),
+    (r"what color.*grass", "green"),
+    (r"what color.*snow", "white"),
+    (r"what color.*banana|what color.*sun", "yellow"),
+    (r"what color.*blood|what color.*stop sign", "red"),
+    # ── Animal sounds → animal ──
+    (r"animal.*moo|says moo|makes.*moo", "cow"),
+    (r"animal.*(?:barks|bark)|says woof|makes.*woof", "dog"),
+    (r"animal.*(?:meows|meow)|says meow|makes.*meow", "cat"),
+    (r"animal.*(?:quacks|quack)|says quack|makes.*quack", "duck"),
+    (r"animal.*(?:oinks|oink)|says oink|makes.*oink", "pig"),
+    (r"animal.*(?:neighs|neigh)|says neigh|makes.*neigh", "horse"),
+    (r"animal.*(?:baas|baa)|says baa|makes.*baa", "sheep"),
+    (r"animal.*(?:roars|roar)|says roar|makes.*roar", "lion"),
+    (r"animal.*(?:howls|howl)|says howl|makes.*howl", "wolf"),
+    (r"animal.*(?:chirps|chirp|tweets|tweet|sings)", "bird"),
+    (r"animal.*(?:ribbits|ribbit|croaks|croak)", "frog"),
+    (r"animal.*(?:hisses|hiss)", "snake"),
+    (r"animal.*(?:gobbles|gobble)", "turkey"),
+    (r"animal.*(?:hoots|hoot)", "owl"),
+    (r"animal.*(?:buzzes|buzz)", "bee"),
+    (r"animal.*(?:clucks|cluck)", "chicken"),
+    (r"animal.*(?:caws|caw)", "crow"),
+    (r"animal.*(?:growls|growl)", "bear"),
+    # ── Counting / legs / wheels ──
+    (r"how many legs.*(?:dog|cat|horse|cow|goat|sheep|pig|rabbit)", "4"),
+    (r"how many legs.*spider", "8"),
+    (r"how many legs.*(?:insect|ant|bee|beetle|fly|bug|grasshopper)", "6"),
+    (r"how many legs.*(?:bird|chicken|duck|person|human|man|woman)", "2"),
+    (r"how many legs.*(?:snake|worm)", "0"),
+    (r"how many wheels.*car", "4"),
+    (r"how many wheels.*(?:bicycle|bike)", "2"),
+    (r"how many wheels.*tricycle", "3"),
+    (r"how many wheels.*(?:motorcycle|motorbike)", "2"),
+    (r"how many wheels.*bus", "4"),
+    (r"how many days.*week", "7"),
+    (r"how many months.*year", "12"),
+    (r"how many seasons", "4"),
+    (r"how many eyes", "2"),
+    (r"how many fingers.*(?:one|single)? ?hand", "5"),
+    (r"how many toes.*(?:one|single)? ?foot", "5"),
+    (r"how many colors.*rainbow|colors in a rainbow", "7"),
+    (r"how many sides.*triangle", "3"),
+    (r"how many sides.*square", "4"),
+    (r"how many sides.*(?:pentagon|star)", "5"),
+    (r"how many sides.*hexagon", "6"),
+    (r"how many (?:hours|minutes).*(?:day|hour)", "24"),
+    (r"how many (?:letters|alphabet).*alphabet", "26"),
+    (r"how many (?:planets)", "8"),
+    (r"how many (?:wings).*bird", "2"),
+    (r"how many ears", "2"),
+    (r"how many nose", "1"),
+    (r"how many heads", "1"),
+    (r"how many teeth", "32"),
+    # ── Calendar ──
+    (r"first month.*year|month.*first.*year", "january"),
+    (r"last month.*year|month.*last.*year", "december"),
+    (r"month.*after june", "july"),
+    (r"month.*after july", "august"),
+    (r"month (?:that|with).*28 (?:or 29 )?days|month.*february", "february"),
+    (r"season.*after winter", "spring"),
+    (r"season.*after spring", "summer"),
+    (r"season.*after summer", "autumn"),
+    (r"season.*after (?:autumn|fall)", "winter"),
+    (r"first day of the week", "sunday"),
+    (r"day.*after tuesday", "wednesday"),
+    (r"day.*after monday", "tuesday"),
+    (r"day.*after sunday", "monday"),
+    (r"day.*before friday", "thursday"),
+    (r"day.*before monday", "sunday"),
+    (r"day between saturday and monday|day between sunday and tuesday", "sunday"),
+    # ── Nature / food chain ──
+    (r"frozen water", "ice"),
+    (r"bees make|bee.*make|made by bees", "honey"),
+    (r"chickens lay|chicken.*lay", "eggs"),
+    (r"cow.*(?:produce|give)", "milk"),
+    (r"falls.*sky.*(?:raining|rain)|comes.*sky.*rain", "rain"),
+    (r"shines.*(?:night)", "moon"),
+    (r"shines.*day|shines during the day", "sun"),
+    (r"clouds produce|produced by clouds", "rain"),
+    (r"what do plants need to grow", "water"),
+    (r"do bees make", "honey"),
+    (r"what do hens lay", "eggs"),
+    # ── Objects / function ──
+    (r"use.*eat soup|eat soup.*with", "spoon"),
+    (r"use.*cut (?:food|meat|bread)", "knife"),
+    (r"use.*cut paper|cut paper.*with", "scissors"),
+    (r"use.*write|write.*with", "pen"),
+    (r"use.*tell time|tell time.*with", "clock"),
+    (r"use.*read|read.*with", "book"),
+    (r"use.*take pictures|take (?:photos|pictures).*with", "camera"),
+    (r"use.*call.*(?:someone|person)|call.*with", "phone"),
+    (r"use.*light.*(?:room|dark)|light.*room.*with", "lamp"),
+    (r"use.*clean.*teeth|clean.*teeth.*with", "toothbrush"),
+    (r"use.*dry.*hands|dry.*hands.*with", "towel"),
+    (r"use.*brush.*hair|brush.*hair.*with", "brush"),
+    (r"ride.*school", "bus"),
+    (r"what do you drive", "car"),
+    (r"fly.*sky", "plane"),
+    (r"type.*(?:computer|laptop)|keyboard.*type", "keyboard"),
+    (r"listen.*music", "headphones"),
+    (r"watch.*(?:movies|films)", "tv"),
+    # ── Opposites ──
+    (r"opposite of up", "down"),
+    (r"opposite of hot", "cold"),
+    (r"opposite of day", "night"),
+    (r"opposite of left", "right"),
+    (r"opposite of right", "left"),
+    (r"opposite of big", "small"),
+    (r"opposite of open", "closed"),
+    (r"opposite of fast", "slow"),
+    (r"opposite of wet", "dry"),
+    (r"opposite of full", "empty"),
+    (r"opposite of black", "white"),
+    (r"opposite of white", "black"),
+    (r"opposite of old", "young"),
+    (r"opposite of happy", "sad"),
+    (r"opposite of cold", "hot"),
+    (r"opposite of down", "up"),
+    (r"opposite of dark", "light"),
+    (r"opposite of tall", "short"),
+    (r"opposite of front", "back"),
+    # ── Single fact ──
+    (r"capital of (?:france|french)", "paris"),
+    (r"capital of (?:england|united kingdom|uk|britain)", "london"),
+    (r"capital of (?:spain|spainish)", "madrid"),
+    (r"capital of (?:italy)", "rome"),
+    (r"capital of (?:japan)", "tokyo"),
+    (r"capital of (?:usa|america|united states)", "washington"),
+    (r"capital of (?:germany)", "berlin"),
+    (r"capital of (?:egypt)", "cairo"),
+    (r"color of a (?:stop|stop sign) sign", "red"),
+    (r"what (?:animal|creature).*milk.*(?:cow|cows)", "cow"),
+]
+
+# Category word sets for "which of these is a/an X" pickers
+CATEGORY_WORDS = {
+    "fruit": frozenset([
+        "apple", "apricot", "avocado", "banana", "blackberry", "blueberry",
+        "cherry", "coconut", "fig", "grape", "grapefruit", "kiwi", "lemon",
+        "lime", "mango", "melon", "nectarine", "orange", "papaya", "peach",
+        "pear", "pineapple", "plum", "pomegranate", "raspberry", "strawberry",
+        "watermelon", "cantaloupe",
+    ]),
+    "vegetable": frozenset([
+        "asparagus", "beet", "broccoli", "cabbage", "carrot", "cauliflower",
+        "celery", "corn", "cucumber", "eggplant", "garlic", "kale", "lettuce",
+        "onion", "pea", "pepper", "potato", "pumpkin", "radish", "spinach",
+        "squash", "tomato", "turnip", "zucchini",
+    ]),
+    "color": frozenset([
+        "red", "blue", "green", "yellow", "orange", "purple", "pink",
+        "brown", "black", "white", "gray", "grey", "cyan", "magenta", "teal",
+    ]),
+    "room": frozenset([
+        "kitchen", "bedroom", "bathroom", "living room", "dining room",
+        "garage", "basement", "attic", "hallway", "office", "laundry room",
+        "bath room",
+    ]),
+    "insect": frozenset([
+        "ant", "bee", "beetle", "butterfly", "caterpillar", "cockroach",
+        "cricket", "dragonfly", "fly", "grasshopper", "ladybug", "mantis",
+        "mosquito", "moth", "wasp", "termite",
+    ]),
+    "bird": frozenset([
+        "eagle", "hawk", "owl", "penguin", "parrot", "peacock", "pigeon",
+        "robin", "sparrow", "swallow", "swan", "turkey", "duck", "goose",
+        "chicken", "raven", "crow", "flamingo", "ostrich", "woodpecker",
+    ]),
+    "fish": frozenset([
+        "salmon", "tuna", "trout", "shark", "goldfish", "cod", "halibut",
+        "sardine", "anchovy", "eel", "catfish", "bass",
+    ]),
+    "clothing": frozenset([
+        "shirt", "pants", "dress", "skirt", "jacket", "coat", "sweater",
+        "hat", "socks", "shoes", "boots", "gloves", "scarf", "belt", "tie",
+    ]),
+    "body": frozenset([
+        "arm", "leg", "head", "hand", "foot", "eye", "ear", "nose", "mouth",
+        "finger", "toe", "knee", "elbow", "shoulder", "hair", "tongue",
+    ]),
+    "vehicle": frozenset([
+        "car", "truck", "bus", "bicycle", "motorcycle", "train", "plane",
+        "boat", "ship", "helicopter", "taxi", "van",
+    ]),
+    "musical instrument": frozenset([
+        "guitar", "piano", "drums", "violin", "flute", "trumpet", "saxophone",
+        "cello", "harp", "accordion", "clarinet", "trombone",
+    ]),
+    "season": frozenset(["spring", "summer", "autumn", "fall", "winter"]),
+    "month": frozenset([
+        "january", "february", "march", "april", "may", "june", "july",
+        "august", "september", "october", "november", "december",
+    ]),
+    "day": frozenset([
+        "monday", "tuesday", "wednesday", "thursday", "friday", "saturday",
+        "sunday",
+    ]),
+    "planet": frozenset([
+        "mercury", "venus", "earth", "mars", "jupiter", "saturn",
+        "uranus", "neptune",
+    ]),
+    "profession": frozenset([
+        "doctor", "teacher", "nurse", "police", "firefighter", "lawyer",
+        "engineer", "chef", "pilot", "farmer", "scientist", "artist",
+    ]),
+    "tool": frozenset([
+        "hammer", "screwdriver", "wrench", "saw", "drill", "pliers",
+        "axe", "shovel", "rake",
+    ]),
+    "weather": frozenset([
+        "rain", "snow", "sun", "wind", "cloud", "storm", "fog", "hail",
+    ]),
+}
+
+
+def _solve_knowledge_question(text: str) -> Optional[str]:
+    """Answer natural-language knowledge questions locally (no API).
+    Returns the answer string or None."""
+    if not text:
+        return None
+    t = text.lower()
+
+    # ── Category pickers: "Which of these is a/an X?" / "...is not a X?" ──
+    # Robust against "is a fruit: apple, car, tree" and "comes after" phrasing.
+    cat_match = re.search(
+        r"which (?:one )?of (?:these|the following|the) "
+        r"(?:words )?(?:is not|are not|is|are)? ?(?:an? |the )?([a-z][a-z ]{2,20}?)\s*(?::|\?|\.|$)",
+        t,
+    )
+    if cat_match:
+        cat = cat_match.group(1).strip()
+        cat_key = None
+        for key in CATEGORY_WORDS:
+            if cat == key or cat.startswith(key) or key.startswith(cat) or cat in key:
+                cat_key = key
+                break
+        if cat_key:
+            words = re.findall(r"[a-z]+", t)
+            candidates = [w for w in words if w in CATEGORY_WORDS[cat_key]]
+            negated = bool(re.search(r"\bnot\b", t))
+            if negated:
+                # "which is not a X" → pick the word NOT in category
+                stop = ("which", "these", "following", "words", "one", "that",
+                        "with", "from", "the", "and", "this", "them", "their",
+                        "they", "are", "not", "animal", "fruit", "vegetable",
+                        "color", "colour", "room", "is", "a", "an", "of")
+                all_choice = [w for w in words if len(w) >= 3 and w not in stop]
+                for w in all_choice:
+                    if w not in CATEGORY_WORDS[cat_key]:
+                        return w
+            elif candidates:
+                return candidates[0]
+
+    # ── Direct pattern match ──
+    for pattern, answer in KNOWLEDGE_QUESTIONS:
+        if re.search(pattern, t, re.IGNORECASE):
+            return answer
+
+    return None
+
+
 def _eval_arithmetic_chain(expr: str) -> Optional[str]:
     """Evaluate a pure integer arithmetic chain ('5 + 8 + 7', '12 × 3 ÷ 2',
     '10 - 2 - 3') with standard operator precedence. Accepts ASCII and unicode
@@ -1908,6 +2199,39 @@ async def solve_hcaptcha_accessibility(page, iframe,
                     return data["message"]["content"].strip()
         except Exception as e:
             log(f"[Accessibility] Ollama error: {e}", level="error")
+            return ""
+
+    async def _ollama_answer_text(question: str, timeout: float = 30.0) -> str:
+        """Ask Ollama (text-only chat) for a single-word answer to a question.
+        Used as fallback when the local knowledge base has no answer."""
+        try:
+            import aiohttp
+            payload = {
+                "model": ollama_model,
+                "stream": False,
+                "messages": [{
+                    "role": "user",
+                    "content": (
+                        "You are solving a CAPTCHA accessibility question. "
+                        "Answer with exactly ONE word or number. No punctuation, "
+                        "no explanation, lowercase.\n\nQuestion: " + question
+                    ),
+                }],
+            }
+            async with aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=timeout)
+            ) as session:
+                async with session.post(
+                    f"{ollama_url}/api/chat", json=payload
+                ) as resp:
+                    if resp.status != 200:
+                        return ""
+                    data = await resp.json()
+                    ans = data["message"]["content"].strip().lower()
+                    m = re.search(r"[a-z0-9]+", ans)
+                    return m.group(0) if m else ""
+        except Exception as e:
+            log(f"[Accessibility] Ollama text error: {e}", level="warn")
             return ""
 
     async def _screenshot_b64(target, selector: str | None = None) -> str:
@@ -2426,6 +2750,21 @@ async def solve_hcaptcha_accessibility(page, iframe,
                 # Animal challenge: "pick the word that is an animal"
                 if re.search(r'\banimal\b|\bcreature\b|\bbeast\b|\bliving\b.*\bthing\b|\bwhich\b.*\banimal\b', line, re.IGNORECASE):
                     score += 5
+                # Knowledge questions (rooms, colors, counting, calendar...)
+                if re.search(r'\broom\b|\bsink\b|\bkitchen\b|\bbedroom\b|\bbathroom\b', line, re.IGNORECASE):
+                    score += 4
+                if re.search(r'what (?:color|colour|room)|which (?:room|color)|color of|colour of', line, re.IGNORECASE):
+                    score += 4
+                if re.search(r'\blegs\b|\bwheels\b|\bhow many\b|\bhow much\b', line, re.IGNORECASE):
+                    score += 3
+                if re.search(r'\bmonth\b|\bseason\b|\bday\b|\bweek\b|\byear\b', line, re.IGNORECASE):
+                    score += 2
+                if re.search(r'\bsink\b|\bdishes\b|\bmoos?\b|\bquacks?\b|\bmeows?\b|\bbarks?\b|\bneighs?\b', line, re.IGNORECASE):
+                    score += 3
+                if re.search(r'\bcapital\b|\bfruit\b|\bvegetable\b|\binsect\b|\bwhich of these\b', line, re.IGNORECASE):
+                    score += 3
+                if re.search(r'\bused to\b|\buse .* to\b|\bwhat do you\b', line, re.IGNORECASE):
+                    score += 3
                 # numbers reinforce a real math question
                 if re.search(r'\b\d+\b', line):
                     score += 2
@@ -2606,6 +2945,13 @@ async def solve_hcaptcha_accessibility(page, iframe,
                 if w.lower() in ANIMAL_WORDS:
                     return w
 
+        # ── KNOWLEDGE QUESTIONS (rooms, colors, animal sounds, counting...) ──
+        # Runs before number extraction so "how many legs" etc. hit the KB.
+        knowledge_ans = _solve_knowledge_question(text)
+        if knowledge_ans is not None:
+            log(f"[Accessibility] Knowledge answer: {knowledge_ans}")
+            return knowledge_ans
+
         # ── PURE NUMBER extraction (e.g. "type the number 42") ──
         num_pat = re.search(r'(?:number|digit|num)\s+[iof]*\s*(\d+)', t)
         if num_pat:
@@ -2628,7 +2974,13 @@ async def solve_hcaptcha_accessibility(page, iframe,
             if local is not None:
                 log(f"[Accessibility] Q{q} solved: {local}")
                 return local
-            log(f"[Accessibility] Q{q} local solver returned None", level="warn")
+            log(f"[Accessibility] Q{q} local solver returned None — trying Ollama text", level="warn")
+            # Ollama text fallback for natural-language questions the KB misses
+            if ollama_url:
+                ans = await _ollama_answer_text(text[:400])
+                if ans:
+                    log(f"[Accessibility] Q{q} Ollama answered: {ans}")
+                    return ans
         else:
             log(f"[Accessibility] Q{q} NO TEXT FOUND anywhere", level="error")
         return None
