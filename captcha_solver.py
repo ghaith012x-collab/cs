@@ -1891,7 +1891,8 @@ KNOWLEDGE_QUESTIONS = [
     (r"(?:what|which) (?:element|gas).*(?:plant|photosynthesis)", "carbon dioxide"),
     (r"(?:what|which) (?:planet|body).*closest to (?:the )?sun", "mercury"),
     (r"(?:what|which) (?:planet|body).*largest.*(?:solar system|sun)", "jupiter"),
-    (r"(?:what|which) (?:planet).*red.*(?:spot|planet)", "jupiter"),
+    (r"(?:what|which) (?:planet).*red planet", "mars"),
+    (r"(?:what|which) (?:planet).*red.*spot", "jupiter"),
     (r"(?:what|which) (?:planet).*rings", "saturn"),
     (r"(?:what|which) (?:planet).*blue.*(?:planet|color)", "neptune"),
     (r"(?:what|which) (?:planet).*(?:life|we live|our planet)", "earth"),
@@ -2006,6 +2007,223 @@ KNOWLEDGE_QUESTIONS = [
     # ── Skip patterns: these are handled by Ollama ──
 
 
+
+    # ── Food / Pets ──
+    (r"(?:food|pet food).*cans.*cats?|cats?.*(?:food|pet food).*cans", "cat food"),
+    (r"(?:food|pet food).*cans.*dogs?|dogs?.*(?:food|pet food).*cans", "dog food"),
+    (r"pet food.*cans|food.*comes in cans|food.*cans", "dog food"),
+    (r"pet food.*cats|cat.*food.*bowl", "cat food"),
+    (r"food.*(?:purr|meow|cats)", "cat food"),
+    (r"food.*(?:bark|dogs|pupp)", "dog food"),
+    (r"food.*(?:whiskers|kitten)", "cat food"),
+    (r"(?:what|which) (?:color|colour).*dog.*(?:food|can)", "brown"),
+    # ── Holidays / months / seasons ──
+    (r"(?:holiday|celebration).*trick.or.treat|trick.or.treat.*holiday", "halloween"),
+    (r"(?:holiday|celebration).*(?:turkey|thanks)", "thanksgiving"),
+    (r"(?:holiday|celebration).*(?:gifts|santa|christmas)", "christmas"),
+    (r"(?:holiday|celebration).*(?:fireworks|independence|july)", "july 4th"),
+    (r"(?:holiday|celebration).*(?:eggs|bunny|easter)", "easter"),
+    (r"(?:holiday|celebration).*(?:love|valentine|hearts)", "valentines day"),
+    (r"(?:holiday|celebration).*(?:green|shamrock|irish)", "st patricks day"),
+    (r"(?:holiday|celebration).*(?:pumpkin|lantern)", "halloween"),
+    # ── More counting ──
+    (r"how many (?:legs|feet).*(?:insect|ant|bee|beetle|bug|fly)", "6"),
+    (r"how many (?:legs|feet).*lobster|crab", "10"),
+    (r"how many (?:legs|feet).*centipede", "100"),
+    (r"how many (?:legs|feet).*millipede", "750"),
+    (r"how many (?:wings).*butterfly", "4"),
+    (r"how many (?:wings).*mosquito|fly", "2"),
+    (r"how many (?:wings).*bird", "2"),
+    (r"how many (?:wheels).*(?:motorcycle|motorbike)", "2"),
+    (r"how many (?:wheels).*(?:train|locomotive)", "18"),
+    (r"how many (?:fingers).*two hands", "10"),
+    (r"how many (?:toes).*two feet", "10"),
+    (r"how many (?:legs).*octopus", "8"),
+    (r"how many (?:arms).*octopus", "8"),
+    (r"how many (?:tentacles).*octopus", "8"),
+    (r"how many (?:eyes).*spider", "8"),
+    (r"how many (?:legs).*crab", "10"),
+    (r"how many (?:humps).*camel", "1"),
+    (r"how many (?:humps).*(?:bactrian|two.humped)", "2"),
+    # ── Direction / position ──
+    (r"(?:what|which) (?:direction|side).*sun.*(?:rise|rises)", "east"),
+    (r"(?:what|which) (?:direction|side).*sun.*(?:set|sets)", "west"),
+    (r"(?:what|which) (?:direction).*north.*(?:point|arrow)", "north"),
+    (r"(?:what|which) (?:direction).*(?:up|above)", "north"),
+    (r"(?:what|which) (?:direction).*(?:down|below)", "south"),
+    (r"opposite of (?:north)", "south"),
+    (r"opposite of (?:south)", "north"),
+    (r"opposite of (?:east)", "west"),
+    (r"opposite of (?:west)", "east"),
+    (r"opposite of (?:on)", "off"),
+    (r"opposite of (?:near)", "far"),
+    (r"opposite of (?:wide)", "narrow"),
+    (r"opposite of (?:long)", "short"),
+    (r"opposite of (?:quiet|loud)", "quiet"),
+    (r"opposite of (?:loud)", "quiet"),
+    (r"opposite of (?:sweet)", "sour"),
+    (r"opposite of (?:sour)", "sweet"),
+    (r"opposite of (?:clean)", "dirty"),
+    (r"opposite of (?:dirty)", "clean"),
+    (r"opposite of (?:hard)", "soft"),
+    (r"opposite of (?:soft)", "hard"),
+    (r"opposite of (?:rough)", "smooth"),
+    (r"opposite of (?:smooth)", "rough"),
+    (r"opposite of (?:new)", "old"),
+    (r"opposite of (?:young)", "old"),
+    (r"opposite of (?:early)", "late"),
+    (r"opposite of (?:late)", "early"),
+    (r"opposite of (?:always)", "never"),
+    (r"opposite of (?:never)", "always"),
+    (r"opposite of (?:true)", "false"),
+    (r"opposite of (?:false)", "true"),
+    (r"opposite of (?:win)", "lose"),
+    (r"opposite of (?:lose)", "win"),
+    (r"opposite of (?:push)", "pull"),
+    (r"opposite of (?:pull)", "push"),
+    (r"opposite of (?:shallow)", "deep"),
+    (r"opposite of (?:deep)", "shallow"),
+    # ── Weather / nature ──
+    (r"frozen.*water.*(?:walk|solid)", "ice"),
+    (r"(?:what|which).*(?:boiling point).*water", "100"),
+    (r"(?:what|which).*(?:freezing point).*water", "0"),
+    (r"(?:what|which).*rainbow.*colors|colors.*rainbow", "7"),
+    (r"(?:what|which).*(?:first|primary) color.*rainbow", "red"),
+    (r"(?:what|which).*(?:last|violet) color.*rainbow", "violet"),
+    (r"(?:what|which).*(?:gas|substance).*plants.*(?:breathe|absorb)", "carbon dioxide"),
+    (r"(?:what|which).*(?:gas).*humans.*(?:breathe|inhale)", "oxygen"),
+    (r"(?:what|which).*(?:gas).*humans.*(?:exhale|breathe out)", "carbon dioxide"),
+    (r"(?:what|which).*trees.*(?:release|give off)", "oxygen"),
+    (r"(?:what|which).*(?:heavenly body).*(?:night|moonlight)", "moon"),
+    (r"(?:what|which).*(?:shines|star).*(?:day|morning)", "sun"),
+    (r"(?:what|which).*frozen.*(?:lake|pond)", "ice"),
+    (r"(?:what|which).*cold.*(?:water|drink).*summer", "ice"),
+    (r"(?:what|which).*burns.*(?:oxygen|fire)", "fire"),
+    # ── Food questions ──
+    (r"(?:what|which).*yellow.*(?:fruit|banana)", "banana"),
+    (r"(?:what|which).*(?:round|red).*fruit.*apple", "apple"),
+    (r"(?:what|which).*(?:orange).*(?:citrus|fruit)", "orange"),
+    (r"(?:what|which).*made.*(?:grapes|wine)", "wine"),
+    (r"(?:what|which).*made.*(?:milk|cheese|yogurt|butter)", "dairy"),
+    (r"(?:what|which).*made.*(?:wheat|bread|flour)", "bread"),
+    (r"(?:what|which).*made.*(?:cocoa|cacao|chocolate)", "chocolate"),
+    (r"(?:what|which).*made.*(?:rice)", "rice"),
+    (r"(?:what|which).*made.*(?:apples|cider)", "cider"),
+    (r"(?:what|which).*made.*(?:potatoes|fries)", "potato"),
+    (r"(?:what|which).*made.*(?:bees|honey)", "honey"),
+    # ── Buildings / places ──
+    (r"(?:what|which).*place.*(?:borrow.*book|read.*book)", "library"),
+    (r"(?:what|which).*place.*(?:watch.*(?:film|movie))", "cinema"),
+    (r"(?:what|which).*place.*(?:buy.*(?:medicine|drugs))", "pharmacy"),
+    (r"(?:what|which).*place.*(?:buy.*food|grocery)", "supermarket"),
+    (r"(?:what|which).*place.*(?:workout|exercise|gym)", "gym"),
+    (r"(?:what|which).*place.*(?:sleep.*night|stay.*hotel)", "hotel"),
+    (r"(?:what|which).*place.*(?:swim|pool)", "pool"),
+    (r"(?:what|which).*place.*(?:park.*car)", "parking lot"),
+    (r"(?:what|which).*place.*(?:send.*mail|post.*letter)", "post office"),
+    (r"(?:what|which).*place.*(?:eat.*restaurant)", "restaurant"),
+    # ── Occupations ──
+    (r"(?:what|which).*(?:doctor|treats.*sick)", "doctor"),
+    (r"(?:what|which).*(?:teacher|teaches.*students)", "teacher"),
+    (r"(?:what|which).*(?:nurse|helps.*doctor)", "nurse"),
+    (r"(?:what|which).*(?:police|catch.*criminals)", "police"),
+    (r"(?:what|which).*(?:firefighter|puts out fires)", "firefighter"),
+    (r"(?:what|which).*(?:pilot|flies.*plane)", "pilot"),
+    (r"(?:what|which).*(?:chef|cooks.*food)", "chef"),
+    (r"(?:what|which).*(?:farmer|grows.*crops)", "farmer"),
+    (r"(?:what|which).*(?:lawyer|defends.*court)", "lawyer"),
+    (r"(?:what|which).*(?:engineer|builds.*(?:bridges|machines))", "engineer"),
+    (r"(?:what|which).*(?:scientist|does.*experiments)", "scientist"),
+    (r"(?:what|which).*(?:artist|paints.*pictures)", "artist"),
+    (r"(?:what|which).*(?:plumber|fixes.*pipes)", "plumber"),
+    (r"(?:what|which).*(?:electrician|fixes.*wires)", "electrician"),
+    # ── Tools / objects ──
+    (r"(?:what|which).*use.*(?:cut.*grass|lawn)", "lawn mower"),
+    (r"(?:what|which).*use.*(?:trim.*(?:hedge|bush))", "shears"),
+    (r"(?:what|which).*use.*(?:hang.*picture|level)", "hammer"),
+    (r"(?:what|which).*use.*(?:screw.*(?:screw|bolt))", "screwdriver"),
+    (r"(?:what|which).*use.*(?:tighten.*(?:nut|bolt))", "wrench"),
+    (r"(?:what|which).*use.*(?:drill.*hole)", "drill"),
+    (r"(?:what|which).*use.*(?:saw.*wood|cut.*wood)", "saw"),
+    (r"(?:what|which).*use.*(?:measure.*(?:temperature|fever))", "thermometer"),
+    (r"(?:what|which).*use.*(?:weigh.*(?:food|things))", "scale"),
+    (r"(?:what|which).*use.*(?:look.*(?:stars|microscope))", "microscope"),
+    (r"(?:what|which).*use.*(?:see.*(?:far|distance))", "telescope"),
+    (r"(?:what|which).*use.*(?:magnif.*(?:small|text))", "magnifying glass"),
+    (r"(?:what|which).*use.*(?:type.*computer)", "keyboard"),
+    (r"(?:what|which).*use.*(?:point.*computer.*click)", "mouse"),
+    # ── Animals extended ──
+    (r"animal.*(?:biggest|largest).*(?:land|elephant)", "elephant"),
+    (r"animal.*(?:biggest|largest).*(?:sea|ocean|whale)", "blue whale"),
+    (r"animal.*(?:tallest|giraffe)", "giraffe"),
+    (r"animal.*(?:fastest|cheetah)", "cheetah"),
+    (r"animal.*(?:slowest|snail|tortoise)", "snail"),
+    (r"animal.*(?:longest|giraffe).*(?:neck)", "giraffe"),
+    (r"animal.*(?:stripes|tiger|zebra)", "tiger"),
+    (r"animal.*(?:spots|leopard|cheetah)", "leopard"),
+    (r"animal.*(?:monkey|swings.*trees)", "monkey"),
+    (r"animal.*(?:kangaroo|jumps.*(?:pouch))", "kangaroo"),
+    (r"animal.*(?:penguin|cannot fly.*(?:cold|antarctica))", "penguin"),
+    (r"animal.*(?:polar.*bear|white.*bear)", "polar bear"),
+    (r"animal.*(?:panda|black.*white.*(?:bamboo))", "panda"),
+    (r"animal.*(?:lion|king.*jungle)", "lion"),
+    (r"animal.*(?:snake|no legs)", "snake"),
+    (r"animal.*(?:fish|swims.*water)", "fish"),
+    (r"animal.*(?:bird|has.*wings.*feathers)", "bird"),
+    (r"animal.*(?:bat|flies.*night.*wings)", "bat"),
+    (r"animal.*(?:kangaroo|australia)", "kangaroo"),
+    (r"animal.*(?:koala|eucalyptus)", "koala"),
+    (r"animal.*(?:rabbit|long ears)", "rabbit"),
+    (r"animal.*(?:elephant|trunk)", "elephant"),
+    (r"animal.*(?:rhino|horn.*nose)", "rhinoceros"),
+    (r"animal.*(?:camel|desert.*hump)", "camel"),
+    (r"animal.*(?:giraffe|long neck)", "giraffe"),
+    # ── Space extended ──
+    (r"(?:what|which).*star.*(?:closest.*earth|sun)", "sun"),
+    (r"(?:what|which).*(?:galaxy).*(?:milky way|home)", "milky way"),
+    (r"(?:what|which).*(?:spacecraft|rocket).*(?:moon|landing)", "rocket"),
+    (r"(?:what|which).*(?:space station|orbit)", "iss"),
+    (r"(?:what|which).*(?:dwarf planet)", "pluto"),
+    (r"(?:what|which).*(?:red planet)", "mars"),
+    (r"(?:what|which).*(?:blue planet)", "earth"),
+    (r"(?:what|which).*(?:gas giant)", "jupiter"),
+    (r"(?:what|which).*(?:planet.*(?:biggest|largest))", "jupiter"),
+    # ── Misc common knowledge ──
+    (r"(?:what|which).*language.*(?:most spoken|spoken.*world)", "english"),
+    (r"(?:what|which).*language.*(?:china|chinese)", "chinese"),
+    (r"(?:what|which).*(?:currency).*(?:usa|america|dollar)", "dollar"),
+    (r"(?:what|which).*(?:currency).*(?:europe|euro)", "euro"),
+    (r"(?:what|which).*(?:currency).*(?:japan|yen)", "yen"),
+    (r"(?:what|which).*(?:currency).*(?:uk|britain|pound)", "pound"),
+    (r"(?:what|which).*(?:color).*(?:banana|yellow)", "yellow"),
+    (r"(?:what|which).*(?:color).*(?:sky)", "blue"),
+    (r"(?:what|which).*(?:color).*(?:grass|leaf|leaves)", "green"),
+    (r"(?:what|which).*(?:color).*(?:snow|milk)", "white"),
+    (r"(?:what|which).*(?:color).*(?:blood)", "red"),
+    (r"(?:what|which).*(?:color).*(?:pumpkin|carrot|orange)", "orange"),
+    (r"(?:what|which).*(?:color).*(?:chocolate|coffee|brown)", "brown"),
+    (r"(?:what|which).*(?:color).*(?:coal|night)", "black"),
+    (r"(?:what|which).*(?:color).*(?:pink|flamingo)", "pink"),
+    (r"(?:what|which).*(?:color).*(?:purple|grape|eggplant)", "purple"),
+    (r"(?:what|which).*(?:shape).*(?:3 sides)", "triangle"),
+    (r"(?:what|which).*(?:shape).*(?:4 sides)", "square"),
+    (r"(?:what|which).*(?:shape).*(?:5 sides)", "pentagon"),
+    (r"(?:what|which).*(?:shape).*(?:6 sides)", "hexagon"),
+    (r"(?:what|which).*(?:shape).*(?:round|circle)", "circle"),
+    (r"(?:what|which).*(?:shape).*(?:8 sides)", "octagon"),
+    (r"(?:what|which).*(?:shape).*(?:3d.*ball)", "sphere"),
+    (r"(?:what|which).*(?:shape).*(?:3d.*box)", "cube"),
+    (r"(?:what|which).*(?:shape).*(?:3d.*pyramid)", "pyramid"),
+    (r"(?:what|which).*(?:shape).*(?:3d.*cylinder)", "cylinder"),
+    (r"(?:what|which).*(?:sport).*(?:football|soccer)", "soccer"),
+    (r"(?:what|which).*(?:sport).*(?:basketball)", "basketball"),
+    (r"(?:what|which).*(?:sport).*(?:baseball)", "baseball"),
+    (r"(?:what|which).*(?:sport).*(?:tennis)", "tennis"),
+    (r"(?:what|which).*(?:sport).*(?:hockey)", "hockey"),
+    (r"(?:what|which).*(?:sport).*(?:swimming)", "swimming"),
+    (r"(?:what|which).*(?:sport).*(?:boxing)", "boxing"),
+    (r"(?:what|which).*(?:sport).*(?:golf)", "golf"),
+    (r"(?:what|which).*(?:sport).*(?:volleyball)", "volleyball"),
 ]
 # Category word sets for "which of these is a/an X" pickers
 CATEGORY_WORDS = {
@@ -2086,6 +2304,187 @@ CATEGORY_WORDS = {
         "rain", "snow", "sun", "wind", "cloud", "storm", "fog", "hail",
     ]),
 }
+
+
+# ── Semantic answer table: topic keywords -> answer ──
+# Matches ANY phrasing that contains the topic keywords, catching
+# question variations the regex patterns miss. Checked after patterns.
+SEMANTIC_ANSWERS = [
+    # (required keywords ALL present, answer)
+    (["pet food", "cans"], "dog food"),
+    (["dog food", "cans"], "dog food"),
+    (["cat food", "cans"], "cat food"),
+    (["string instrument", "strings"], "guitar"),
+    (["instrument", "six", "strings"], "guitar"),
+    (["instrument", "four", "strings"], "violin"),
+    (["instrument", "eighty", "keys"], "piano"),
+    (["instrument", "black", "white", "keys"], "piano"),
+    (["instrument", "keys"], "piano"),
+    (["organ", "pumps", "blood"], "heart"),
+    (["organ", "breathe"], "lungs"),
+    (["organ", "think"], "brain"),
+    (["organ", "digest"], "stomach"),
+    (["organ", "filter", "blood"], "kidney"),
+    (["largest", "organ"], "skin"),
+    (["planet", "closest", "sun"], "mercury"),
+    (["planet", "rings"], "saturn"),
+    (["planet", "red"], "mars"),
+    (["planet", "hottest"], "venus"),
+    (["planet", "largest"], "jupiter"),
+    (["planet", "live"], "earth"),
+    (["planet", "rings"], "saturn"),
+    (["ocean", "largest"], "pacific"),
+    (["ocean", "smallest"], "arctic"),
+    (["continent", "largest"], "asia"),
+    (["continent", "smallest"], "australia"),
+    (["river", "longest"], "nile"),
+    (["mountain", "highest"], "everest"),
+    (["country", "largest", "area"], "russia"),
+    (["desert", "largest"], "sahara"),
+    (["continent", "coldest"], "antarctica"),
+    (["soccer", "players"], "11"),
+    (["basketball", "players"], "5"),
+    (["baseball", "players"], "9"),
+    (["hockey", "players"], "6"),
+    (["golf", "holes"], "18"),
+    (["seconds", "minute"], "60"),
+    (["minutes", "hour"], "60"),
+    (["hours", "day"], "24"),
+    (["days", "week"], "7"),
+    (["months", "year"], "12"),
+    (["planets", "solar"], "8"),
+    (["continents"], "7"),
+    (["oceans"], "5"),
+    (["bones", "body"], "206"),
+    (["chambers", "heart"], "4"),
+    (["colors", "rainbow"], "7"),
+    (["sides", "triangle"], "3"),
+    (["sides", "square"], "4"),
+    (["sides", "pentagon"], "5"),
+    (["sides", "hexagon"], "6"),
+    (["sides", "octagon"], "8"),
+    (["string", "six"], "guitar"),
+    (["animal", "moo"], "cow"),
+    (["animal", "barks"], "dog"),
+    (["animal", "meows"], "cat"),
+    (["animal", "quacks"], "duck"),
+    (["animal", "oinks"], "pig"),
+    (["animal", "neighs"], "horse"),
+    (["animal", "baa"], "sheep"),
+    (["animal", "roars"], "lion"),
+    (["animal", "howls"], "wolf"),
+    (["animal", "chirps"], "bird"),
+    (["animal", "ribbit"], "frog"),
+    (["animal", "hisses"], "snake"),
+    (["animal", "hoots"], "owl"),
+    (["animal", "gobbles"], "turkey"),
+    (["animal", "buzzes"], "bee"),
+    (["animal", "clucks"], "chicken"),
+    (["bees", "make"], "honey"),
+    (["chickens", "lay"], "eggs"),
+    (["cow", "produce"], "milk"),
+    (["frozen", "water"], "ice"),
+    (["opposite", "up"], "down"),
+    (["opposite", "hot"], "cold"),
+    (["opposite", "day"], "night"),
+    (["opposite", "left"], "right"),
+    (["opposite", "big"], "small"),
+    (["opposite", "open"], "closed"),
+    (["opposite", "fast"], "slow"),
+    (["opposite", "wet"], "dry"),
+    (["opposite", "full"], "empty"),
+    (["capital", "france"], "paris"),
+    (["capital", "england"], "london"),
+    (["capital", "spain"], "madrid"),
+    (["capital", "italy"], "rome"),
+    (["capital", "japan"], "tokyo"),
+    (["capital", "germany"], "berlin"),
+    (["capital", "egypt"], "cairo"),
+    (["room", "sink", "dishes"], "kitchen"),
+    (["room", "cook"], "kitchen"),
+    (["room", "bed"], "bedroom"),
+    (["room", "shower"], "bathroom"),
+    (["room", "bathtub"], "bathroom"),
+    (["room", "sofa"], "living room"),
+    (["room", "tv"], "living room"),
+    (["room", "dining"], "dining room"),
+    (["color", "sky"], "blue"),
+    (["color", "grass"], "green"),
+    (["color", "banana"], "yellow"),
+    (["color", "snow"], "white"),
+    (["color", "blood"], "red"),
+    (["color", "stop sign"], "red"),
+    (["color", "pumpkin"], "orange"),
+    (["color", "chocolate"], "brown"),
+    (["color", "coal"], "black"),
+    (["color", "sun"], "yellow"),
+    (["use", "eat soup"], "spoon"),
+    (["use", "cut paper"], "scissors"),
+    (["use", "write"], "pen"),
+    (["use", "tell time"], "clock"),
+    (["use", "read"], "book"),
+    (["use", "take pictures"], "camera"),
+    (["use", "call"], "phone"),
+    (["use", "light", "room"], "lamp"),
+    (["use", "clean", "teeth"], "toothbrush"),
+    (["use", "dry", "hands"], "towel"),
+    (["use", "brush", "hair"], "brush"),
+    (["use", "open", "door"], "key"),
+    (["use", "see", "dark"], "flashlight"),
+    (["use", "keep food cold"], "refrigerator"),
+    (["use", "wash clothes"], "washing machine"),
+    (["wear", "feet"], "shoes"),
+    (["wear", "head"], "hat"),
+    (["wear", "eyes"], "glasses"),
+    (["wear", "hands"], "gloves"),
+    (["wear", "wrist"], "watch"),
+    (["fly", "sky"], "plane"),
+    (["ride", "school"], "bus"),
+    (["drink", "soup"], "spoon"),
+    (["material", "windows"], "glass"),
+    (["material", "paper"], "wood"),
+    (["month", "after", "june"], "july"),
+    (["month", "after", "july"], "august"),
+    (["month", "first", "year"], "january"),
+    (["month", "last", "year"], "december"),
+    (["season", "after", "winter"], "spring"),
+    (["season", "after", "spring"], "summer"),
+    (["season", "after", "summer"], "autumn"),
+    (["day", "after", "tuesday"], "wednesday"),
+    (["day", "after", "monday"], "tuesday"),
+    (["day", "before", "friday"], "thursday"),
+    (["first", "day", "week"], "sunday"),
+    (["which", "larger", "mouse", "horse"], "horse"),
+    (["which", "larger", "cat", "elephant"], "elephant"),
+    (["which", "faster", "cheetah"], "cheetah"),
+    (["which", "faster", "plane", "car"], "plane"),
+    (["which", "colder", "ice", "fire"], "ice"),
+    (["which", "heavier", "elephant", "mouse"], "elephant"),
+    (["legs", "spider"], "8"),
+    (["legs", "dog"], "4"),
+    (["legs", "cat"], "4"),
+    (["legs", "horse"], "4"),
+    (["legs", "insect"], "6"),
+    (["legs", "ant"], "6"),
+    (["legs", "bird"], "2"),
+    (["legs", "person"], "2"),
+    (["wheels", "car"], "4"),
+    (["wheels", "bicycle"], "2"),
+    (["eyes", "human"], "2"),
+    (["fingers", "hand"], "5"),
+    (["toes", "foot"], "5"),
+]
+
+
+def _solve_semantic(text: str) -> Optional[str]:
+    """Answer via topic-keyword table — matches ANY phrasing containing the topics."""
+    if not text:
+        return None
+    t = text.lower()
+    for keywords, answer in SEMANTIC_ANSWERS:
+        if all(kw in t for kw in keywords):
+            return answer
+    return None
 
 
 def _solve_knowledge_question(text: str) -> Optional[str]:
@@ -2404,6 +2803,61 @@ async def solve_hcaptcha_accessibility(page, iframe,
                     return m.group(0) if m else ""
         except Exception as e:
             log(f"[Accessibility] Ollama text error: {e}", level="warn")
+            return ""
+
+    async def _llm_answer_question(question: str, timeout: float = 40.0) -> str:
+        """Ask ANY LLM for a single-word answer. Tries in order:
+        1. Ollama (OLLAMA_URL env) — the existing vision/text endpoint
+        2. OpenAI-compatible endpoint (LLM_API_URL, LLM_API_KEY, LLM_MODEL env)
+        Returns the answer or empty string."""
+        import asyncio
+
+        # ── Option 1: Ollama ──
+        if ollama_url:
+            ans = await _ollama_answer_text(question, timeout=timeout)
+            if ans:
+                return ans
+
+        # ── Option 2: OpenAI-compatible endpoint ──
+        api_url = os.environ.get("LLM_API_URL") or os.environ.get("OPENAI_BASE_URL") or ""
+        api_key = os.environ.get("LLM_API_KEY") or os.environ.get("OPENAI_API_KEY") or ""
+        model = os.environ.get("LLM_MODEL") or "gpt-4o-mini"
+        if not api_url:
+            return ""
+        try:
+            import aiohttp
+            endpoint = api_url.rstrip("/")
+            if not endpoint.endswith("/chat/completions"):
+                endpoint += "/chat/completions"
+            headers = {"Content-Type": "application/json"}
+            if api_key:
+                headers["Authorization"] = "Bearer " + api_key
+            payload = {
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": (
+                        "You are solving a CAPTCHA accessibility question. "
+                        "Answer with exactly ONE word, number, or short phrase. "
+                        "No punctuation, no explanation, no quotes, lowercase."
+                    )},
+                    {"role": "user", "content": "Question: " + question},
+                ],
+                "temperature": 0,
+                "max_tokens": 20,
+            }
+            async with aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=timeout)
+            ) as session:
+                async with session.post(endpoint, json=payload, headers=headers) as resp:
+                    if resp.status != 200:
+                        log(f"[Accessibility] LLM API error {resp.status}", level="warn")
+                        return ""
+                    data = await resp.json()
+                    content = data["choices"][0]["message"]["content"]
+                    m = re.search(r"[a-z0-9]+", content.strip().lower())
+                    return m.group(0) if m else ""
+        except Exception as e:
+            log(f"[Accessibility] LLM API error: {e}", level="warn")
             return ""
 
     async def _screenshot_b64(target, selector: str | None = None) -> str:
@@ -3124,6 +3578,12 @@ async def solve_hcaptcha_accessibility(page, iframe,
             log(f"[Accessibility] Knowledge answer: {knowledge_ans}")
             return knowledge_ans
 
+        # ── Semantic fallback: topic keywords match any phrasing ──
+        semantic_ans = _solve_semantic(text)
+        if semantic_ans is not None:
+            log(f"[Accessibility] Semantic answer: {semantic_ans}")
+            return semantic_ans
+
         # ── PURE NUMBER extraction (e.g. "type the number 42") ──
         num_pat = re.search(r'(?:number|digit|num)\s+[iof]*\s*(\d+)', t)
         if num_pat:
@@ -3146,13 +3606,12 @@ async def solve_hcaptcha_accessibility(page, iframe,
             if local is not None:
                 log(f"[Accessibility] Q{q} solved: {local}")
                 return local
-            log(f"[Accessibility] Q{q} local solver returned None — trying Ollama text", level="warn")
-            # Ollama text fallback for natural-language questions the KB misses
-            if ollama_url:
-                ans = await _ollama_answer_text(text[:400])
-                if ans:
-                    log(f"[Accessibility] Q{q} Ollama answered: {ans}")
-                    return ans
+            log(f"[Accessibility] Q{q} local solver returned None — trying LLM", level="warn")
+            # LLM fallback for natural-language questions the KB misses
+            ans = await _llm_answer_question(text[:400])
+            if ans:
+                log(f"[Accessibility] Q{q} LLM answered: {ans}")
+                return ans
         else:
             log(f"[Accessibility] Q{q} NO TEXT FOUND anywhere", level="error")
         return None
