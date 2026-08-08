@@ -117,15 +117,38 @@ async def _worker_capture_loop(wid: str, cfg: dict, stagger: int) -> None:
 async def _run_worker(wid: str, cfg: dict, proxy=None) -> None:
     state = _workers[wid]
     state["status"] = "starting"
-    state["proxy"] = proxy.get("key", "direct") if (proxy and isinstance(proxy, dict)) else (proxy or "direct")
     state["started_at"] = time.time()
-    max_tries = 3
+    max_tries = 12  # 12 attempts: exhaust proxies, then TOR, then direct
     current_proxy = proxy
+    tried_direct = False
+    tried_tor = False
 
     for attempt in range(max_tries):
         if not _running:
             state["status"] = "stopped"
             return
+
+        # Tier 1: Proxy pool (exhaust ALL files)
+        # Tier 2: TOR rotation (fresh circuit each time)
+        # Tier 3: Direct connection (Railway IP, no proxy)
+        if current_proxy is None and _proxies_available and proxy_pool is not None:
+            current_proxy = proxy_pool.take()
+
+        if current_proxy is None and not tried_tor:
+            tried_tor = True
+            state["proxy"] = "tor"
+            _log(f"[{wid}] Proxy pool exhausted - trying TOR (attempt {attempt+1}/{max_tries})")
+        elif current_proxy is None and not tried_direct:
+            tried_direct = True
+            state["proxy"] = "direct (Railway)"
+            _log(f"[{wid}] TOR failed - trying DIRECT connection (Railway IP) (attempt {attempt+1}/{max_tries})")
+        elif current_proxy is None:
+            state["proxy"] = "none"
+            _log(f"[{wid}] All proxy layers exhausted", level="error")
+            break
+        else:
+            state["proxy"] = current_proxy.get("key", "unknown") if isinstance(current_proxy, dict) else str(current_proxy)
+
         bot = DiscordAutomation(
             headless=cfg.get("headless", True),
             proxy=current_proxy,
@@ -153,36 +176,37 @@ async def _run_worker(wid: str, cfg: dict, proxy=None) -> None:
                         proxy=state["proxy"], worker_id=wid,
                     )
                 _log(f"[{wid}] Done - token {len(acc['token'])} chars")
+                if current_proxy and _proxies_available and proxy_pool is not None:
+                    proxy_pool.release(current_proxy, ok=True)
                 return
             elif ok:
                 state["status"] = "done"
                 _log(f"[{wid}] Signup ok (no token yet)")
+                if current_proxy and _proxies_available and proxy_pool is not None:
+                    proxy_pool.release(current_proxy, ok=True)
                 return
             _log(f"[{wid}] Failed (attempt {attempt+1}/{max_tries})", level="warn")
-            if attempt < max_tries - 1:
-                try:
-                    ctx = bot._context
-                    if ctx:
-                        await ctx.clear_cookies()
-                except Exception:
-                    pass
-                await asyncio.sleep(3)
+            if current_proxy and isinstance(current_proxy, dict) and _proxies_available and proxy_pool is not None:
+                proxy_pool.release(current_proxy, ok=False)
+            current_proxy = None
         except Exception as e:
             state["status"] = "error"
             _log(f"[{wid}] error: {e}")
-            if attempt < max_tries - 1:
-                _log(f"[{wid}] Retry {attempt+2}/{max_tries}")
-                await asyncio.sleep(3)
+            if current_proxy and isinstance(current_proxy, dict) and _proxies_available and proxy_pool is not None:
+                proxy_pool.release(current_proxy, ok=False)
+            current_proxy = None
         finally:
             try:
                 await bot.close()
             except Exception:
                 pass
             state["bot"] = None
+        if attempt < max_tries - 1:
+            await asyncio.sleep(2)
 
     state["status"] = "error"
-    state["step"] = "retries exhausted"
-    if _proxies_available and proxy_pool is not None and current_proxy:
+    state["step"] = "retries exhausted - all proxy layers failed"
+    if current_proxy and _proxies_available and proxy_pool is not None:
         proxy_pool.release(current_proxy, ok=False)
 
 

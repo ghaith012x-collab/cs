@@ -463,9 +463,10 @@ class DiscordAutomation:
             'reduced_motion': 'no-preference',
             'forced_colors': 'none',
         }
-        if self.proxy:
+        if self.proxy and isinstance(self.proxy, dict):
             p = self.proxy
-            server = f"{p.get('proto', 'http')}://{p.get('host')}:{p.get('port')}"
+            proto = p.get('proto', 'http')
+            server = f"{proto}://{p.get('host')}:{p.get('port')}"
             proxy_cfg = {'server': server}
             if p.get('username'):
                 proxy_cfg['username'] = p.get('username')
@@ -473,15 +474,18 @@ class DiscordAutomation:
             ctx_opts['proxy'] = proxy_cfg
             self._log(f"Proxy: {server} (auth={'yes' if p.get('username') else 'no'})")
         elif _tor_check():
+            # Tier 2: TOR SOCKS5 proxy with fresh circuit
+            self._tor_enabled = True
             self._log("[TOR] Using TOR SOCKS5 proxy (fallback)...")
             if _tor_newnym():
                 self._log("[TOR] New identity requested")
             ctx_opts['proxy'] = {'server': 'socks5://127.0.0.1:9050'}
             await asyncio.sleep(2)
         else:
-            self._log("[Proxy] [FAIL] No proxy available - cannot proceed", level="error")
-            # Still create context but mark as unprotected
-            pass
+            # Tier 3: Direct connection (Railway IP, no proxy)
+            # No proxy config set — browser uses the host machine IP directly
+            self._log("[Direct] No proxy available - using direct connection (Railway IP)", level="warn")
+            self._tor_enabled = False
 
         self._context = await self._browser.new_context(**ctx_opts)
         self._log(f"User-Agent: {self._ua[:60]}...")
