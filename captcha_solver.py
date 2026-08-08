@@ -2810,9 +2810,7 @@ async def solve_hcaptcha_accessibility(page, iframe,
                     if resp.status != 200:
                         return ""
                     data = await resp.json()
-                    ans = data["message"]["content"].strip().lower()
-                    m = re.search(r"[a-z0-9]+", ans)
-                    return m.group(0) if m else ""
+                    return data["message"]["content"].strip()
         except Exception as e:
             log(f"[Accessibility] Ollama text error: {e}", level="warn")
             return ""
@@ -3681,6 +3679,33 @@ async def solve_hcaptcha_accessibility(page, iframe,
 
         return None
 
+    async def _vision_answer(hcaptcha, question_text: str = "") -> str:
+        """Screenshot the challenge and ask the VISION model (moondream).
+        moondream is a vision model — it reads questions from images far
+        better than from raw text. This is the path that actually works."""
+        try:
+            b64 = await _screenshot_question(hcaptcha)
+            if not b64:
+                log("[Accessibility] Vision: empty screenshot", level="warn")
+                return ""
+            prompt = (
+                "This is an hCaptcha accessibility challenge. Read the question "
+                "shown in this image and answer it with exactly one word, number, "
+                "or short phrase. No punctuation, no explanation, lowercase."
+            )
+            if question_text:
+                prompt += "\nThe question is about: " + question_text[:200]
+            raw = await _ollama_chat(b64, prompt, timeout=60.0)
+            cleaned = _clean_llm_answer(raw)
+            if cleaned:
+                log(f"[Accessibility] Vision model answered: {cleaned}")
+            else:
+                log(f"[Accessibility] Vision model returned nothing (raw='{raw[:60]}')", level="warn")
+            return cleaned
+        except Exception as e:
+            log(f"[Accessibility] Vision error: {e}", level="warn")
+            return ""
+
     async def _get_answer(hcaptcha, q: int) -> Optional[str]:
         """Get the answer with 3 layers:
         Layer 1: regex patterns (513)   — exact phrasings
@@ -3697,12 +3722,25 @@ async def solve_hcaptcha_accessibility(page, iframe,
 
             # ── Layer 3: unknown question → LLM ──
             log(f"[Accessibility] Q{q} UNKNOWN question (no local match) — calling Layer 3 LLM", level="warn")
+            # moondream is a VISION model — try the screenshot first (it reads
+            # the question from the image), then text chat as backup.
+            if ollama_url:
+                vans = await _vision_answer(hcaptcha, text)
+                if vans:
+                    log(f"[Accessibility] Q{q} Layer 3 vision answered: {vans}")
+                    return vans
             ans = await _llm_answer_question(text)
             if ans:
                 log(f"[Accessibility] Q{q} Layer 3 LLM answered: {ans}")
                 return ans
             log(f"[Accessibility] Q{q} Layer 3 could not answer either", level="error")
         else:
+            log(f"[Accessibility] Q{q} NO TEXT FOUND — trying vision directly", level="warn")
+            if ollama_url:
+                vans = await _vision_answer(hcaptcha)
+                if vans:
+                    log(f"[Accessibility] Q{q} vision answered without text: {vans}")
+                    return vans
             log(f"[Accessibility] Q{q} NO TEXT FOUND anywhere", level="error")
         return None
 
