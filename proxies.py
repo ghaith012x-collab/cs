@@ -1,10 +1,11 @@
 """
 proxies.py — free proxy fetcher, validator and rotating pool.
 
-Supports three formats:
+Supports four formats:
   ip:port
   proto://ip:port
   user:pass@host:port        (authenticated gateway - e.g. nullproxies.com)
+  host:port:user:pass        (BrightData ISP sticky-IP format)
 
 Every proxy may carry optional auth.  The pool hands out proxy dicts so the
 browser worker can pass username/password to Playwright separately.
@@ -36,11 +37,13 @@ PROXY_SOURCES = [
 
 # Local proxy files in the repo that should also be loaded (user uploads)
 LOCAL_PROXY_FILES = [
-    "e52884cb-dfd8-4b04-bdf7-8293a5a62939_proxies.txt",
+    "ips-isp_proxy12026-08-08T17_28_57.556Z.txt",
 ]
 
 # Auth proxy format: user:pass@host:port
 _AUTH_RE = re.compile(r"^([^:]+):([^@]+)@([^:]+):(\d+)$")
+# BrightData sticky-IP format: host:port:user:pass
+_BD_RE = re.compile(r"^([^:]+):(\d+):([^:]+):([^:]+)$")
 # Simple: ip:port or host:port
 _IPPORT_RE = re.compile(r"^([\d.]+):(\d+)$")
 _HOSTPORT_RE = re.compile(r"^([a-zA-Z0-9.-]+):(\d+)$")
@@ -78,6 +81,11 @@ def parse_proxy_list(text: str) -> Dict[str, Dict[str, str]]:
         m = _AUTH_RE.match(line)
         if m:
             username, password, host, port = m.groups()
+            out[line] = normalize(proto, host, port, username, password)
+            continue
+        m = _BD_RE.match(line)
+        if m:
+            host, port, username, password = m.groups()
             out[line] = normalize(proto, host, port, username, password)
             continue
         m = _PROTO_RE.match(line)
