@@ -525,15 +525,19 @@ class DiscordAutomation:
                     return True
 
                 # BLANK RENDER fast-fail — SPA shell mounted but React painted
-                # nothing (0 inputs, 0 buttons, empty text). This is the classic
-                # rate-limited TOR exit node symptom (white/black page). Rotate
-                # immediately instead of burning 30s.
+                # nothing (0 inputs, 0 buttons, empty text).
+                #
+                # IMPORTANT: through TOR, Discord's React bundle routinely takes
+                # 10-18s to boot (older logs show 15s of inputs=0 then success).
+                # A 3s threshold was killing healthy-but-slow circuits. Only
+                # rotate after 15s of sustained blankness — that's a genuinely
+                # dead/rate-limited node, not a slow boot.
                 if (state.get("hasAppMount") and not state.get("inputCount")
                         and not state.get("buttonCount")
                         and not (state.get("textPreview") or "").strip()):
                     blank_streak += 1
-                    if blank_streak >= 3:
-                        self._log("[Nav] BLANK RENDER (SPA mounted, no content) - TOR exit likely rate-limited - rotating circuit", level="warn")
+                    if blank_streak >= 20:
+                        self._log("[Nav] BLANK RENDER for 20s (SPA mounted, no content) - TOR exit likely dead/rate-limited - rotating circuit", level="warn")
                         return False
                 else:
                     blank_streak = 0
