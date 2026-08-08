@@ -608,7 +608,7 @@ function renderCams(){
     html += '<div class="cam" id="cam'+id+'" onclick="openLogModal(&quot;'+id+'&quot;)">';
     html += '<div class="tag">'+id+(proxy?' | '+proxy:'')+'</div>';
     if(st==='live'||st==='done'){
-      html += '<img src="/latest?worker='+id+'&t='+Date.now()+'" onerror="this.style.display='none'">';
+      html += `<img src="/latest?worker=${id}&t=${Date.now()}" onerror="this.style.display='none'">`;
     }else{
       html += '<div class="ph">'+ (st==='starting'?'starting...':(st==='done'?'finished':'idle')) +'</div>';
     }
