@@ -433,15 +433,26 @@ class DiscordAutomation:
         locales = ['en-US','en-GB','en-CA','en-AU']
         loc = random.choice(locales)
         # Standard desktop viewport (1920x1080) — most common real resolution
+        await self._build_context()
+
+        # Done — context created by _build_context with full CDP evasion
+
+    async def _build_context(self) -> None:
+        """Build a fresh browser context with current self.proxy.
+        Shared by initialize() and switch_proxy()."""
+        timezones = ['America/New_York','America/Chicago','America/Denver','America/Los_Angeles',
+                     'Europe/London','Europe/Berlin','Europe/Paris','Asia/Tokyo','Australia/Sydney']
+        tz = random.choice(timezones)
+        locales = ['en-US','en-GB','en-CA','en-AU']
+        loc = random.choice(locales)
         vp = {'width': 1920, 'height': 1080}
-        dsf = self._fingerprint['pixel_ratio']
-        # Spoof geolocation (Discord sees this)
+        dsf = self._fingerprint.get('pixel_ratio', 1.0) if hasattr(self, '_fingerprint') else 1.0
         geos = [
-            {'latitude': 40.7128, 'longitude': -74.0060},   # NYC
-            {'latitude': 34.0522, 'longitude': -118.2437},  # LA
-            {'latitude': 41.8781, 'longitude': -87.6298},   # Chicago
-            {'latitude': 51.5074, 'longitude': -0.1278},    # London
-            {'latitude': 48.8566, 'longitude': 2.3522},     # Paris
+            {'latitude': 40.7128, 'longitude': -74.0060},
+            {'latitude': 34.0522, 'longitude': -118.2437},
+            {'latitude': 41.8781, 'longitude': -87.6298},
+            {'latitude': 51.5074, 'longitude': -0.1278},
+            {'latitude': 48.8566, 'longitude': 2.3522},
         ]
         geo = random.choice(geos)
         ctx_opts = {
@@ -457,7 +468,6 @@ class DiscordAutomation:
             'color_scheme': random.choice(['dark', 'light', 'no-preference']),
             'bypass_csp': True,
             'ignore_https_errors': True,
-            # Ensure clean incognito — no storage/cookies/state ever persist
             'storage_state': None,
             'no_viewport': False,
             'reduced_motion': 'no-preference',
@@ -474,29 +484,24 @@ class DiscordAutomation:
             ctx_opts['proxy'] = proxy_cfg
             self._log(f"Proxy: {server} (auth={'yes' if p.get('username') else 'no'})")
         elif _tor_check():
-            # Tier 2: TOR SOCKS5 proxy with fresh circuit
             self._tor_enabled = True
-            self._log("[TOR] Using TOR SOCKS5 proxy (fallback)...")
+            self._log("[TOR] Using TOR SOCKS5 proxy...")
             if _tor_newnym():
                 self._log("[TOR] New identity requested")
             ctx_opts['proxy'] = {'server': 'socks5://127.0.0.1:9050'}
             await asyncio.sleep(2)
         else:
-            # Tier 3: Direct connection (Railway IP, no proxy)
-            # No proxy config set — browser uses the host machine IP directly
-            self._log("[Direct] No proxy available - using direct connection (Railway IP)", level="warn")
+            self._log("[Direct] No proxy - using direct connection (Railway IP)", level="warn")
             self._tor_enabled = False
 
         self._context = await self._browser.new_context(**ctx_opts)
         self._log(f"User-Agent: {self._ua[:60]}...")
-
         await self._context.add_init_script(INIT_SCRIPT)
         self._page = await self._context.new_page()
 
-        # ── CDP-based evasion (before any page scripts run) ──
         cdp = await self._context.new_cdp_session(self._page)
         await cdp.send("Page.addScriptToEvaluateOnNewDocument", {
-            "source": '''
+            "source": ("""
                 Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
                 Object.defineProperty(navigator, 'plugins', {get: () => {
                     const arr = [
@@ -505,10 +510,7 @@ class DiscordAutomation:
                         {name: 'Native Client', filename: 'internal-nacl-plugin', description: '', length: 2},
                         {name: 'Widevine Content Decryption Module', filename: 'widevinecdmadapter.dll', description: 'Widevine Content Decryption Module', length: 1},
                     ];
-                    for (const p of arr) {
-                        p.item = (i) => p[i];
-                        p.namedItem = (n) => p.find(x => x.name === n);
-                    }
+                    for (const p of arr) { p.item = (i) => p[i]; p.namedItem = (n) => p.find(x => x.name === n); }
                     Object.defineProperty(arr, 'length', {get: () => 4});
                     arr.item = (i) => arr[i];
                     arr.namedItem = (n) => arr.find(x => x.name === n);
@@ -517,23 +519,40 @@ class DiscordAutomation:
                 }});
                 window.chrome = { runtime: {}, loadTimes: () => {}, csi: () => {}, app: {} };
                 Object.defineProperty(navigator, 'permissions', {
-                    get: () => ({
-                        query: (args) => Promise.resolve({state: args.name === 'notifications' ? 'prompt' : 'prompt', onchange: null})
-                    })
+                    get: () => ({ query: (args) => Promise.resolve({state: args.name === 'notifications' ? 'prompt' : 'prompt', onchange: null}) })
                 });
-                // Override navigator.hardwareConcurrency
                 const hw = [4, 8, 8, 12, 16];
                 Object.defineProperty(navigator, 'hardwareConcurrency', {get: () => hw[Math.floor(Math.random() * hw.length)]});
-            '''
+            """)
         })
-
-        # ── Set sec-ch-ua headers for realistic Chrome fingerprint ──
         await self._page.set_extra_http_headers({
             "sec-ch-ua": '"Not/A)Brand";v="8", "Chromium";v="130", "Google Chrome";v="130"',
             "sec-ch-ua-mobile": "?0",
             "sec-ch-ua-platform": '"Windows"',
             "accept-language": "en-US,en;q=0.9",
         })
+
+    async def switch_proxy(self, new_proxy=None) -> bool:
+        """Swap to a new proxy without restarting the browser.
+        Returns True on success."""
+        try:
+            if self._page:
+                await self._page.close()
+            if self._context:
+                await self._context.close()
+        except Exception:
+            pass
+        self._page = None
+        self._context = None
+        self.proxy = new_proxy
+        try:
+            await self._build_context()
+            label = 'proxy ' + str(new_proxy.get('key','?')[:40]) if new_proxy else 'direct/TOR'
+            self._log(f"[Switch] Context rebuilt with {label}")
+            return True
+        except Exception as e:
+            self._log(f"[Switch] Context rebuild failed: {e}", level="error")
+            return False
 
     async def _rebuild_context_with_tor(self) -> bool:
         """Close the context and reopen WITH a fresh TOR circuit."""
