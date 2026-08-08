@@ -1497,6 +1497,10 @@ class HCaptchaSolver:
 # Used for hCaptcha "pick the animal" accessibility challenges
 # ═══════════════════════════════════════════════════════════════
 ANIMAL_WORDS = frozenset([
+    # Baby animals (frequently used in pick-the-animal challenges)
+    "piglet","kitten","puppy","calf","chick","lamb","foal","fawn","duckling",
+    "gosling","kid","cub","joey","cygnet","eaglet","owlet","leveret","pullet",
+    "heifer","hatchling","fry","bunny","kit","filly","colt","sprat","parr",
     "aardvark","abalone","agouti","albatross","alligator","alpaca","anaconda",
     "angelfish","angelshark","ant","anteater","antelope","ape","aphid",
     "armadillo","asp","axolotl","baboon","badger","bandicoot","barnacle",
@@ -1504,7 +1508,7 @@ ANIMAL_WORDS = frozenset([
     "bilby","binturong","bison","blackbird","blowfish","bluebird","boa",
     "bobcat","bongo","bonobo","buffalo","bull","bullfrog","bumblebee",
     "butterfly","caiman","camel","canary","capybara","caracal","cardinal",
-    "caribou","carp","caterpillar","catfish","cattle","centipede",
+    "caribou","carp","caterpillar","cat","catfish","cattle","centipede",
     "chameleon","cheetah","chickadee","chicken","chimpanzee","chinchilla",
     "chipmunk","cicada","clam","clownfish","coati","cobra","cockatoo",
     "cockroach","cod","collie","conch","condor","coral","cougar","cow",
@@ -1517,7 +1521,7 @@ ANIMAL_WORDS = frozenset([
     "gazelle","gecko","gerbil","gibbon","giraffe","gnat","gnu","goat",
     "goldfinch","goldfish","goose","gopher","gorilla","grasshopper",
     "grouper","grouse","gull","guppy","haddock","halibut","hamster",
-    "hare","hawk","hedgehog","heron","herring","hippopotamus","hornet",
+    "hare","hawk","hedgehog","hen","heron","herring","hippopotamus","hornet",
     "horse","hummingbird","husky","hyena","hyrax","ibis","iguana",
     "impala","indri","jackal","jackrabbit","jaguar","jay","jellyfish",
     "jerboa","kangaroo","katydid","kinkajou","kiwi","koala","kookaburra",
@@ -1809,7 +1813,7 @@ KNOWLEDGE_QUESTIONS = [
     (r"use.*cut paper|cut paper.*with", "scissors"),
     (r"use.*write|write.*with", "pen"),
     (r"use.*tell time|tell time.*with", "clock"),
-    (r"use.*read|read.*with", "book"),
+    (r"\buse\w*\s+.*\bread\b|\bread\b.*\bwith\b", "book"),
     (r"use.*take pictures|take (?:photos|pictures).*with", "camera"),
     (r"use.*call.*(?:someone|person)|call.*with", "phone"),
     (r"use.*light.*(?:room|dark)|light.*room.*with", "lamp"),
@@ -2099,6 +2103,9 @@ KNOWLEDGE_QUESTIONS = [
     (r"(?:what|which).*frozen.*(?:lake|pond)", "ice"),
     (r"(?:what|which).*cold.*(?:water|drink).*summer", "ice"),
     (r"(?:what|which).*burns.*(?:oxygen|fire)", "fire"),
+    # ── Grains / flour ──
+    (r"grain.*flour|flour.*grain|grain.*bread|make flour|used to make.*flour|made into flour", "wheat"),
+    (r"what grain|which grain", "wheat"),
     # ── Food questions ──
     (r"(?:what|which).*yellow.*(?:fruit|banana)", "banana"),
     (r"(?:what|which).*(?:round|red).*fruit.*apple", "apple"),
@@ -2364,6 +2371,9 @@ SEMANTIC_ANSWERS = [
     (["sides", "hexagon"], "6"),
     (["sides", "octagon"], "8"),
     (["string", "six"], "guitar"),
+    (["grain", "flour"], "wheat"),
+    (["grain", "bread"], "wheat"),
+    (["flour", "bread"], "wheat"),
     (["animal", "moo"], "cow"),
     (["animal", "barks"], "dog"),
     (["animal", "meows"], "cat"),
@@ -2496,12 +2506,14 @@ def _solve_knowledge_question(text: str) -> Optional[str]:
 
     # ── Category pickers: "Which of these is a/an X?" / "...is not a X?" ──
     # Robust against "is a fruit: apple, car, tree" and "comes after" phrasing.
-    cat_match = re.search(
+    for _cat_re in (
         r"which (?:one )?of (?:these|the following|the) "
         r"(?:words )?(?:is not|are not|is|are)? ?(?:an? |the )?([a-z][a-z ]{2,20}?)\s*(?::|\?|\.|$)",
-        t,
-    )
-    if cat_match:
+        r"(?:pick the one (?:that|which)? ?(?:represents|is)|represents|is) (?:an? |the )?([a-z][a-z ]{2,20}?)\s*(?::|\?|\.|,|$)",
+    ):
+        cat_match = re.search(_cat_re, t)
+        if not cat_match:
+            continue
         cat = cat_match.group(1).strip()
         cat_key = None
         for key in CATEGORY_WORDS:
@@ -3305,6 +3317,26 @@ async def solve_hcaptcha_accessibility(page, iframe,
         log("[Accessibility] Challenge wait complete — proceeding to screenshot + AI solve")
         return True
 
+    def _find_options_line(best_source: str, all_texts, best_line: str) -> str:
+        """For 'pick the one that represents an X' challenges the candidate words
+        are rendered on their OWN line (e.g. 'oar, glass, piglet'). Find a short
+        comma-separated list of words near the question."""
+        sources = ([t for s, t in all_texts if s == best_source]
+                   + [t for s, t in all_texts if s != best_source])
+        for text in sources:
+            for line in re.split(r'[\n|]', text):
+                line = line.strip()
+                if not line or len(line) > 60:
+                    continue
+                if line in best_line or best_line in line:
+                    continue
+                if not re.match(r"^[a-zA-Z][a-zA-Z ,-]{3,55}$", line):
+                    continue
+                parts = [p.strip() for p in line.split(',')]
+                if 2 <= len(parts) <= 4 and all(2 <= len(p) <= 18 for p in parts):
+                    return line
+        return ''
+
     async def _read_question_text() -> str:
         """EXTREME search: scan page.innerText, EVERY frame innerText,
         and the hCaptcha frame body for question text patterns."""
@@ -3447,7 +3479,14 @@ async def solve_hcaptcha_accessibility(page, iframe,
                     best_source = source
 
         if best_line and best_score >= 4:
-            log(f"[Accessibility] Scored question ({best_score}) from {best_source}: '{best_line[:120]}'")
+            # Picker questions ("pick the one that represents an animal") render
+            # the candidate words on a SEPARATE line ("oar, glass, piglet").
+            # Append that options line so the solver sees the candidates.
+            if re.search(r'pick the one|pick the word|words below|represents|which of these|which one', best_line, re.IGNORECASE):
+                extra = _find_options_line(best_source, all_texts, best_line)
+                if extra:
+                    best_line = best_line + ' : ' + extra
+            log(f"[Accessibility] Scored question ({best_score}) from {best_source}: '{best_line[:160]}'")
             return best_line
 
         # Priority fallback: concatenated text from any source
@@ -3602,14 +3641,19 @@ async def solve_hcaptcha_accessibility(page, iframe,
         if animal_pat:
             # Extract all words from the text (3+ letters)
             words = re.findall(r'\b([a-zA-Z]{3,})\b', orig)
-            # Filter to only animal words
-            candidates = [w for w in words if w.lower() in ANIMAL_WORDS]
+            # Generic category words ("animal", "creature", "one"...) are NOT
+            # answers — the real candidates are the option words. Exclude them.
+            generic = {'animal', 'creature', 'beast', 'living', 'thing', 'which',
+                       'one', 'pick', 'the', 'that', 'from', 'words', 'below',
+                       'represents', 'an', 'and', 'are', 'is', 'of', 'these',
+                       'them', 'with', 'you', 'your', 'following', 'any'}
+            candidates = [w for w in words if w.lower() in ANIMAL_WORDS and w.lower() not in generic]
             if candidates:
                 log(f"[Accessibility] Animal challenge: candidates={candidates} from {words}")
                 return candidates[0]
             # Broader: normalize and check against ANIMAL_WORDS
             for w in words:
-                if w.lower() in ANIMAL_WORDS:
+                if w.lower() in ANIMAL_WORDS and w.lower() not in generic:
                     return w
 
         # ── KNOWLEDGE QUESTIONS (rooms, colors, animal sounds, counting...) ──
