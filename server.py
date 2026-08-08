@@ -640,36 +640,98 @@ class DiscordAutomation:
             except Exception:
                 app_mount = False
 
-            # ── Poll for the registration form ──
+            # -- Poll for any registration form element --
+            # Discord may show: email form, age gate, username picker, QR code, or
+            # phone number prompt depending on the proxy geo and IP reputation.
             self._log("[Nav] Waiting for registration form to render...")
+            form_found = False
             for poll_sec in range(1, 31):  # up to 30 seconds
                 try:
-                    cnt = await asyncio.wait_for(
-                        self._page.locator('input[name="email"]').count(), timeout=1.5)
-                    if cnt > 0:
-                        self._log(f"[Nav] SUCCESS! Form rendered after {poll_sec}s (attempt {attempt})")
+                    checks = await asyncio.wait_for(self._page.evaluate("""() => {
+                        const body = document.body;
+                        if (!body) return JSON.stringify({error: "no-body"});
+                        const text = body.innerText || "";
+                        const email = document.querySelector('input[name="email"], input[type="email"], input[id*="email" i]');
+                        const username = document.querySelector('input[name="username"]');
+                        const password = document.querySelector('input[name="password"], input[type="password"]');
+                        const hasAge = /birthday|date of birth|born|how old/i.test(text.substring(0, 400));
+                        const hasMonth = document.querySelector('[class*="month" i], [aria-label*="month" i], select');
+                        const isLogin = /login|sign in|welcome back/i.test(text.substring(0, 400));
+                        const hasQR = document.querySelector('img[src*="qr" i], [class*="qr" i], canvas');
+                        const continueBtn = document.querySelector('button[type="submit"]');
+                        const hasAppMount = document.querySelector("#app-mount") !== null;
+                        return JSON.stringify({
+                            email: email !== null,
+                            username: username !== null,
+                            password: password !== null,
+                            ageGate: hasAge || hasMonth !== null,
+                            isLogin: isLogin,
+                            hasQR: hasQR,
+                            hasButton: continueBtn !== null,
+                            hasAppMount: hasAppMount,
+                            textPreview: text.substring(0, 250)
+                        });
+                    }"""), timeout=2.0)
+                    state = json.loads(checks)
+                except Exception:
+                    state = None
+
+                if state:
+                    if state.get("email") and state.get("username"):
+                        self._log(f"[Nav] SUCCESS! Full form rendered after {poll_sec}s (attempt {attempt})")
                         return True
-                except Exception:
-                    pass
-                # Also try: look for the register button text
-                try:
-                    body_text = await asyncio.wait_for(
-                        self._page.evaluate("document.body ? document.body.innerText.substring(0, 500) : ''"),
-                        timeout=1.0)
-                    if "Create an account" in body_text or "email" in body_text.lower():
-                        self._log(f"[Nav] Register page content detected (attempt {attempt})")
-                except Exception:
-                    pass
-                # Check if we got redirected
+                    if state.get("email") and state.get("password"):
+                        self._log(f"[Nav] SUCCESS! Email+password form rendered after {poll_sec}s")
+                        return True
+                    if state.get("ageGate"):
+                        self._log(f"[Nav] Age gate detected after {poll_sec}s - returning true, form filler handles it")
+                        form_found = True
+                        break
+                    if state.get("isLogin"):
+                        self._log(f"[Nav] Login page detected - Discord redirected us from register->login. Text: {str(state.get('textPreview',''))[:120]}")
+                        if poll_sec >= 10:
+                            break
+                    if state.get("hasQR"):
+                        self._log(f"[Nav] QR code page detected - Discord wants phone verification. Text: {str(state.get('textPreview',''))[:120]}")
+                    if poll_sec % 5 == 0:
+                        preview = str(state.get('textPreview', ''))[:100]
+                        self._log(f"[Nav] Poll {poll_sec}s: email={state.get('email')} ageGate={state.get('ageGate')} login={state.get('isLogin')} text={preview}")
+
+                # Check for redirect to app
                 try:
                     cur = await asyncio.wait_for(
                         self._page.evaluate("location.href"), timeout=1.0)
                     if "discord.com/app" in cur or "discord.com/channels" in cur:
-                        self._log(f"[Nav] Redirected to app (logged in?): {cur[:60]}")
+                        self._log(f"[Nav] Redirected to app: {cur[:60]}")
                         return True
                 except Exception:
                     pass
                 await asyncio.sleep(1.0)
+
+            if form_found:
+                return True
+
+            # Dump final page state for debugging
+            try:
+                debug = await asyncio.wait_for(self._page.evaluate("""() => {
+                    const body = document.body;
+                    return JSON.stringify({
+                        title: document.title,
+                        url: location.href,
+                        bodyText: body ? body.innerText.substring(0, 600) : "no-body",
+                        inputs: Array.from(document.querySelectorAll("input")).map(function(e) { return {
+                            type: e.type, name: e.name, id: e.id,
+                            placeholder: e.placeholder, visible: e.offsetParent !== null
+                        }; }).slice(0, 10),
+                        buttons: Array.from(document.querySelectorAll("button")).map(function(e) { return {
+                            text: e.innerText, type: e.type, visible: e.offsetParent !== null
+                        }; }).slice(0, 5)
+                    });
+                }"""), timeout=3.0)
+                debug_state = json.loads(debug)
+                self._log(f"[Nav] DEBUG page state: {json.dumps(debug_state)[:500]}")
+            except Exception as e:
+                self._log(f"[Nav] DEBUG failed: {e}")
 
             self._log(f"[Nav] Form did not render within 30s (attempt {attempt})", level="warn")
             if attempt < 3:
