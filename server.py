@@ -473,6 +473,7 @@ class DiscordAutomation:
         # ── Poll for form elements ──
         # Discord uses aria-label on inputs, not name/id — use broad selectors
         self._log("[Nav] Waiting for registration form to render...")
+        blank_streak = 0
         for poll_sec in range(1, 31):
             try:
                 checks = await asyncio.wait_for(self._page.evaluate("""() => {
@@ -522,6 +523,20 @@ class DiscordAutomation:
                 if state.get("ageGate"):
                     self._log(f"[Nav] Age gate detected after {poll_sec}s - returning true, form filler handles it")
                     return True
+
+                # BLANK RENDER fast-fail — SPA shell mounted but React painted
+                # nothing (0 inputs, 0 buttons, empty text). This is the classic
+                # rate-limited TOR exit node symptom (white/black page). Rotate
+                # immediately instead of burning 30s.
+                if (state.get("hasAppMount") and not state.get("inputCount")
+                        and not state.get("buttonCount")
+                        and not (state.get("textPreview") or "").strip()):
+                    blank_streak += 1
+                    if blank_streak >= 3:
+                        self._log("[Nav] BLANK RENDER (SPA mounted, no content) - TOR exit likely rate-limited - rotating circuit", level="warn")
+                        return False
+                else:
+                    blank_streak = 0
 
                 if state.get("isLogin") and poll_sec >= 10:
                     self._log(f"[Nav] Login page detected (redirected from register)")
@@ -811,6 +826,19 @@ class DiscordAutomation:
                 if await self._past_captcha():
                     self._log(f"[Captcha] Page navigated to {self._page.url[:50]} - no captcha needed")
                     return True
+                # Fast-fail: if Discord is rate-limiting this TOR exit node it
+                # replies with text like "rate limited" instead of a captcha.
+                try:
+                    rl = await asyncio.wait_for(
+                        self._page.evaluate("() => document.body ? document.body.innerText.substring(0, 400) : ''"),
+                        timeout=1.5)
+                    rl_l = (rl or "").lower()
+                    if any(k in rl_l for k in ("rate limit", "ratelimited", "too many requests",
+                                               "slowdown", "try again later", "you are being rate", "429")):
+                        self._log("[Captcha] RATE LIMITED after submit - rotating TOR circuit", level="warn")
+                        return False
+                except Exception:
+                    pass
                 self._log(f"[Captcha] No hCaptcha iframe yet (attempt {attempt+1}/6)")
                 await asyncio.sleep(2.0)
 
@@ -1211,19 +1239,24 @@ class DiscordAutomation:
                             const cb = el.querySelector('input[type="checkbox"]');
                             if (cb) {
                                 cb.scrollIntoView({block: 'center'});
-                                cb.click();
-                                cb.checked = true;
-                                cb.dispatchEvent(new Event('change', { bubbles: true }));
-                                cb.dispatchEvent(new Event('input', { bubbles: true }));
-                                return 'found_tos_checkbox';
+                                // Prefer clicking the wrapping label / clickable parent
+                                // (trusted gesture -> React state actually updates).
+                                const clickable = cb.closest('label') || cb.parentElement;
+                                let r = cb.getBoundingClientRect();
+                                if (clickable && clickable.offsetParent !== null) {
+                                    const cr = clickable.getBoundingClientRect();
+                                    if (cr.width >= 5 && cr.height >= 5) r = cr;
+                                }
+                                window.__tosPoint = {x: r.x + r.width/2, y: r.y + r.height/2, kind: 'native'};
+                                return JSON.stringify(window.__tosPoint);
                             }
                             // Also try role=checkbox
                             const roleCb = el.querySelector('[role="checkbox"]');
                             if (roleCb) {
-                                roleCb.click();
-                                roleCb.setAttribute('aria-checked', 'true');
-                                roleCb.dispatchEvent(new Event('change', { bubbles: true }));
-                                return 'found_tos_role';
+                                roleCb.scrollIntoView({block: 'center'});
+                                const rr = roleCb.getBoundingClientRect();
+                                window.__tosPoint = {x: rr.x + rr.width/2, y: rr.y + rr.height/2, kind: 'role'};
+                                return JSON.stringify(window.__tosPoint);
                             }
                             el = el.parentElement;
                         }
@@ -1258,7 +1291,20 @@ class DiscordAutomation:
 
                     return 'not_found';
                 }""")
-                if tos_result and tos_result != 'not_found':
+                tos_point = None
+                try:
+                    if tos_result and tos_result.startswith('{'):
+                        tos_point = json.loads(tos_result)
+                except Exception:
+                    tos_point = None
+                if tos_point and 'x' in tos_point and 'y' in tos_point:
+                    # REAL trusted mouse click — this is what makes Discord's
+                    # React form actually register the checkbox state.
+                    await self._page.mouse.click(float(tos_point['x']), float(tos_point['y']))
+                    await asyncio.sleep(1.2)
+                    self._log(f"[OK] ToS real mouse click dispatched (kind={tos_point.get('kind')})")
+                    tos_checked = True
+                elif tos_result and tos_result != 'not_found':
                     tos_checked = True
                     self._log(f"[OK] ToS checked via JS: {tos_result}")
                 else:
