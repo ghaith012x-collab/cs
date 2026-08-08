@@ -588,6 +588,16 @@ class DiscordAutomation:
             try:
                 await self._page.goto(url, wait_until="load", timeout=timeout_ms)
                 self._log(f"[Nav] Page loaded successfully (attempt {attempt})")
+                # Quick check: did we actually get Discord or a block page?
+                try:
+                    body_text = await asyncio.wait_for(
+                        self._page.evaluate("document.body ? document.body.innerText.substring(0, 500) : ''"),
+                        timeout=3.0)
+                    if body_text and any(kw in body_text.lower() for kw in ("forbidden", "403 forbidden", "access denied", "cloudflare", "attention required")):
+                        self._log(f"[Nav] Page body contains block text! Content: {body_text[:120]}", level="warn")
+                        # Don't treat as success - will fall through to retry
+                except Exception:
+                    pass
             except Exception as e:
                 err = str(e)[:120]
                 self._log(f"[Nav] Page.goto error (attempt {attempt}): {err}", level="warn")
@@ -605,7 +615,9 @@ class DiscordAutomation:
             # ── Cloudflare / block detection ──
             blocked_keywords = ["attention required", "just a moment", "blocked",
                                "cloudflare", "ddos-guard", "captcha",
-                               "checking your browser", "verify you are human"]
+                               "checking your browser", "verify you are human",
+                               "forbidden", "403", "access denied",
+                               "you do not have permission", "error 1020"]
             title_lower = (page_title or "").lower()
             if any(kw in title_lower for kw in blocked_keywords):
                 self._log('[Nav] BLOCKED by Cloudflare/firewall (title: "' + str(page_title)[:60] + '")', level="warn")
