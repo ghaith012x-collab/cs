@@ -595,7 +595,13 @@ class DiscordAutomation:
                         timeout=3.0)
                     if body_text and any(kw in body_text.lower() for kw in ("forbidden", "403 forbidden", "access denied", "cloudflare", "attention required")):
                         self._log(f"[Nav] Page body contains block text! Content: {body_text[:120]}", level="warn")
-                        # Don't treat as success - will fall through to retry
+                        if self._tor_enabled and attempt < 3:
+                            self._log("[Nav] Rotating TOR circuit...")
+                            await self._rebuild_context_with_tor()
+                            await asyncio.sleep(2)
+                        elif attempt < 3:
+                            await asyncio.sleep(1)
+                        continue  # skip polling, go straight to next attempt
                 except Exception:
                     pass
             except Exception as e:
