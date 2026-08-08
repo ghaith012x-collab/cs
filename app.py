@@ -181,6 +181,8 @@ async def _run_worker(wid: str, cfg: dict, proxy=None) -> None:
                 continue
         else:
             # Reuse browser: just swap the proxy context (fast, no OOM)
+            # Reset email so start_discord_signup creates a fresh inbox per proxy
+            bot._email = ""
             if not await bot.switch_proxy(current_proxy):
                 if current_proxy and isinstance(current_proxy, dict) and _proxies_available and proxy_pool is not None:
                     proxy_pool.release(current_proxy, ok=False)

@@ -650,13 +650,8 @@ class DiscordAutomation:
                 (not page_title and "error" in (page_url or "").lower())
             )
             if dead_proxy:
-                self._log(f"[Nav] DEAD PROXY on attempt {attempt} (url={page_url[:60]}) - skipping to next attempt", level="warn")
-                if self._tor_enabled and attempt < 3:
-                    await self._rebuild_context_with_tor()
-                    await asyncio.sleep(2)
-                elif attempt < 3:
-                    await asyncio.sleep(2)
-                continue  # on attempt 3, continue ends the loop -> return False
+                self._log(f"[Nav] DEAD PROXY (url={page_url[:60]}) - returning to worker for next proxy", level="warn")
+                return False  # no retries with same dead proxy — let caller rotate
 
             # ── Cloudflare / block detection ──
             blocked_keywords = ["attention required", "just a moment", "blocked",
