@@ -2201,7 +2201,7 @@ KNOWLEDGE_QUESTIONS = [
     (r"(?:what|which).*use.*(?:carry.*books|school.*bag)", "backpack"),
     (r"(?:what|which).*wear.*(?:feet|foot)", "shoes"),
     (r"(?:what|which).*wear.*(?:head|cold)", "hat"),
-    (r"(?:what|which).*wear.*(?:eyes|sun|vision)", "glasses"),
+    (r"(?:what|which).*wear.*(?:eyes|sun|vision)", "sunglasses"),
     (r"(?:what|which).*wear.*(?:hands|cold.*hand)", "gloves"),
     (r"(?:what|which).*wear.*(?:wrist|time)", "watch"),
     # ── Time / measurements ──
@@ -2945,7 +2945,10 @@ KNOWLEDGE_QUESTIONS = [
     (r"(?:what|which).*(?:use|object|tool).*fence|sword.*fight", "foil"),
     (r"(?:what|which).*(?:use|object|tool).*bowl.*(?:strike|pins)", "bowling ball"),
     (r"(?:what|which).*(?:use|object|tool).*(?:skate|ice skate)", "ice skates"),
-    (r"(?:what|which).*(?:use|object|tool).*(?:ski|snow)", "skis"),
+    (r"(?:what|which).*(?:use|object|tool).*\b(?:skis?|snow)\b", "skis"),
+    (r"ship.*(?:stay|hold|keep).*one.*place.*(?:water|sea|ocean)", "anchor"),
+    (r"ships?.*use.*(?:stay|hold|keep).*place", "anchor"),
+    (r"container.*holds?.*milk|holds?.*milk.*(?:refrigerator|fridge)", "carton"),
     (r"(?:what|which).*(?:use|object|tool).*(?:surf|wave)", "surfboard"),
     (r"(?:what|which).*(?:use|object|tool).*(?:skateboard|skate park)", "skateboard"),
     # -- Sleep & furniture --
@@ -3536,7 +3539,7 @@ KNOWLEDGE_QUESTIONS = [
     (r"what.*(?:dns|domain name)", "domain name system"),
     (r"what.*(?:isp|internet service)", "internet service provider"),
     (r"what.*(?:vpn|virtual private)", "virtual private network"),
-    (r"what.*(?:ai|artificial intelligence)", "artificial intelligence"),
+    (r"what.*(?:artificial\s+intelligence|\bai\b)", "artificial intelligence"),
     (r"what.*(?:os|operating system)", "operating system"),
     (r"what.*(?:cpu|central processing)", "central processing unit"),
     (r"what.*(?:ram|random access)", "random access memory"),
@@ -3608,6 +3611,7 @@ KNOWLEDGE_QUESTIONS = [
     (r"do.*magnets.*attract.*(?:iron|metal|steel)", "yes"),
     (r"do.*magnets.*attract.*(?:plastic|wood|paper|glass)", "no"),
     (r"is.*glass.*breakable", "yes"),
+    (r"is.*(?:bread|pizza|cake|pie).*baked.*oven", "yes"),
     (r"is.*metal.*conductive", "yes"),
     (r"is.*wood.*conductive", "no"),
     (r"is.*rubber.*(?:conductive|conductor)", "no"),
@@ -4067,7 +4071,7 @@ SEMANTIC_ANSWERS = [
     (["use", "wash clothes"], "washing machine"),
     (["wear", "feet"], "shoes"),
     (["wear", "head"], "hat"),
-    (["wear", "eyes"], "glasses"),
+    (["wear", "eyes"], "sunglasses"),
     (["wear", "hands"], "gloves"),
     (["wear", "wrist"], "watch"),
     (["fly", "sky"], "plane"),
@@ -7059,8 +7063,11 @@ async def solve_hcaptcha_accessibility(page, iframe,
                 r'|(?:please\s+)?answer\s+the\s+following\s+question\.?\s*',
                 '', text, flags=re.IGNORECASE
             )
-            text = re.sub(r'please\s+try\s+again.*$', '', text, flags=re.IGNORECASE)
+            text = re.sub(r'please\s+try\s+again.*', '', text,
+                          flags=re.IGNORECASE | re.DOTALL)
             text = re.sub(r'\s*\u26a0\ufe0f\s*', ' ', text)
+            text = re.sub(r'\s*(?:verify|skip)\s+en\b[^\w]*$', '', text,
+                          flags=re.IGNORECASE)
             text = re.sub(r'\s+', ' ', text).strip(' .?|:;-')
 
         # ── "Please try again" = the previous answer was rejected. The SAME
