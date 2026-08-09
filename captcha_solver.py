@@ -1167,23 +1167,30 @@ class HSWGenerator:
 
     async def _get_page(self):
         if self._browser is None:
-            from playwright.async_api import async_playwright
+            from browser_engine import async_playwright, ENGINE
+            import stealth as _st
             pw = await async_playwright().start()
-            launch_args = {
+            launch_kw = {
                 "headless": True,
-                "args": [
-                    "--no-sandbox", "--disable-dev-shm-usage",
+                "args": _st.launch_args(headless=True) + [
                     "--disable-web-security",
                     "--window-size=1920,1080",
                 ],
             }
             if self.proxy:
-                launch_args["proxy"] = {"server": self.proxy}
-            self._browser = await pw.chromium.launch(**launch_args)
+                launch_kw["proxy"] = {"server": self.proxy}
+            self._browser = await pw.chromium.launch(**launch_kw)
             self._pw = pw
+            _fp = {"cores": 8, "device_memory": 8, "touch_points": 0,
+                   "locale": "en-US", "languages": ["en-US", "en"],
+                   "locale_profile": None, "gpu": None, "pixel_ratio": 1.0}
             self._context = await self._browser.new_context(
-                viewport={"width": 1920, "height": 1080},
-                user_agent=CHROME_UA,
+                **_st.build_context_options(
+                    _fp, CHROME_UA, viewport={"width": 1920, "height": 1080}
+                )
+            )
+            await self._context.add_init_script(
+                _st.build_init_script(_fp, CHROME_UA)
             )
 
     async def generate(self, session: cffi_requests.Session,
@@ -4312,7 +4319,7 @@ async def solve_hcaptcha_accessibility(page, iframe,
     if not ollama_url:
         ollama_url = os.environ.get("OLLAMA_URL") or os.environ.get("OLLAMA_BASE") or "http://localhost:11434"
     if not ollama_model:
-        ollama_model = os.environ.get("OLLAMA_MODEL") or os.environ.get("OLLAMA_VISION_MODEL") or "llama3.2:1b"
+        ollama_model = os.environ.get("OLLAMA_MODEL") or os.environ.get("OLLAMA_VISION_MODEL") or "qwen3:1.7b"
     ollama_url = ollama_url.rstrip("/")
     log(f"[Accessibility] Ollama endpoint: {ollama_url}  model: {ollama_model}")
     import asyncio
@@ -4340,6 +4347,12 @@ async def solve_hcaptcha_accessibility(page, iframe,
                           if n.split(":")[0] not in
                           {v.split(":")[0] for v in vision_only}]
             candidates = text_names or names
+            # User runs qwen3:1.7b — land on any qwen3 1.x before the
+            # generic prefix list so discovery picks it every time.
+            for n in sorted(candidates, key=lambda x: -len(x)):
+                base, _, tag = n.partition(":")
+                if base == "qwen3" and (tag.startswith("1") or tag.startswith("0.")):
+                    return n
             preferred = ["qwen3", "qwen2.5", "qwen2", "gemma3", "llama3.2", "llama3.1", "llama3",
                          "gemma2", "gemma", "mistral", "phi3", "phi",
                          "deepseek", "tinyllama", "dolphin-llama3", "orca-mini"]
@@ -4357,7 +4370,7 @@ async def solve_hcaptcha_accessibility(page, iframe,
     if not ollama_text_model:
         ollama_text_model = await _discover_text_model()
     if not ollama_text_model:
-        ollama_text_model = ollama_model
+        ollama_text_model = ollama_model or 'qwen3:1.7b' 
     log(f"[Accessibility] Text model in use: {ollama_text_model}")
     if ollama_text_model.split(":")[0].lower() in {"moondream", "llava", "minicpm-v", "bakllava"}:
         log("[Accessibility] [WARN] Only a VISION model is available — text questions may get "
@@ -4509,19 +4522,19 @@ async def solve_hcaptcha_accessibility(page, iframe,
                     return _clean_llm_answer(data["message"]["content"])
 
         try:
-            answers = []
-            for _i in range(votes):
-                ans = await asyncio.wait_for(_post(), timeout=per_sample)
-                if ans:
-                    answers.append(ans)
+            # All votes run in parallel — same wall-clock as a single call,
+            # but the majority answer is far more reliable on small models.
+            raw = await asyncio.gather(*[_post() for _ in range(votes)],
+                                       return_exceptions=True)
+            answers = [a for a in raw if isinstance(a, str) and a]
             if not answers:
                 return ""
             if len(answers) >= 2 and answers[0] == answers[1]:
                 return answers[0]
             if len(answers) >= 2:
-                ans3 = await asyncio.wait_for(_post(), timeout=per_sample)
-                if ans3:
-                    answers.append(ans3)
+                extra = await asyncio.wait_for(_post(), timeout=per_sample)
+                if extra:
+                    answers.append(extra)
             counts = {}
             for a in answers:
                 counts[a] = counts.get(a, 0) + 1

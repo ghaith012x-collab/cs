@@ -114,14 +114,20 @@ async def _worker_capture_loop(wid: str, cfg: dict, stagger: int) -> None:
         await asyncio.sleep(interval)
 
 
+def _next_proxy():
+    """Grab the least-recently-used proxy session, or None for TOR."""
+    if _proxies_available and proxy_pool is not None and proxy_pool.count > 0:
+        return proxy_pool.take()
+    return None
+
+
 async def _run_worker(wid: str, cfg: dict, proxy=None) -> None:
-    """TOR-only worker: fresh TOR circuit per signup attempt.
-    No proxy files, no proxy pool, no BrightData. Just TOR rotation."""
+    """Worker loop: one sticky residential session per signup attempt when
+    the vault proxy pool is configured; fresh TOR circuit fallback."""
     state = _workers[wid]
     state["status"] = "starting"
     state["started_at"] = time.time()
-    state["proxy"] = "tor"
-    max_tries = 12  # 12 TOR circuits before giving up
+    max_tries = 12  # 12 proxy/TOR attempts before giving up
 
     bot = None
 
@@ -131,11 +137,17 @@ async def _run_worker(wid: str, cfg: dict, proxy=None) -> None:
             if bot: await bot.close()
             return
 
-        # ── Launch or reuse browser (TOR-only, no proxy dict) ──
+        # ── Pick a session for this attempt (fallback: TOR) ──
+        if proxy is None:
+            proxy = _next_proxy()
+        state["proxy"] = proxy.get("key", "tor") if proxy else "tor"
+        label = state["proxy"]
+
+        # ── Launch or reuse browser ──
         if bot is None:
             bot = DiscordAutomation(
                 headless=cfg.get("headless", True),
-                proxy=None,  # None = TOR in _build_context
+                proxy=proxy,  # dict = sticky session; None = TOR in _build_context
                 worker_id=wid,
             )
             state["bot"] = bot
@@ -144,13 +156,19 @@ async def _run_worker(wid: str, cfg: dict, proxy=None) -> None:
             except Exception as e:
                 state["status"] = "error"
                 _log(f"[{wid}] Browser launch failed: {e}", level="error")
+                if proxy:
+                    proxy_pool.release(proxy, ok=False)
+                    proxy = None
                 await asyncio.sleep(3)
                 continue
         else:
-            # Reuse browser: close old context, rebuild with fresh TOR circuit
+            # Reuse browser: rotate to a fresh session / TOR circuit
             bot._email = ""
-            if not await bot.switch_proxy(None):  # None triggers TOR in _build_context
+            if not await bot.switch_proxy(proxy):
                 _log(f"[{wid}] Context rebuild failed", level="warn")
+                if proxy:
+                    proxy_pool.release(proxy, ok=False)
+                    proxy = None
                 await asyncio.sleep(2)
                 continue
 
@@ -172,9 +190,9 @@ async def _run_worker(wid: str, cfg: dict, proxy=None) -> None:
                     await db.save_account(
                         email=acc["email"], username=acc["username"],
                         password=acc["password"], token=acc["token"],
-                        proxy="tor", worker_id=wid,
+                        proxy=label, worker_id=wid,
                     )
-                _log(f"[{wid}] Done - token {len(acc['token'])} chars")
+                _log(f"[{wid}] Done - token {len(acc['token'])} chars ({label})")
                 if bot: await bot.close()
                 return
             elif ok:
@@ -182,14 +200,18 @@ async def _run_worker(wid: str, cfg: dict, proxy=None) -> None:
                 _log(f"[{wid}] Signup ok (no token yet)")
                 if bot: await bot.close()
                 return
-            _log(f"[{wid}] Failed (TOR attempt {attempt+1}/{max_tries})", level="warn")
+            _log(f"[{wid}] Failed (attempt {attempt+1}/{max_tries}, {label})", level="warn")
         except Exception as e:
             state["status"] = "error"
             _log(f"[{wid}] error: {e}")
+        # Session failed — release it so the next attempt rotates to a new one
+        if proxy:
+            proxy_pool.release(proxy, ok=False)
+            proxy = None
         await asyncio.sleep(2)
 
     state["status"] = "error"
-    state["step"] = "retries exhausted - all TOR circuits failed"
+    state["step"] = "retries exhausted - all proxy/TOR attempts failed"
     if bot:
         await bot.close()
         state["bot"] = None
@@ -204,11 +226,21 @@ async def _start_all_async(cfg: dict) -> None:
     for wid in WORKER_IDS:
         _workers[wid] = _init_worker(wid)
 
-    # TOR-only — no proxy pool refresh needed
-    _log("[Proxy] TOR-only mode — no proxy files, fresh circuits per attempt")
+    # Load residential proxy sessions (vaultproxies.com etc.) — TOR fallback
+    n_sessions = 0
+    try:
+        if _proxies_available and proxy_pool is not None:
+            await proxy_pool.refresh()
+            n_sessions = proxy_pool.count
+    except Exception as e:
+        _log(f"[Proxy] pool refresh error: {e}", level="warn")
+    if n_sessions:
+        _log(f"[Proxy] {n_sessions} residential sessions loaded — one sticky IP per account")
+    else:
+        _log("[Proxy] No proxy sessions — TOR-only fallback (fresh circuit per attempt)")
 
     for i, wid in enumerate(WORKER_IDS):
-        _log(f"[{wid}] Starting TOR-only worker...")
+        _log(f"[{wid}] Starting worker...")
         asyncio.create_task(_run_worker(wid, cfg, None))
 
 

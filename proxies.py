@@ -11,6 +11,7 @@ Every proxy may carry optional auth.  The pool hands out proxy dicts so the
 browser worker can pass username/password to Playwright separately.
 """
 import asyncio
+import os
 import random
 import re
 import time
@@ -20,8 +21,13 @@ from typing import Dict, List, Optional
 import aiohttp
 
 # ── Public free-proxy sources (raw text) ──
-PROXY_SOURCES = []  # no free proxy fetching — TOR only
-LOCAL_PROXY_FILES = []  # no proxy files — TOR only
+PROXY_SOURCES = []  # no free proxy fetching — vault residential sessions + TOR
+LOCAL_PROXY_FILES = []  # extra proxy files (besides vaultproxies.txt)
+
+# Residential proxy sessions file (gitignored). Format: one user:pass@host:port
+# per line. Sessions from vaultproxies.com expire after their TTL — swap in
+# fresh ones (just change the string after "-s-") without touching code.
+VAULTPROXY_FILE = "vaultproxies.txt"
 
 # Auth proxy format: user:pass@host:port
 _AUTH_RE = re.compile(r"^([^:]+):([^@]+)@([^:]+):(\d+)$")
@@ -107,6 +113,46 @@ def _load_local_files() -> Dict[str, Dict[str, str]]:
         except Exception:
             pass
     return out
+
+
+def _vault_proxy_urls() -> List[str]:
+    """Residential proxy session URLs (user:pass@host:port).
+    Priority: VAULTPROXY_URLS env -> composed from VAULTPROXY_HOST/PORT/
+    USER_PREFIX/PASS/TTL + VAULTPROXY_SESSIONS (comma/newline list — just
+    change the string after -s- when sessions rotate) -> vaultproxies.txt."""
+    urls: List[str] = []
+    env_urls = (os.environ.get("VAULTPROXY_URLS") or "").strip()
+    if env_urls:
+        urls += [u.strip() for u in re.split(r"[\n,;]+", env_urls) if u.strip()]
+    host = (os.environ.get("VAULTPROXY_HOST") or "").strip()
+    port = (os.environ.get("VAULTPROXY_PORT") or "80").strip()
+    user_prefix = (os.environ.get("VAULTPROXY_USER_PREFIX") or "").strip()
+    passwd = (os.environ.get("VAULTPROXY_PASS") or "").strip()
+    sessions = (os.environ.get("VAULTPROXY_SESSIONS") or "").strip()
+    if host and passwd and sessions:
+        ttl = (os.environ.get("VAULTPROXY_TTL") or "600").strip()
+        for s in re.split(r"[\s,;]+", sessions):
+            if s:
+                urls.append(f"{user_prefix}{s}-ttl-{ttl}:{passwd}@{host}:{port}")
+    p = Path(__file__).resolve().parent / VAULTPROXY_FILE
+    if p.exists():
+        urls += [l.strip() for l in p.read_text(errors="ignore").splitlines()
+                 if l.strip() and not l.startswith("#")]
+    return urls
+
+
+def vault_proxies() -> List[Dict[str, str]]:
+    """Parsed vaultproxy sessions. Marked vault=True so the pool skips slow
+    online validation — these are freshly issued residential sessions."""
+    out: Dict[str, Dict[str, str]] = {}
+    for line in _vault_proxy_urls():
+        parsed = parse_proxy_list(line)
+        if parsed:
+            key = next(iter(parsed))
+            pd = parsed[key]
+            pd["vault"] = True
+            out[key] = pd
+    return list(out.values())
 
 
 async def fetch_free_proxies(max_proxies: int = 500) -> List[Dict[str, str]]:
@@ -197,11 +243,15 @@ class ProxyPool:
         }
 
     async def refresh(self) -> None:
+        vault = vault_proxies()
         fetched = await fetch_free_proxies(max_proxies=500)
-        self.fetched_count = len(fetched)
-        working = await validate_proxies(fetched, max_workers=80)
-        self.valid_count = len(working)
-        self._proxies = working
+        self.fetched_count = len(fetched) + len(vault)
+        # Vault sessions are freshly issued (TTL ~10min) — skip slow ipify
+        # validation for them; validate only the free/local-file ones.
+        to_validate = [p for p in fetched if not p.get("vault")]
+        working = await validate_proxies(to_validate, max_workers=80)
+        self.valid_count = len(working) + len(vault)
+        self._proxies = vault + working
         self._used_at = {}
         self._failed = set()
         self.last_refresh = time.time()

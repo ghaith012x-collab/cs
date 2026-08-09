@@ -7,7 +7,7 @@ import socket
 import time
 from typing import Optional
 
-from playwright.async_api import async_playwright
+from browser_engine import async_playwright, ENGINE
 
 from captcha_solver import (
     NoCaptchaAI,
@@ -77,8 +77,21 @@ USER_AGENTS = [
 
 PAST_CAPTCHA_KEYWORDS = ['/channels', '/verify', '/welcome', '/login', '@me', 'discord.com/app']
 
-INIT_SCRIPT = """// ==============================================// Minimal anti-detection — only what matters// NO canvas/audio/WebGL noise (those break Discord's React)// ==============================================(function(){  // --- #1 most important: hide webdriver ---  Object.defineProperty(navigator, 'webdriver', { get: () => undefined });  // --- Fake navigator properties ---  const platforms = ['Win32', 'Win32', 'MacIntel', 'Linux x86_64'];  const cores = [4, 8, 8, 12, 16, 16];  const mem = [4, 8, 8, 16, 16, 32];  const touches = [0, 0, 0, 0, 0, 0, 5];  const p = platforms[Math.floor(Math.random() * platforms.length)];  const c = cores[Math.floor(Math.random() * cores.length)];  const m = mem[Math.floor(Math.random() * mem.length)];  const t = touches[Math.floor(Math.random() * touches.length)];  Object.defineProperty(navigator, 'languages', { get: () => Object.freeze(['en-US', 'en']) });  Object.defineProperty(navigator, 'platform', { get: () => p });  Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => c });  Object.defineProperty(navigator, 'deviceMemory', { get: () => m });  Object.defineProperty(navigator, 'maxTouchPoints', { get: () => t });  Object.defineProperty(navigator, 'vendor', { get: () => 'Google Inc.' });  // --- #2: Fake plugins array (empty = bot, must have 3+) ---  Object.defineProperty(navigator, 'plugins', {    get: () => {      const arr = [        { name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },        { name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai', description: '' },        { name: 'Native Client', filename: 'internal-nacl-plugin', description: '' },      ];      arr.item = (i) => arr[i];      arr.namedItem = (n) => arr.find(x => x.name === n);      arr.refresh = () => {};      Object.defineProperty(arr, 'length', { get: () => 3 });      return arr;    }  });  // --- #3: Fake mimeTypes ---  Object.defineProperty(navigator, 'mimeTypes', {    get: () => {      const arr = [        { type: 'application/pdf', description: 'Portable Document Format', suffixes: 'pdf' },        { type: 'text/pdf', description: 'Portable Document Format', suffixes: 'pdf' },      ];      arr.item = (i) => arr[i];      arr.namedItem = (n) => arr.find(x => x.type === n);      Object.defineProperty(arr, 'length', { get: () => 2 });      return arr;    }  });  // --- #4: chrome.runtime must exist ---  Object.defineProperty(window, 'chrome', { get: () => ({ runtime: {} }), set: () => {} });  // --- Delete automation traces ---  delete window.__playwright;  delete window.__pw_manual;  delete window.__pw_init;  delete window.__nightmare;  delete window._phantom;  delete window.callPhantom;  delete window.Buffer;  delete window.emit;  delete window.spawn;  delete window.webdriver;  delete window.domAutomation;  delete window.domAutomationController;  // --- permissions.query must work ---  const origQuery = window.navigator.permissions.query;  if (origQuery) {    window.navigator.permissions.query = (parameters) => (      parameters.name === 'notifications'        ? Promise.resolve({ state: Notification.permission, onchange: null })        : origQuery(parameters)    );  }})();"""
+import stealth
+from stealth import (
+    apply_cdp_stealth,
+    build_context_options,
+    build_init_script,
+    launch_args,
+)
 
+# Legacy constant kept for compatibility — replaced by stealth.build_init_script
+INIT_SCRIPT = build_init_script(
+    {"cores": 8, "device_memory": 8, "touch_points": 0, "locale": "en-US",
+     "languages": ["en-US", "en"], "locale_profile": None,
+     "gpu": None, "pixel_ratio": 1.0},
+    USER_AGENTS[0],
+)
 
 NAV_TIMEOUT_MS = 60000
 
@@ -135,31 +148,34 @@ def generate_fingerprint(worker_id: str, session_seed: str = "") -> dict:
 
     fonts = ["Arial", "Times New Roman", "Helvetica", "Georgia", "Courier New", "Verdana"]
     font = fonts[int(seed[:8], 16) % len(fonts)]
-
-    canvas_noise = int(seed[8:16], 16) % 10
-
-    webgl_vendors = [
-        ("Intel Inc.", "Intel Iris Xe Graphics"),
-        ("NVIDIA Corporation", "NVIDIA GeForce GTX 1660"),
-        ("NVIDIA Corporation", "NVIDIA GeForce RTX 3060"),
-        ("AMD", "AMD Radeon RX 580"),
-        ("Google Inc.", "ANGLE (Intel, Intel Iris Xe Graphics)"),
-        ("Google Inc.", "ANGLE (NVIDIA, NVIDIA GeForce RTX 3060)"),
-        ("Intel Inc.", "ANGLE (Intel, Intel(R) UHD Graphics 620)"),
-    ]
-    vendor, renderer = webgl_vendors[int(seed[16:24], 16) % len(webgl_vendors)]
-
     color_depths = [24, 24, 24, 30]
     color_depth = color_depths[int(seed[24:32], 16) % len(color_depths)]
     pixel_ratio = 1.0 + (int(seed[24:32], 16) % 5) / 10  # 1.0 - 1.4
 
+    # Consistent identity for the stealth layer (stealth.build_init_script /
+    # build_context_options consume these). GPU comes from stealth so the
+    # WebGL strings match the platform implied by the chosen UA.
+    ua = USER_AGENTS[int(seed[:8], 16) % len(USER_AGENTS)]
+    from stealth import _LOCALE_PROFILES, pick_gpu, ua_platform
+    profile = _LOCALE_PROFILES[int(seed[32:40], 16) % len(_LOCALE_PROFILES)]
+    gpu = pick_gpu(ua_platform(ua)["ch_platform"], int(seed[16:24], 16))
+
     return {
         "font": font,
-        "canvas_noise": canvas_noise,
-        "webgl_vendor": vendor,
-        "webgl_renderer": renderer,
+        "canvas_noise": 0,
+        "webgl_vendor": gpu["webgl_vendor"],
+        "webgl_renderer": gpu["webgl_renderer"],
         "color_depth": color_depth,
         "pixel_ratio": pixel_ratio,
+        "seed": int(seed, 16),
+        "ua": ua,
+        "locale": profile["locale"],
+        "languages": profile["languages"],
+        "locale_profile": profile,
+        "cores": [4, 6, 8, 8, 12, 16][int(seed[8:16], 16) % 6],
+        "device_memory": [4, 8, 8, 16, 16, 32][int(seed[8:16], 16) % 6],
+        "touch_points": 0,
+        "gpu": gpu,
     }
 
 
@@ -204,40 +220,18 @@ class DiscordAutomation:
     async def initialize(self) -> None:
         self._playwright = await async_playwright().start()
 
-        args = [
-            '--incognito',
-            '--incognito',  # double-enforce private browsing
-            '--no-first-run',
-            '--no-default-browser-check',
-            '--disable-restore-session-state',
-            '--disable-session-crashed-bubble',
-            '--aggressive-cache-discard',
-                        '--no-sandbox',
-            '--disable-setuid-sandbox',
-            '--disable-dev-shm-usage',
-            '--disable-extensions',
-            '--disable-background-networking',
-            '--mute-audio',
-            '--disable-default-apps',
-            '--disable-sync',
-            '--disable-translate',
-            '--disable-component-update',
-            '--disable-features=IsolateOrigins,site-per-process,TranslateUI,OptimizationHints',
-            '--password-store=basic',
-            '--use-mock-keychain',
-            '--js-flags=--max-old-space-size=256',
-        ]
+        # Best-human-stealth launch flags (patchright = minimal set, stock
+        # playwright = full hardening set). See stealth.launch_args().
+        args = launch_args(headless=self.headless)
+        self._log(f"[Engine] {ENGINE} launch args: {len(args)}")
 
         self._ua = random.choice(USER_AGENTS)
         self._fingerprint = generate_fingerprint(self.worker_id)
-        self._log(f"Fingerprint: font={self._fingerprint['font']}, gpu={self._fingerprint['webgl_renderer'][:30]}..., dpr={self._fingerprint['pixel_ratio']}")
+        # Keep the fingerprint's UA in sync with the one we actually use.
+        self._ua = self._fingerprint.get("ua") or self._ua
+        self._log(f"Fingerprint: font={self._fingerprint['font']}, gpu={self._fingerprint['webgl_renderer'][:40]}..., dpr={self._fingerprint['pixel_ratio']}")
         self._browser = await self._playwright.chromium.launch(headless=self.headless, args=args)
 
-        timezones = ['America/New_York','America/Chicago','America/Denver','America/Los_Angeles',
-                     'Europe/London','Europe/Berlin','Europe/Paris','Asia/Tokyo','Australia/Sydney']
-        tz = random.choice(timezones)
-        locales = ['en-US','en-GB','en-CA','en-AU']
-        loc = random.choice(locales)
         # Standard desktop viewport (1920x1080) — most common real resolution
         await self._build_context()
 
@@ -246,48 +240,13 @@ class DiscordAutomation:
     async def _build_context(self) -> None:
         """Build a fresh browser context with current self.proxy.
         Shared by initialize() and switch_proxy()."""
-        timezones = ['America/New_York','America/Chicago','America/Denver','America/Los_Angeles',
-                     'Europe/London','Europe/Berlin','Europe/Paris','Asia/Tokyo','Australia/Sydney']
-        tz = random.choice(timezones)
-        locales = ['en-US','en-GB','en-CA','en-AU']
-        loc = random.choice(locales)
         vp = {'width': 1920, 'height': 1080}
-        dsf = self._fingerprint.get('pixel_ratio', 1.0) if hasattr(self, '_fingerprint') else 1.0
-        geos = [
-            {'latitude': 40.7128, 'longitude': -74.0060},
-            {'latitude': 34.0522, 'longitude': -118.2437},
-            {'latitude': 41.8781, 'longitude': -87.6298},
-            {'latitude': 51.5074, 'longitude': -0.1278},
-            {'latitude': 48.8566, 'longitude': 2.3522},
-        ]
-        geo = random.choice(geos)
-        ctx_opts = {
-            'viewport': vp,
-            'user_agent': self._ua,
-            'timezone_id': tz,
-            'locale': loc,
-            'geolocation': geo,
-            'permissions': ['geolocation'],
-            'device_scale_factor': dsf,
-            'is_mobile': False,
-            'has_touch': False,
-            'color_scheme': random.choice(['dark', 'light', 'no-preference']),
-            'bypass_csp': True,
-            'ignore_https_errors': True,
-            'storage_state': None,
-            'no_viewport': False,
-            'reduced_motion': 'no-preference',
-            'forced_colors': 'none',
-        }
+        ctx_opts = build_context_options(
+            self._fingerprint, self._ua, proxy=self.proxy, viewport=vp
+        )
         if self.proxy and isinstance(self.proxy, dict):
             p = self.proxy
-            proto = p.get('proto', 'http')
-            server = f"{proto}://{p.get('host')}:{p.get('port')}"
-            proxy_cfg = {'server': server}
-            if p.get('username'):
-                proxy_cfg['username'] = p.get('username')
-                proxy_cfg['password'] = p.get('password', '')
-            ctx_opts['proxy'] = proxy_cfg
+            server = f"{p.get('proto', 'http')}://{p.get('host')}:{p.get('port')}"
             self._log(f"Proxy: {server} (auth={'yes' if p.get('username') else 'no'})")
         elif _tor_check():
             self._tor_enabled = True
@@ -295,7 +254,7 @@ class DiscordAutomation:
             if _tor_newnym():
                 self._log("[TOR] New identity requested")
             ctx_opts['proxy'] = {'server': 'socks5://127.0.0.1:9050'}
-            await asyncio.sleep(2)
+            await asyncio.sleep(1)
         else:
             self._log("[TOR] [FATAL] TOR SOCKS5 (127.0.0.1:9050) NOT reachable - TOR-only mode requires TOR running on this instance", level="error")
             self._tor_enabled = False
@@ -303,20 +262,13 @@ class DiscordAutomation:
 
         self._context = await self._browser.new_context(**ctx_opts)
         self._log(f"User-Agent: {self._ua[:60]}...")
-        await self._context.add_init_script(INIT_SCRIPT)
+        await self._context.add_init_script(
+            build_init_script(self._fingerprint, self._ua)
+        )
         self._page = await self._context.new_page()
 
         # CDP-level webdriver removal — runs BEFORE init scripts, catches early checks
-        cdp = await self._context.new_cdp_session(self._page)
-        await cdp.send("Page.addScriptToEvaluateOnNewDocument", {
-            "source": "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
-        })
-        await self._page.set_extra_http_headers({
-            "sec-ch-ua": '"Not/A)Brand";v="8", "Chromium";v="130", "Google Chrome";v="130"',
-            "sec-ch-ua-mobile": "?0",
-            "sec-ch-ua-platform": '"Windows"',
-            "accept-language": "en-US,en;q=0.9",
-        })
+        await apply_cdp_stealth(self._context, self._page)
 
     async def switch_proxy(self, new_proxy=None) -> bool:
         """Swap to a new proxy without restarting the browser.
@@ -355,26 +307,23 @@ class DiscordAutomation:
                 return False
             if _tor_newnym():
                 self._log("[Nav] Fresh TOR circuit requested")
-            await asyncio.sleep(2)
-            timezones2 = random.choice(['America/New_York','America/Chicago','America/Denver','America/Los_Angeles','Europe/London','Europe/Berlin','Europe/Paris','Asia/Tokyo'])
-            vp2 = random.choice([
-                {'width': 860, 'height': 640},
-                {'width': 1024, 'height': 768},
-                {'width': 900, 'height': 700},
-            ])
+            await asyncio.sleep(1)
             self._context = await self._browser.new_context(
-                viewport=vp2,
-                user_agent=self._ua,
-                timezone_id=timezones2,
-                locale='en-US',
-                proxy={'server': 'socks5://127.0.0.1:9050'},
-                bypass_csp=True,
-                ignore_https_errors=True,
-                storage_state=None,
-                no_viewport=False,
+                **build_context_options(
+                    self._fingerprint, self._ua,
+                    proxy={'proto': 'socks5', 'host': '127.0.0.1', 'port': '9050'},
+                    viewport=random.choice([
+                        {'width': 860, 'height': 640},
+                        {'width': 1024, 'height': 768},
+                        {'width': 900, 'height': 700},
+                    ]),
+                )
             )
-            await self._context.add_init_script(INIT_SCRIPT)
+            await self._context.add_init_script(
+                build_init_script(self._fingerprint, self._ua)
+            )
             self._page = await self._context.new_page()
+            await apply_cdp_stealth(self._context, self._page)
             self._log("[Nav] Rebuilt browser context WITH fresh TOR proxy")
             return True
         except Exception as e:

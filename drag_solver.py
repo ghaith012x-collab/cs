@@ -31,7 +31,7 @@ from typing import Optional, Tuple
 import cv2
 import numpy as np
 from PIL import Image
-from playwright.async_api import async_playwright
+from browser_engine import async_playwright, ENGINE
 
 # ─── config ───────────────────────────────────────────────────
 HCAPTCHA_URL = "https://accounts.hcaptcha.com/demo"

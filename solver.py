@@ -36,7 +36,7 @@ import cv2
 import numpy as np
 from curl_cffi import requests as cffi_requests
 from PIL import Image
-from playwright.async_api import async_playwright
+from browser_engine import async_playwright, ENGINE
 
 # ═══════════════════════════════════════════════════════════════
 # Config
@@ -318,25 +318,32 @@ class HSWGenerator:
         self._hsw_js = resp.text
 
     async def _get_page(self):
-        """Launch Playwright browser if not already running."""
+        """Launch stealth browser if not already running."""
         if self._browser is None:
+            import stealth as _st
             pw = await async_playwright().start()
-            launch_args = {
+            launch_kw = {
                 "headless": True,
-                "args": [
-                    "--no-sandbox", "--disable-dev-shm-usage",
+                "args": _st.launch_args(headless=True) + [
                     # CSP disabled for hsw.js WASM
                     "--disable-web-security",
                     "--window-size=1920,1080",
                 ],
             }
             if self.proxy:
-                launch_args["proxy"] = {"server": self.proxy}
-            self._browser = await pw.chromium.launch(**launch_args)
+                launch_kw["proxy"] = {"server": self.proxy}
+            self._browser = await pw.chromium.launch(**launch_kw)
             self._pw = pw
+            _fp = {"cores": 8, "device_memory": 8, "touch_points": 0,
+                   "locale": "en-US", "languages": ["en-US", "en"],
+                   "locale_profile": None, "gpu": None, "pixel_ratio": 1.0}
             self._context = await self._browser.new_context(
-                viewport={"width": 1920, "height": 1080},
-                user_agent=CHROME_UA,
+                **_st.build_context_options(
+                    _fp, CHROME_UA, viewport={"width": 1920, "height": 1080}
+                )
+            )
+            await self._context.add_init_script(
+                _st.build_init_script(_fp, CHROME_UA)
             )
 
     async def generate(self, session: cffi_requests.Session,

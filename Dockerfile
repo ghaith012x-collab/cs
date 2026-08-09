@@ -14,8 +14,9 @@ RUN apt-get update && apt-get install -y \
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Install Chromium for Playwright
+# Install Chromium for Playwright + Patchright (stealth engine)
 RUN python -m playwright install chromium
+RUN python -m patchright install chromium || true
 
 # Copy ALL application files (glob keeps future files in sync)
 COPY *.py ./
