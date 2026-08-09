@@ -4311,49 +4311,6 @@ async def solve_hcaptcha_accessibility(page, iframe,
     import base64
 
     async def _discover_text_model() -> str:
-        """Ask Ollama /api/tags which models are actually loaded and pick a
-        text-capable one for answering questions. The configured model may not
-        exist on the server, which silently breaks every LLM solve."""
-        try:
-            import aiohttp
-            async with aiohttp.ClientSession(
-                timeout=aiohttp.ClientTimeout(total=10)
-            ) as session:
-                async with session.get(f"{ollama_url}/api/tags") as resp:
-                    if resp.status != 200:
-                        return ollama_model
-                    data = await resp.json()
-            names = [m.get("name", "") for m in data.get("models", [])]
-            if not names:
-                log("[Accessibility] [CRITICAL] Ollama endpoint has NO models pulled — "
-                    "LLM cannot answer questions. Pull a text model "
-                    "e.g. `ollama pull llama3.2` on the server, or set "
-                    "OLLAMA_URL to a server that has one.", level="error")
-                return ollama_model
-            # Prefer fast text chat models (one-word answers). solver-v1 is
-            # this repo's fine-tuned qwen solver. Vision models (moondream,
-            # llava, minicpm-v) are only a last resort for text answering.
-            preferred = ["solver-v1", "solver", "qwen2.5", "qwen2", "qwen",
-                         "llama3.2", "llama3.1", "llama3", "llama2", "llama",
-                         "gemma2", "gemma", "mistral", "mixtral", "phi3", "phi",
-                         "tinyllama", "deepseek", "internlm2"]
-            for p in preferred:
-                for n in names:
-                    if n.split(":")[0].lower() == p or n == p:
-                        return n
-            return names[0]
-        except Exception as e:
-            log(f"[Accessibility] Model discovery error: {e}", level="warn")
-            return ollama_model
-
-    discovered = await _discover_text_model()
-    if discovered and discovered != ollama_model:
-        log(f"[Accessibility] Using available text model: {discovered}")
-        ollama_model = discovered
-    log(f"[Accessibility] Text model in use: {ollama_model}")
-    log(f"[Accessibility] Vision model in use: {ollama_model}")
-
-    async def _discover_text_model() -> str:
         """Pick a TEXT-capable model for answering questions as text.
         Vision-only models (moondream, llava, minicpm-v) answer text prompts
         poorly, so prefer real chat models if the server has any."""
@@ -6927,13 +6884,7 @@ async def solve_hcaptcha_accessibility(page, iframe,
                 return ans
             log(f"[Accessibility] Q{q} Layer 3 could not answer either", level="warn")
         else:
-            log(f"[Accessibility] Q{q} NO TEXT FOUND — trying vision directly", level="warn")
-            if ollama_url:
-                vans = await _vision_answer(hcaptcha)
-                if vans:
-                    log(f"[Accessibility] Q{q} vision answered without text: {vans}")
-                    return vans
-            log(f"[Accessibility] Q{q} NO TEXT FOUND anywhere", level="error")
+            log(f"[Accessibility] Q{q} NO TEXT FOUND — cannot ask LLM without text", level="warn")
         return None
 
     async def _type_answer(hcaptcha, answer: str) -> bool:
