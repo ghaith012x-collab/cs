@@ -2921,11 +2921,19 @@ async def solve_hcaptcha_accessibility(page, iframe,
                     return base64.b64encode(img).decode()
             except Exception:
                 pass
-        # FrameLocator doesn't have .screenshot() -- use locator("body") instead
+        # FrameLocator doesn't have .screenshot() -- use locator("body") instead.
+        # Also: locator screenshots can timeout (30s) waiting for element
+        # stability inside cross-origin iframes. Use short timeout + fall back
+        # to the reliable page-level screenshot on any failure.
         try:
-            img = await target.screenshot(type="png")
+            img = await target.screenshot(type="png", timeout=8000)
         except AttributeError:
-            img = await target.locator("body").screenshot(type="png")
+            try:
+                img = await target.locator("body").screenshot(type="png", timeout=8000)
+            except Exception:
+                img = await page.screenshot(type="png")
+        except Exception:
+            img = await page.screenshot(type="png")
         return base64.b64encode(img).decode()
 
     async def _screenshot_question(hcaptcha) -> str:
