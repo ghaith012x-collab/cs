@@ -2348,7 +2348,170 @@ KNOWLEDGE_QUESTIONS = [
     # ── which one is correct spelling ──
     (r"which (?:one |word )?is (?:spelled|spelt) correctly", None),
     (r"which (?:of these|word).*(?:correct|right) spelling", None),
+    # ── Portmanteaus / combinations ──
+    (r"(?:what|which).*meal.*brunch.*combination", "breakfast"),
+    (r"brunch.*combination.*breakfast.*lunch", "breakfast"),
+    (r"(?:what|which).*(?:brunch|smog|motel|spork).*combination", None),
+    # ── Synonyms / meanings ──
+    (r"another word for angry", "mad"),
+    (r"another word for happy", "glad"),
+    (r"another word for big", "large"),
+    (r"another word for small", "little"),
+    (r"another word for fast", "quick"),
+    (r"another word for begin", "start"),
+    (r"another word for end", "finish"),
+    (r"another word for help", "assist"),
+    (r"another word for smart", "clever"),
+    (r"another word for pretty", "beautiful"),
+    (r"another word for rich", "wealthy"),
+    (r"another word for brave", "courageous"),
+    # ── Acronyms / abbreviations ──
+    (r"(?:what|which).*(?:nasa|NASA).*stand", "national aeronautics and space administration"),
+    (r"(?:what|which).*(?:nato|NATO).*stand", "north atlantic treaty organization"),
+    (r"(?:what|which).*(?:who|WHO).*health.*stand", "world health organization"),
+    (r"(?:what|which).*(?:unesco|UNESCO).*stand", "united nations educational scientific and cultural organization"),
+    (r"(?:what|which).*(?:fbi|FBI).*stand", "federal bureau of investigation"),
+    (r"(?:what|which).*(?:cia|CIA).*stand", "central intelligence agency"),
+    (r"(?:what|which).*(?:lol|LOL).*stand", "laugh out loud"),
+    (r"(?:what|which).*(?:gps|GPS).*stand", "global positioning system"),
+    (r"(?:what|which).*(?:atm|ATM).*stand", "automated teller machine"),
+    (r"(?:what|which).*(?:pin|PIN).*number.*stand", "personal identification number"),
+    # ── What is X made of / main ingredient ──
+    (r"main ingredient.*bread|bread.*(?:made|main ingredient)", "flour"),
+    (r"main ingredient.*pasta|pasta.*(?:made|main ingredient)", "flour"),
+    (r"main ingredient.*(?:glass|window)", "sand"),
+    (r"main ingredient.*chocolate", "cocoa"),
+    (r"main ingredient.*(?:cheese|yogurt|butter)", "milk"),
+    (r"main ingredient.*(?:wine|grape juice)", "grapes"),
+    (r"main ingredient.*(?:sake|rice wine)", "rice"),
+    (r"main ingredient.*(?:beer|ale)", "barley"),
+    (r"main ingredient.*(?:paper|cardboard)", "wood"),
+    (r"main ingredient.*sushi", "rice"),
+    (r"main ingredient.*guacamole", "avocado"),
+    (r"main ingredient.*hummus", "chickpeas"),
+    (r"main ingredient.*(?:tofu|soy sauce)", "soybeans"),
+    (r"(?:what|which).*(?:metal|element).*liquid.*room.*temperature", "mercury"),
+    (r"(?:what|which).*(?:metal|element).*(?:lightest|light weight)", "lithium"),
+    (r"(?:what|which).*(?:metal|element).*strongest", "tungsten"),
+    (r"(?:what|which).*(?:metal|element).*(?:gold|Au)", "gold"),
+    # ── Scientific classifications ──
+    (r"(?:what|which).*(?:type|kind|class).*(?:animal|creature).*frog", "amphibian"),
+    (r"(?:what|which).*(?:type|kind|class).*(?:animal|creature).*snake|lizard", "reptile"),
+    (r"(?:what|which).*(?:type|kind|class).*(?:animal|creature).*whale|dolphin", "mammal"),
+    (r"(?:what|which).*(?:type|kind|class).*(?:animal|creature).*spider", "arachnid"),
+    (r"(?:what|which).*(?:type|kind|class).*(?:animal|creature).*human", "mammal"),
+    (r"(?:what|which).*(?:type|kind|class).*(?:animal|creature).*eagle|sparrow", "bird"),
+    (r"(?:what|which).*(?:type|kind|class).*(?:animal|creature).*salmon|goldfish", "fish"),
+    (r"(?:what|which).*(?:amphibian|mammal|reptile|bird|fish|arachnid).*frog", "amphibian"),
+    # ── Nationalities ──
+    (r"(?:what|which).*(?:call|nationality).*someone.*(?:france|french)", "french"),
+    (r"(?:what|which).*(?:call|nationality).*someone.*(?:spain|spanish)", "spanish"),
+    (r"(?:what|which).*(?:call|nationality).*someone.*(?:germany|german)", "german"),
+    (r"(?:what|which).*(?:call|nationality).*someone.*(?:italy|italian)", "italian"),
+    (r"(?:what|which).*(?:call|nationality).*someone.*(?:japan|japanese)", "japanese"),
+    (r"(?:what|which).*(?:call|nationality).*someone.*(?:china|chinese)", "chinese"),
+    (r"(?:what|which).*(?:call|nationality).*someone.*(?:brazil|brazilian)", "brazilian"),
+    (r"(?:what|which).*(?:call|nationality).*someone.*(?:england|british)", "british"),
+    (r"(?:what|which).*(?:call|nationality).*someone.*(?:canada|canadian)", "canadian"),
+    (r"(?:what|which).*(?:call|nationality).*someone.*(?:australia|australian)", "australian"),
+    (r"(?:what|which).*(?:call|nationality).*someone.*(?:mexico|mexican)", "mexican"),
+    (r"(?:what|which).*(?:call|nationality).*someone.*(?:india|indian)", "indian"),
+    # ── What is the study of / -ology ──
+    (r"study of (?:living|living things|life)", "biology"),
+    (r"study of (?:stars|space|universe|celestial)", "astronomy"),
+    (r"study of (?:weather|climate|atmosphere)", "meteorology"),
+    (r"study of (?:rocks|earth|geology)", "geology"),
+    (r"study of (?:mind|behavior|mental)", "psychology"),
+    (r"study of (?:past|history|ancient)", "history"),
+    (r"study of (?:animals|animal life)", "zoology"),
+    (r"study of (?:plants|plant life|botany)", "botany"),
+    (r"study of (?:chemicals|matter|chemistry)", "chemistry"),
+    (r"study of (?:physics|forces|motion)", "physics"),
+    (r"study of (?:language|linguistics)", "linguistics"),
+    # ── Proverbs / idioms completion ──
+    (r"an apple a day keeps.*away", "doctor"),
+    (r"actions speak louder than", "words"),
+    (r"better late than", "never"),
+    (r"practice makes", "perfect"),
+    (r"when in rome.*do as.*romans", "do"),
+    (r"don.t judge a book by its", "cover"),
+    (r"two wrongs don.t make a", "right"),
+    (r"the early bird.*gets.*worm", "worm"),
+    (r"a picture.*thousand words", "worth"),
+    (r"birds of a feather.*flock", "together"),
+    (r"every cloud has a silver", "lining"),
+    (r"kill two birds with one", "stone"),
+    (r"a penny saved is a penny", "earned"),
+    (r"there.s no place like", "home"),
+    (r"honesty.*best policy", "is"),
+    (r"rome was.*built in a", "day"),
+    (r"slow and steady wins the", "race"),
+    # ── Math: product / quotient / sum / difference ──
+    (r"(?:what|which).*product.*(\d+)\s+and\s+(\d+)", None),
+    (r"(?:what|which).*quotient.*(\d+)\s+and\s+(\d+)", None),
+    # ── What century / decade ──
+    (r"what century.*(?:1900|nineteen hundred)", "20th"),
+    (r"what century.*(?:1800|eighteen hundred)", "19th"),
+    (r"what century.*(?:2000|two thousand)", "21st"),
+    (r"what century.*(?:1700|seventeen hundred)", "18th"),
+    (r"how many years.*century", "100"),
+    (r"how many years.*decade", "10"),
+    (r"how many years.*millennium", "1000"),
+    # ── More food / drink ──
+    (r"(?:what|which).*fruit.*(?:citrus|orange|lemon|lime)", "citrus"),
+    (r"(?:what|which).*fruit.*(?:tropical|pineapple|coconut)", "tropical"),
+    (r"(?:what|which).*(?:coffee|espresso|cappuccino).*bean", "coffee"),
+    (r"(?:what|which).*(?:green|salad).*leafy", "lettuce"),
+    (r"(?:what|which).*(?:pizza).*(?:italy|italian)", "italian"),
+    (r"(?:what|which).*(?:suship|wasabi).*(?:japan|japanese)", "japanese"),
+    (r"(?:what|which).*(?:taco|burrito).*(?:mexico|mexican)", "mexican"),
+    # ── Natural disasters / phenomena ──
+    (r"(?:what|which).*(?:shaking.*ground|earth.*shake)", "earthquake"),
+    (r"(?:what|which).*(?:wave.*ocean|giant.*wave|tsunami)", "tsunami"),
+    (r"(?:what|which).*(?:storm.*spin.*funnel|twister)", "tornado"),
+    (r"(?:what|which).*(?:storm.*wind.*rain.*caribbean|typhoon)", "hurricane"),
+    (r"(?:what|which).*(?:volcano.*erupt.*lava)", "volcano"),
+    (r"(?:what|which).*(?:long.*dry.*drought)", "drought"),
+    (r"(?:what|which).*(?:too.*much.*water.*flood)", "flood"),
+    # ── Literature / books ──
+    (r"(?:who|which).*wrote.*romeo.*juliet", "shakespeare"),
+    (r"(?:who|which).*wrote.*moby dick", "melville"),
+    (r"(?:who|which).*wrote.*great gatsby", "fitzgerald"),
+    (r"(?:who|which).*wrote.*1984", "orwell"),
+    (r"(?:who|which).*wrote.*harry potter", "rowling"),
+    (r"(?:who|which).*wrote.*odyssey", "homer"),
+    (r"(?:what|which).*book.*(?:sherlock|holmes)", "sherlock holmes"),
+    # ── Mythology / religion ──
+    (r"(?:who|which).*(?:god|king).*greek.*(?:thunder|lightning)", "zeus"),
+    (r"(?:who|which).*(?:god|king).*norse.*(?:thunder|lightning)", "thor"),
+    (r"(?:who|which).*(?:god|king).*roman.*(?:war|mars)", "mars"),
+    (r"(?:who|which).*(?:goddess).*greek.*(?:love|aphrodite)", "aphrodite"),
+    (r"(?:who|which).*(?:god).*egyptian.*(?:sun|ra)", "ra"),
+    # ── Chess / games ──
+    (r"how many squares.*chessboard", "64"),
+    (r"how many pieces.*chess.*(?:start|beginning)", "32"),
+    (r"how many pawns.*chess", "8"),
+    (r"(?:what|which).*chess.*piece.*(?:horse|knight)", "knight"),
+    (r"(?:what|which).*strongest.*chess.*piece", "queen"),
+    (r"(?:what|which).*most important.*chess.*piece", "king"),
+    (r"(?:what|which).*card game.*(?:poker|blackjack|hearts)", "card game"),
+    # ── Transport / vehicles ──
+    (r"(?:what|which).*(?:vehicle|transport).*under.*water|submarine", "submarine"),
+    (r"(?:what|which).*(?:vehicle|transport).*space", "spaceship"),
+    (r"(?:what|which).*(?:vehicle|transport).*two.*wheels.*pedal", "bicycle"),
+    (r"(?:what|which).*(?:vehicle|transport).*(?:ambulance|emergency).*siren", "ambulance"),
+    (r"(?:what|which).*(?:vehicle|transport).*(?:fire|red).*ladder", "fire truck"),
+    # ── Medical / health ──
+    (r"(?:what|which).*(?:disease|illness).*(?:virus|covid|corona)", "covid"),
+    (r"(?:what|which).*(?:organ).*(?:pump|blood|circulat)", "heart"),
+    (r"(?:what|which).*(?:bone).*(?:longest|femur)", "femur"),
+    (r"(?:what|which).*(?:muscle).*(?:strongest|heart)", "heart"),
+    (r"(?:what|which).*(?:vitamin|nutrient).*sun.*(?:d|vitamin d)", "vitamin d"),
+    (r"(?:what|which).*(?:vitamin|nutrient).*citrus.*(?:c|vitamin c)", "vitamin c"),
+    (r"(?:what|which).*(?:blood type|type).*universal donor", "o negative"),
+    (r"(?:what|which).*(?:blood type|type).*universal recipient", "ab positive"),
 ]
+# Category word sets for "which of these is a/an X" pickers
 # Category word sets for "which of these is a/an X" pickers
 CATEGORY_WORDS = {
     "fruit": frozenset([
@@ -3899,6 +4062,130 @@ async def solve_hcaptcha_accessibility(page, iframe,
             n = int(num_before.group(1))
             log(f"[Accessibility] Number before {n} = {n - 1}")
             return str(n - 1)
+
+        # ── PORTMANTEAU / COMBINATION: "What meal is brunch a combination of?" ──
+        # hCaptcha often asks what two things combine to form a word.
+        # We match the target word and return its first component.
+        combo = re.search(
+            r'(?:what|which)\s+(?:meal|word|term|thing)\s+(?:is|are)\s+(\w{3,})\s+(?:a\s+)?combination\s+of',
+            t, re.IGNORECASE
+        )
+        if not combo:
+            combo = re.search(
+                r'(\w{3,})\s+(?:is|are)\s+a\s+combination\s+of',
+                t, re.IGNORECASE
+            )
+        if combo:
+            target = combo.group(1).lower()
+            portmanteaus = {
+                'brunch': 'breakfast', 'smog': 'smoke',
+                'motel': 'motor', 'spork': 'spoon',
+                'cyborg': 'cybernetic', 'email': 'electronic',
+                'pixel': 'picture', 'modem': 'modulator',
+                'blog': 'web', 'vlog': 'video',
+                'hangry': 'hungry', 'chillax': 'chill',
+                'frenemy': 'friend', 'bromance': 'brother',
+                'mocktail': 'mock', 'staycation': 'stay',
+                'glamping': 'glamorous', 'workaholic': 'work',
+                'shopaholic': 'shop', 'chocoholic': 'chocolate',
+                'brinner': 'breakfast', 'linner': 'lunch',
+                'moped': 'motor', 'transponder': 'transmitter',
+                'telethon': 'telephone', 'webinar': 'web',
+                'emoticon': 'emotion', 'malware': 'malicious',
+                'spam': 'spiced', 'situationship': 'situation',
+            }
+            if target in portmanteaus:
+                ans = portmanteaus[target]
+                log(f"[Accessibility] Portmanteau: '{target}' = '{ans}' + ...")
+                return ans
+
+        # ── RIDDLES: "What has keys but can't open locks?" ──
+        # Returns the single-word answer to common riddles.
+        riddle = re.search(
+            r'what\s+has\s+(.+?)\s+but\s+(?:can\s*["\']?t|cannot)\s+(.+)',
+            t, re.IGNORECASE
+        )
+        if riddle:
+            # Check against known riddles
+            riddles = {
+                ('keys', 'open'): 'piano',
+                ('hands', 'clap'): 'clock',
+                ('face', 'smile'): 'clock',
+                ('head', 'wear'): 'coin',
+                ('teeth', 'bite'): 'comb',
+                ('needle', 'sew'): 'pine tree',
+                ('bed', 'sleep'): 'river',
+                ('legs', 'walk'): 'table',
+                ('wings', 'fly'): 'airplane',
+                ('eyes', 'see'): 'needle',
+                ('bank', 'money'): 'river',
+                ('branches', 'tree'): 'bank',
+            }
+            has = riddle.group(1).lower().strip()
+            cant = riddle.group(2).lower().strip()
+            for (k, c), ans in riddles.items():
+                if k in has and c in cant:
+                    log(f"[Accessibility] Riddle: '{has} but can't {cant}' -> {ans}")
+                    return ans
+
+        # ── SYNONYMS: "What is another word for X?" ──
+        syn = re.search(
+            r'(?:what|which)\s+(?:is|are)\s+(?:another|a different|a)\s+word\s+for\s+(\w{3,})',
+            t, re.IGNORECASE
+        )
+        if syn:
+            target = syn.group(1).lower()
+            synonyms = {
+                'angry': 'mad', 'mad': 'angry',
+                'happy': 'glad', 'glad': 'happy',
+                'sad': 'unhappy', 'big': 'large',
+                'small': 'little', 'fast': 'quick',
+                'quick': 'fast', 'smart': 'clever',
+                'clever': 'smart', 'brave': 'courageous',
+                'pretty': 'beautiful', 'ugly': 'hideous',
+                'rich': 'wealthy', 'poor': 'destitute',
+                'scared': 'afraid', 'tired': 'exhausted',
+                'begin': 'start', 'end': 'finish',
+                'help': 'assist', 'buy': 'purchase',
+                'talk': 'speak', 'close': 'shut',
+                'error': 'mistake', 'job': 'occupation',
+                'kid': 'child', 'dad': 'father',
+                'mom': 'mother', 'pal': 'friend',
+            }
+            if target in synonyms:
+                ans = synonyms[target]
+                log(f"[Accessibility] Synonym: '{target}' -> '{ans}'")
+                return ans
+
+        # ── HOMOPHONES: "Which word sounds like X?" ──
+        homo = re.search(
+            r'(?:what|which)\s+word\s+sounds?\s+(?:like|same as)\s+(\w{2,})',
+            t, re.IGNORECASE
+        )
+        if homo:
+            target = homo.group(1).lower()
+            homophones = {
+                'there': 'their', 'their': 'there',
+                'to': 'two', 'two': 'to',
+                'sea': 'see', 'see': 'sea',
+                'here': 'hear', 'hear': 'here',
+                'sun': 'son', 'son': 'sun',
+                'flower': 'flour', 'flour': 'flower',
+                'night': 'knight', 'knight': 'night',
+                'write': 'right', 'right': 'write',
+                'peace': 'piece', 'piece': 'peace',
+                'bear': 'bare', 'bare': 'bear',
+                'dear': 'deer', 'deer': 'dear',
+                'mail': 'male', 'male': 'mail',
+                'sale': 'sail', 'sail': 'sale',
+                'meet': 'meat', 'meat': 'meet',
+                'pair': 'pear', 'pear': 'pair',
+                'hair': 'hare', 'hare': 'hair',
+            }
+            if target in homophones:
+                ans = homophones[target]
+                log(f"[Accessibility] Homophone: '{target}' -> '{ans}'")
+                return ans
 
         # ── UNIVERSAL NUMBER SUM: last-resort fallback ──
         # If the question has 2+ numbers and nothing else matched,
