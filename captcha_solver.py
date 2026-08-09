@@ -2231,6 +2231,10 @@ KNOWLEDGE_QUESTIONS = [
     (r"(?:what|which).*(?:sport).*(?:boxing)", "boxing"),
     (r"(?:what|which).*(?:sport).*(?:golf)", "golf"),
     (r"(?:what|which).*(?:sport).*(?:volleyball)", "volleyball"),
+    # ── Objects / containers ──
+    (r"container.*holds?.*coins?|holds?.*coins?.*container|call.*container.*coins?", "jar"),
+    (r"what.*call.*coin.*holder|coin.*holder.*called", "bank"),
+    (r"what.*call.*money.*container|money.*container.*called", "bank"),
 ]
 # Category word sets for "which of these is a/an X" pickers
 CATEGORY_WORDS = {
@@ -3375,7 +3379,7 @@ async def solve_hcaptcha_accessibility(page, iframe,
             // Also grab ALL visible text (includes headings, paragraphs)
             const bodyText = document.body ? (document.body.innerText || '') : '';
             if (bodyText.trim()) parts.push(bodyText.trim());
-            return parts.join(' | ');
+            return parts.join('\n');
         }"""
 
         # Run aria scan on the hCaptcha frame first
@@ -3745,6 +3749,11 @@ async def solve_hcaptcha_accessibility(page, iframe,
         Layer 3: LLM fallback           — ANY unknown question → Ollama / OpenAI-compatible"""
         text = await _read_question_text()
         log(f"[Accessibility] Q{q} text: '{text[:200]}'")
+        # ── Detect "please try again" pages (captcha rejected previous answer) ──
+        if text and re.search(r'please\s+try\s+again', text, re.IGNORECASE):
+            log(f"[Accessibility] Q{q} 'Please try again' detected — captcha rejected answer, aborting chain",
+                level="warn")
+            return None
         if text:
             # ── Layers 1+2: local KB ──
             local = _solve_text_question(text)
