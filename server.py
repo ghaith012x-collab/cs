@@ -863,42 +863,59 @@ class DiscordAutomation:
             acc_result = await solve_hcaptcha_accessibility(self._page, iframe, log=self._log)
             if acc_result:
                 self._log("[Captcha] [OK] Accessibility challenge solved!")
-                # Wait and verify the captcha iframe is truly gone before
-                # clicking Create Account. hCaptcha can chain challenges.
-                for check_i in range(5):
+                # ── Detect ANY new hCaptcha that appears after a completed one ──
+                # hCaptcha chains captchas: right after one finishes, a brand-new
+                # challenge can pop up. The WIDGET iframe (newassets.hcaptcha.com)
+                # stays in the DOM forever, so we ONLY look for the challenge
+                # iframe (title="hCaptcha challenge" / hcaptcha-challenge.html)
+                # to avoid re-solving the idle widget.
+                solved_srcs = set()
+                try:
+                    solved_srcs.add(await iframe.get_attribute("src") or "")
+                except Exception:
+                    pass
+                idle_checks = 0
+                for check_i in range(10):
                     await asyncio.sleep(3)
                     if await self._past_captcha():
                         self._log("[Captcha] Page past captcha — clicking Create Account")
                         await self._click_form_submit()
                         return True
-                    # Check if another captcha iframe appeared
+                    new_challenge = None
                     try:
-                        new_iframe = await self._page.query_selector(
-                            'iframe[src*="hcaptcha.com"]'
+                        new_challenge = await self._page.query_selector(
+                            'iframe[title="hCaptcha challenge"], '
+                            'iframe[src*="hcaptcha-challenge"]'
                         )
-                        if new_iframe:
-                            self._log(
-                                "[Captcha] NEW captcha detected! Solving again..."
-                            )
-                            iframe = new_iframe
-                            acc_result = await solve_hcaptcha_accessibility(
-                                self._page, iframe, log=self._log
-                            )
-                            if not acc_result:
-                                self._log(
-                                    "[Captcha] Chain captcha failed",
-                                    level="error"
-                                )
-                                return False
-                            continue  # captcha solved, re-check
                     except Exception:
-                        pass
-                    self._log(f"[Captcha] Waiting for page... ({check_i+1}/5)")
-                # After all checks, try clicking Create Account anyway
+                        new_challenge = None
+                    if new_challenge:
+                        idle_checks = 0
+                        try:
+                            new_src = await new_challenge.get_attribute("src") or ""
+                        except Exception:
+                            new_src = ""
+                        if new_src in solved_srcs:
+                            # Same challenge element still closing — not new.
+                            self._log(f"[Captcha] Same challenge still present ({check_i+1}/10)")
+                            continue
+                        solved_srcs.add(new_src)
+                        self._log("[Captcha] NEW captcha detected — clicking 3-dots + accessibility again")
+                        acc_result = await solve_hcaptcha_accessibility(
+                            self._page, new_challenge, log=self._log
+                        )
+                        if not acc_result:
+                            self._log("[Captcha] Chain captcha failed", level="error")
+                            return False
+                        continue  # solved — keep checking for the next one
+                    idle_checks += 1
+                    if idle_checks >= 2:
+                        self._log("[Captcha] No new challenge — captcha fully done!")
+                        break
+                    self._log(f"[Captcha] No challenge yet ({check_i+1}/10)...")
+                # Captcha chain finished — proceed to Create Account
                 await self._click_form_submit()
                 await asyncio.sleep(3)
-                if await self._past_captcha():
-                    return True
                 return True
             else:
                 self._log("[Captcha] [FAIL] Accessibility challenge did not solve",

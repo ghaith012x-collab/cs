@@ -7118,8 +7118,21 @@ async def solve_hcaptcha_accessibility(page, iframe,
             log(f"[Accessibility] Attempt {attempt}/{max_attempts}")
 
             if await _token_present():
-                log("[Accessibility] [OK] Already solved — token present!")
-                return True
+                # Token present, but a NEW challenge can still be showing
+                # (hCaptcha chains captchas). Only bail if there's no
+                # challenge iframe right now.
+                try:
+                    _chall = page.locator(
+                        'iframe[title="hCaptcha challenge"], '
+                        'iframe[src*="hcaptcha-challenge"]'
+                    )
+                    _new_chall = await _chall.count() > 0
+                except Exception:
+                    _new_chall = False
+                if not _new_chall:
+                    log("[Accessibility] [OK] Already solved — token present!")
+                    return True
+                log("[Accessibility] Token present but NEW challenge detected — solving it")
 
             # Always open the accessibility challenge via the menu.
             # NOTE: removed the "already active" shortcut because
@@ -7222,28 +7235,28 @@ async def solve_hcaptcha_accessibility(page, iframe,
                         log(f"[Accessibility] Token appeared after Q{q}!")
                         break
 
-                # ── After answering all questions, check if captcha is gone ──
+                # ── After answering all questions, detect ANY new captcha ──
+                # A brand-new hCaptcha can appear right after a completed one.
+                # The widget iframe (newassets.hcaptcha.com) stays in the DOM
+                # forever, so only look for the CHALLENGE iframe — otherwise
+                # we'd loop forever on the idle widget.
                 await asyncio.sleep(2.0)
+                try:
+                    _chall = page.locator(
+                        'iframe[title="hCaptcha challenge"], '
+                        'iframe[src*="hcaptcha-challenge"]'
+                    )
+                    _has_challenge = await _chall.count() > 0
+                except Exception:
+                    _has_challenge = False
+                if _has_challenge:
+                    # Chain loop below re-opens 3-dots → Accessibility Challenge.
+                    log("[Accessibility] NEW captcha detected — clicking 3-dots + accessibility again")
+                    continue
                 if await _token_present():
-                    log("[Accessibility] Token present — checking for new captcha...")
-                    await asyncio.sleep(3.0)
-                    if await _token_present():
-                        # Still have token, but is there a NEW iframe?
-                        try:
-                            new_iframe = page.locator('iframe[src*="hcaptcha.com"]')
-                            if await new_iframe.count() == 0:
-                                log("[Accessibility] [OK] No more captchas — done!")
-                                return True
-                            log("[Accessibility] Captcha iframe still present — new challenge!")
-                        except Exception:
-                            log("[Accessibility] [OK] No captcha iframe found — done!")
-                            return True
-                    else:
-                        # Token disappeared — maybe page transitioned
-                        log("[Accessibility] Token disappeared — page may have advanced")
-                        return True
-                else:
-                    log(f"[Accessibility] No token after Q{q} — more questions or retry")
+                    log("[Accessibility] [OK] No new challenge + token present — done!")
+                    return True
+                log(f"[Accessibility] No token after Q{q} — more questions or retry")
 
             log(f"[Accessibility] Attempt {attempt} did not solve — retrying",
                 level="warn")
