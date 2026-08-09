@@ -4304,7 +4304,7 @@ async def solve_hcaptcha_accessibility(page, iframe,
     if not ollama_url:
         ollama_url = os.environ.get("OLLAMA_URL") or os.environ.get("OLLAMA_BASE") or "http://localhost:11434"
     if not ollama_model:
-        ollama_model = os.environ.get("OLLAMA_MODEL") or os.environ.get("OLLAMA_VISION_MODEL") or "minicpm-v"
+        ollama_model = os.environ.get("OLLAMA_MODEL") or os.environ.get("OLLAMA_VISION_MODEL") or "llama3.2:1b"
     ollama_url = ollama_url.rstrip("/")
     log(f"[Accessibility] Ollama endpoint: {ollama_url}  model: {ollama_model}")
     import asyncio
