@@ -2921,7 +2921,11 @@ async def solve_hcaptcha_accessibility(page, iframe,
                     return base64.b64encode(img).decode()
             except Exception:
                 pass
-        img = await target.screenshot(type="png")
+        # FrameLocator doesn't have .screenshot() -- use locator("body") instead
+        try:
+            img = await target.screenshot(type="png")
+        except AttributeError:
+            img = await target.locator("body").screenshot(type="png")
         return base64.b64encode(img).decode()
 
     async def _screenshot_question(hcaptcha) -> str:
@@ -3538,7 +3542,7 @@ async def solve_hcaptcha_accessibility(page, iframe,
         #  you add 8 coins. How many coins are there?" → 3+6+8 = 17
         # Repeats DO count: "put in 5... put in 5" = +5 twice → 9+5+5=19.
         coin_jar = re.search(
-            r'(?:jar|coins?|add|put|total|altogether|in\s+all)',
+            r'(?:jar|coins?|coin|add|put|total|altogether|in\s+all|starts?.with|how.many)',
             t, re.IGNORECASE
         )
         if coin_jar:
@@ -3549,7 +3553,7 @@ async def solve_hcaptcha_accessibility(page, iframe,
             own_nums = []
             for sent in sentences:
                 s_lower = sent.lower().strip()
-                if any(w in s_lower for w in ('you', 'your', 'jar', "you're", 'put', 'add', 'placed')):
+                if any(w in s_lower for w in ('you', 'your', 'jar', "you're", 'put', 'add', 'placed', 'starts', 'coin', 'coins')):
                     own_nums.extend(re.findall(r'(\d+)', sent))
                 elif any(w in s_lower for w in ('friend', 'they', 'he', 'she', 'them', 'brother', 'sister')):
                     continue
