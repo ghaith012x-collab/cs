@@ -5824,6 +5824,15 @@ async def solve_hcaptcha_accessibility(page, iframe,
                 'dried foods preserved': 'yes',
                 'frozen foods preserved': 'yes',
                 'refrigerated foods preserved': 'yes',
+                'stored frozen': 'yes',
+                'keep frozen': 'yes',
+                'be frozen': 'yes',
+                'bread stored frozen': 'yes',
+                'frozen bread': 'yes',
+                'food stored frozen': 'yes',
+                'bread in the freezer': 'yes',
+                'food in the freezer': 'yes',
+                'store in the freezer': 'yes',
                 'salted foods preserved': 'yes',
                 'smoked foods preserved': 'yes',
                 'cooked foods safe': 'yes',
@@ -6125,12 +6134,12 @@ async def solve_hcaptcha_accessibility(page, iframe,
                     return ans
             # Generic pattern match
             obvious_yes = re.search(
-                r'\b(?:have|has|can|do|does|is|are|always|definitely|obviously)\b',
+                r'\b(?:have|has|can|do|does|is|are|be|keep|always|definitely|obviously)\b',
                 rest
             )
             if obvious_yes and not re.search(r'\b(?:no|not|never|none|can["\']?t|cannot|don["\']?t|doesn["\']?t|isn["\']?t|aren["\']?t|won["\']?t)\b', rest):
                 # Common sense heuristic: preservation/cooking words → yes
-                if re.search(r'\b(?:preserv|refrigerat|freez|canning|cook|bak|dry|salt|cure|pickl|smok|seal|packag|store)\b', rest):
+                if re.search(r'\b(?:preserv|refrigerat|freez|froz\w*|freezer|canning|cook|bak|dry|salt|cure|pickl|smok|seal|packag|stor(?:e|ed|age|es|ing))\b', rest):
                     log(f"[Accessibility] Yes/No common-sense: '{rest[:60]}' -> yes")
                     return 'yes'
                 if re.search(r'\b(?:die|dead|death|broken|impossible|fake|nonexist)\b', rest):
@@ -6888,6 +6897,8 @@ async def solve_hcaptcha_accessibility(page, iframe,
 
         return None
 
+    _reject_counts: dict = {}
+
     async def _get_answer(hcaptcha, q: int) -> Optional[str]:
         """Get the answer with 3 layers:
         Layer 1: regex patterns (513)   — exact phrasings
@@ -6895,11 +6906,46 @@ async def solve_hcaptcha_accessibility(page, iframe,
         Layer 3: LLM fallback           — ANY unknown question → Ollama / OpenAI-compatible"""
         text = await _read_question_text()
         log(f"[Accessibility] Q{q} text: '{text[:200]}'")
-        # ── Detect "please try again" pages (captcha rejected previous answer) ──
-        if text and re.search(r'please\s+try\s+again', text, re.IGNORECASE):
-            log(f"[Accessibility] Q{q} 'Please try again' detected — captcha rejected answer, aborting chain",
+        raw = text
+
+        # ── Clean raw frame text into a bare question ──
+        # Raw text often arrives as: "Answer the following question with a
+        # single word, number, or phrase. Can bread be stored frozen? Please
+        # try again. ⚠️ Verify EN". Strip the instruction prefix, the
+        # "please try again" trailer, and emoji junk so the solvers (yes/no,
+        # jar, KB...) see the bare question and answer instantly + correctly.
+        if text:
+            text = re.sub(
+                r'(?:please\s+)?answer\s+the\s+following\s+question\s+with\s+a\s+single\s+word'
+                r'(?:,\s*number,\s*or\s+phrase)?\.?\s*'
+                r'|please\s+use\s+a\s+single\s+word(?:,\s*number,\s*or\s+phrase)?'
+                r'\s+in\s+your\s+answer\s+to\s+the\s+following\s+question\.?\s*'
+                r'|please\s+answer\s+the\s+following\s+question\.?\s*'
+                r'|(?:please\s+)?answer\s+the\s+following\s+question\.?\s*',
+                '', text, flags=re.IGNORECASE
+            )
+            text = re.sub(r'please\s+try\s+again.*$', '', text, flags=re.IGNORECASE)
+            text = re.sub(r'\s*\u26a0\ufe0f\s*', ' ', text)
+            text = re.sub(r'\s+', ' ', text).strip(' .?|:;-')
+
+        # ── "Please try again" = the previous answer was rejected. The SAME
+        # question stays on screen — retry it instead of skipping. Capped at
+        # 2 attempts per question so a truly unanswerable one gets skipped
+        # rather than looping forever. ──
+        if raw and re.search(r'please\s+try\s+again', raw, re.IGNORECASE):
+            if not text:
+                log(f"[Accessibility] Q{q} rejected but no question text left — skipping",
+                    level="warn")
+                return None
+            _rkey = re.sub(r'[^a-z0-9]+', ' ', text.lower()).strip()[:80]
+            _reject_counts[_rkey] = _reject_counts.get(_rkey, 0) + 1
+            if _reject_counts[_rkey] >= 2:
+                log(f"[Accessibility] Q{q} rejected twice — skipping this question",
+                    level="warn")
+                return None
+            log(f"[Accessibility] Q{q} answer was rejected — retrying: '{text[:120]}'",
                 level="warn")
-            return None
+
         if text:
             # ── Layers 1+2: local KB ──
             local = _solve_text_question(text)
