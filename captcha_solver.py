@@ -4390,6 +4390,7 @@ async def solve_hcaptcha_accessibility(page, iframe,
             "model": ollama_text_model or ollama_model,
             "stream": False,
             "keep_alive": "30m",
+            "think": False,
             "options": {"num_predict": 1},
             "messages": [{"role": "user", "content": "hi"}],
         }
@@ -4513,6 +4514,10 @@ async def solve_hcaptcha_accessibility(page, iframe,
                 "model": ollama_text_model or ollama_model,
                 "stream": False,
                 "keep_alive": "30m",
+                # Qwen3 has thinking mode ON by default: with stop=["\n", "."]
+                # the model is cut off mid-thought and returns EMPTY content.
+                # think must be a TOP-LEVEL request field (verified live).
+                "think": False,
                 "options": {"temperature": 0.2, "num_predict": 16,
                             "stop": ["\n", "."]},
                 "messages": [{"role": "user", "content": _build_llm_prompt(question)}],
