@@ -3499,7 +3499,7 @@ async def solve_hcaptcha_accessibility(page, iframe,
                     best_line = line
                     best_source = source
 
-        if best_line and best_score >= 4:
+        if best_line and best_score >= 3:
             # Picker questions ("pick the one that represents an animal") render
             # the candidate words on a SEPARATE line ("oar, glass, piglet").
             # Append that options line so the solver sees the candidates.
@@ -3713,6 +3713,16 @@ async def solve_hcaptcha_accessibility(page, iframe,
         if lone_num:
             return lone_num.group(1)
 
+        # ── UNIVERSAL NUMBER SUM: last-resort fallback ──
+        # If the question has 2+ numbers and nothing else matched,
+        # just sum them all. Catches any jar/coin/math word problem
+        # the specific solvers might have missed.
+        all_nums = re.findall(r'\b(\d+)\b', orig)
+        if len(all_nums) >= 2:
+            total = sum(int(n) for n in all_nums)
+            log(f"[Accessibility] Universal number sum: {'+'.join(all_nums)} = {total}")
+            return str(total)
+
         return None
 
     async def _vision_answer(hcaptcha, question_text: str = "") -> str:
@@ -3761,20 +3771,11 @@ async def solve_hcaptcha_accessibility(page, iframe,
                 log(f"[Accessibility] Q{q} solved locally: {local}")
                 return local
 
-            # ── Layer 3: unknown question → LLM ──
-            log(f"[Accessibility] Q{q} UNKNOWN question (no local match) — calling Layer 3 LLM", level="warn")
-            # moondream is a VISION model — try the screenshot first (it reads
-            # the question from the image), then text chat as backup.
-            if ollama_url:
-                vans = await _vision_answer(hcaptcha, text)
-                if vans:
-                    log(f"[Accessibility] Q{q} Layer 3 vision answered: {vans}")
-                    return vans
-            ans = await _llm_answer_question(text)
-            if ans:
-                log(f"[Accessibility] Q{q} Layer 3 LLM answered: {ans}")
-                return ans
-            log(f"[Accessibility] Q{q} Layer 3 could not answer either", level="error")
+            # ── Layer 3: LLM fallback DISABLED ──
+            # LLM/vision calls were wasting 30s on timeouts and giving wrong
+            # answers. The local solvers (math, word puzzles, knowledge KB,
+            # semantic table, number sum) are faster and more reliable.
+            log(f"[Accessibility] Q{q} UNKNOWN question (no local match) — skipping (AI disabled)", level="warn")
         else:
             log(f"[Accessibility] Q{q} NO TEXT FOUND — trying vision directly", level="warn")
             if ollama_url:
