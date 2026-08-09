@@ -737,9 +737,18 @@ class DiscordAutomation:
                 self._log(f"[Captcha] Already past captcha - at {self._page.url[:50]}")
                 return True
 
-            # ── CRITICAL: Always wait 12s for the captcha widget to FULLY load ──
-            self._log("[Captcha] Waiting 8 seconds for captcha widget to fully load...")
-            await asyncio.sleep(8)
+            # ── Wait for the captcha widget to load: poll the iframe so a
+            # fast-loading widget doesn't cost a fixed 8s (hard cap 8s) ──
+            self._log("[Captcha] Waiting for hCaptcha widget to load (poll, max 8s)...")
+            for _wi in range(16):
+                try:
+                    if await self._page.query_selector('iframe[src*="hcaptcha.com"]'):
+                        break
+                except Exception:
+                    pass
+                if await self._past_captcha():
+                    break
+                await asyncio.sleep(0.5)
 
             # Check if already past captcha after waiting
             if await self._past_captcha():

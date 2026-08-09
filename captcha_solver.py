@@ -5110,10 +5110,29 @@ async def solve_hcaptcha_accessibility(page, iframe,
             return False
 
         # ── Step C: Wait for the challenge to render, then return ──
-        # No detection — just wait. The caller will screenshot + AI solve.
-        log("[Accessibility] Accessibility option clicked — waiting 10s for challenge to load")
-        await asyncio.sleep(10)
-        log("[Accessibility] Challenge wait complete — proceeding to screenshot + AI solve")
+        # Poll for the challenge INPUT instead of a blind 10s wait: the
+        # question is solvable as soon as its input is interactive, which
+        # is usually 2-4s, not 10. Hard cap 10s for slow loads.
+        log("[Accessibility] Accessibility option clicked — polling for challenge input (max 10s)")
+        poll_js = (
+            "() => {"
+            "const inputs = document.querySelectorAll('input, textarea');"
+            "for (const inp of inputs) {"
+            "if (inp.type !== 'hidden' && inp.offsetParent !== null) return 'input:' + inp.tagName;"
+            "}"
+            "return null;"
+            "}"
+        )
+        for _ci in range(20):  # 20 x 0.5s = 10s max
+            try:
+                _r = await _challenge_js(poll_js)
+                if _r and 'input:' in str(_r):
+                    log("[Accessibility] Challenge input interactive — proceeding")
+                    return True
+            except Exception:
+                pass
+            await asyncio.sleep(0.5)
+        log("[Accessibility] Challenge wait complete (10s max) — proceeding to screenshot + AI solve")
         return True
 
     def _find_options_line(best_source: str, all_texts, best_line: str) -> str:
@@ -7186,9 +7205,9 @@ async def solve_hcaptcha_accessibility(page, iframe,
     async def _submit_answer(hcaptcha) -> bool:
         """Click Next / Submit on the accessibility challenge.
         Primary: JS injection via _challenge_js (works on nested iframes).
-        The 3s wait avoids the Skip button which shares coordinates."""
-        log("[Accessibility] Waiting 3s before clicking Next (avoid Skip)")
-        await asyncio.sleep(3)
+        The 1.5s wait avoids the Skip button which shares coordinates."""
+        log("[Accessibility] Waiting 1.5s before clicking Next (avoid Skip)")
+        await asyncio.sleep(1.5)
 
         # ── Primary: JS injection — click the visible action button ──
         js_click = r"""() => {
@@ -7417,8 +7436,8 @@ async def solve_hcaptcha_accessibility(page, iframe,
                                     level="warn")
                                 break
                     if answer is None:
-                        log(f"[Accessibility] Q{q}: No answer — waiting 3s then clicking Skip", level="warn")
-                        await asyncio.sleep(3)
+                        log(f"[Accessibility] Q{q}: No answer — waiting 1.5s then clicking Skip", level="warn")
+                        await asyncio.sleep(1.5)
                         try:
                             skip_result = await _challenge_js(
                                 r"""() => {
@@ -7454,8 +7473,13 @@ async def solve_hcaptcha_accessibility(page, iframe,
                         log("[Accessibility] Could not submit", level="warn")
                         break
 
-                    # Wait for Next→new question transition
-                    await asyncio.sleep(2.0)
+                    # Wait for Next→new question transition. Poll the token
+                    # so a COMPLETED captcha returns immediately instead of
+                    # always costing a fixed 2s.
+                    for _ti in range(7):
+                        if await _token_present():
+                            break
+                        await asyncio.sleep(0.3)
 
                     # Check if token appeared (captcha complete)
                     if await _token_present():
@@ -7467,7 +7491,7 @@ async def solve_hcaptcha_accessibility(page, iframe,
                 # The widget iframe (newassets.hcaptcha.com) stays in the DOM
                 # forever, so only look for the CHALLENGE iframe — otherwise
                 # we'd loop forever on the idle widget.
-                await asyncio.sleep(2.0)
+                await asyncio.sleep(1.0)
                 try:
                     _chall = page.locator(
                         'iframe[title="hCaptcha challenge"], '
@@ -7487,7 +7511,7 @@ async def solve_hcaptcha_accessibility(page, iframe,
 
             log(f"[Accessibility] Attempt {attempt} did not solve — retrying",
                 level="warn")
-            await asyncio.sleep(2.0)
+            await asyncio.sleep(1.0)
 
         log("[Accessibility] [FAIL] Could not solve after all attempts", level="error")
         return False
