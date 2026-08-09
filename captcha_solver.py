@@ -3835,6 +3835,14 @@ KNOWLEDGE_QUESTIONS = [
     (r"which.*animal.*symbol.*(?:cunning|sly|crafty)", "fox"),
     (r"which.*animal.*symbol.*(?:strength|power)", "lion"),
     (r"which.*animal.*symbol.*love", "dove"),
+    # -- Food riddles / body-washing (real hCaptcha questions) --
+    (r"what\s+vegetable\s+is\s+white\s+inside\s+(?:and\s+)?brown\s+outside", "potato"),
+    (r"what\s+vegetable\s+is\s+brown\s+outside\s+(?:and\s+)?white\s+inside", "potato"),
+    (r"what\s+vegetable\s+is\s+white\s+on\s+the\s+inside\s+and\s+brown\s+on\s+the\s+outside", "potato"),
+    (r"what\s+vegetable\s+is\s+white\s+inside", "potato"),
+    (r"what\s+is\s+white\s+inside\s+and\s+brown\s+outside", "potato"),
+    (r"what\s+liquid\s+do\s+you\s+use\s+to\s+wash\s+your\s+body", "water"),
+    (r"what\s+liquid\s+(?:do|can|would)\s+you\s+use\s+to\s+(?:wash|clean)\s+your\s+body", "water"),
 
 ]
 # Category word sets for "which of these is a/an X" pickers
@@ -4356,6 +4364,31 @@ async def solve_hcaptcha_accessibility(page, iframe,
             "empty answers. Pull a text model (e.g. `ollama pull llama3.2`) on the Ollama server "
             "or set OLLAMA_TEXT_MODEL.", level="warn")
 
+    # Pre-warm the text model so the first unknown question doesn't pay a
+    # cold-start timeout (a 1.3GB model takes seconds to load on first call).
+    try:
+        import aiohttp
+        warm_payload = {
+            "model": ollama_text_model or ollama_model,
+            "stream": False,
+            "keep_alive": "30m",
+            "options": {"num_predict": 1},
+            "messages": [{"role": "user", "content": "hi"}],
+        }
+
+        async def _warm_model() -> int:
+            async with aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=30)
+            ) as s:
+                async with s.post(f"{ollama_url}/api/chat", json=warm_payload) as r:
+                    return r.status
+
+        log(f"[Accessibility] Warming text model {ollama_text_model or ollama_model}...")
+        _warm_status = await _warm_model()
+        log(f"[Accessibility] Text model warm (status {_warm_status})")
+    except Exception as _warm_err:
+        log(f"[Accessibility] Warm-up skipped: {_warm_err}", level="warn")
+
     # ── Helpers ────────────────────────────────────────────
 
     async def _ollama_chat(image_b64: str, prompt: str, timeout: float = 45.0) -> str:
@@ -4394,6 +4427,7 @@ async def solve_hcaptcha_accessibility(page, iframe,
             payload = {
                 "model": ollama_text_model or ollama_model,
                 "stream": False,
+                "keep_alive": "30m",
                 "options": {"temperature": 0, "num_predict": 24},
                 "messages": [{
                     "role": "user",
@@ -6878,7 +6912,7 @@ async def solve_hcaptcha_accessibility(page, iframe,
             # Ollama /api/chat as text (no screenshot, no vision model).
             # Hard timeout so a slow model can't stall the captcha.
             log(f"[Accessibility] Q{q} UNKNOWN question (no local match) — calling Layer 3 LLM")
-            ans = await _llm_answer_question(text, timeout=18.0)
+            ans = await _llm_answer_question(text, timeout=25.0)
             if ans:
                 log(f"[Accessibility] Q{q} Layer 3 LLM answered: {ans}")
                 return ans
