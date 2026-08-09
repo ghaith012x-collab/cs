@@ -3775,6 +3775,23 @@ KNOWLEDGE_QUESTIONS = [
     (r"what.*year.*columbus.*(?:sail|discover)", "1492"),
     # -- Square roots / cube roots --
     (r"what.*(?:square root|sqrt).*(?:of|for).*9", "3"),
+    # -- Sleepwear / clothing for sleep --
+    (r"what.*(?:warm )?clothing.*(?:cover|covers).*(?:whole|entire).*body.*(?:for|during|while).*sleep", "pajamas"),
+    (r"what.*(?:warm )?clothing.*(?:cover|covers).*body.*(?:for|during|while).*sleep", "pajamas"),
+    (r"what.*clothing.*(?:wear|worn).*(?:for|during|at).*sleep", "pajamas"),
+    (r"what.*(?:do|does|do you|do we).*(?:wear|put on).*(?:for|during|at).*sleep", "pajamas"),
+    (r"what.*(?:wear|worn).*(?:while|when).*sleeping", "pajamas"),
+    (r"what.*(?:clothing|clothes|garment|outfit).*sleep", "pajamas"),
+    (r"what.*(?:night|bed).*time.*(?:clothing|clothes|wear|garment)", "pajamas"),
+    (r"what.*(?:clothing|garment).*(?:whole|entire).*body", "pajamas"),
+    (r"what.*pajama.*(?:called|known as)", "pajamas"),
+    (r"what.*(?:nightwear|nightgown).*(?:called|known as)", "nightgown"),
+    (r"what.*clothing.*women.*sleep.*(?:one piece|dress.*style)", "nightgown"),
+    (r"what.*(?:robe|bathrobe).*(?:called|known as)", "bathrobe"),
+    (r"what.*clothing.*(?:wrap|cover).*after.*(?:bath|shower)", "bathrobe"),
+    (r"what.*slippers.*(?:wear|worn).*(?:feet|foot).*house", "slippers"),
+    (r"what.*footwear.*(?:wear|worn).*indoors", "slippers"),
+
     (r"what.*(?:square root|sqrt).*(?:of|for).*16", "4"),
     (r"what.*(?:square root|sqrt).*(?:of|for).*25", "5"),
     (r"what.*(?:square root|sqrt).*(?:of|for).*36", "6"),
@@ -7183,8 +7200,30 @@ async def solve_hcaptcha_accessibility(page, iframe,
                                     level="warn")
                                 break
                     if answer is None:
-                        log(f"[Accessibility] Q{q}: No answer", level="warn")
-                        break
+                        log(f"[Accessibility] Q{q}: No answer — waiting 3s then clicking Skip", level="warn")
+                        await asyncio.sleep(3)
+                        try:
+                            skip_result = await _challenge_js(
+                                r"""() => {
+                                    const btns = document.querySelectorAll('button, [role="button"]');
+                                    for (const b of btns) {
+                                        const txt = ((b.textContent || '') + ' ' + (b.getAttribute('aria-label') || '')).toLowerCase().trim();
+                                        if (txt.includes('skip') && b.offsetParent !== null) {
+                                            b.click();
+                                            return 'clicked_skip';
+                                        }
+                                    }
+                                    return null;
+                                }"""
+                            )
+                            if skip_result:
+                                log(f"[Accessibility] Q{q} skipped via JS click")
+                            else:
+                                log(f"[Accessibility] Q{q} skip button not found — moving to next question anyway")
+                        except Exception as e:
+                            log(f"[Accessibility] Q{q} skip error: {e}")
+                        await asyncio.sleep(1.5)
+                        continue
 
                     log(f"[Accessibility] Q{q} solved: {answer}")
 
