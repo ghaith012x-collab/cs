@@ -2325,8 +2325,8 @@ KNOWLEDGE_QUESTIONS = [
     (r"opposite of (?:deep)", "shallow"),
     # ── Weather / nature ──
     (r"frozen.*water.*(?:walk|solid)", "ice"),
-    (r"(?:what|which).*(?:boiling point).*water", "100"),
-    (r"(?:what|which).*(?:freezing point).*water", "0"),
+    (r"(?:what|which).*(?:boiling point).*water(?!.*fahrenheit)", "100"),
+    (r"(?:what|which).*(?:freezing point).*water(?!.*fahrenheit)", "0"),
     (r"(?:what|which).*rainbow.*colors|colors.*rainbow", "7"),
     (r"(?:what|which).*(?:first|primary) color.*rainbow", "red"),
     (r"(?:what|which).*(?:last|violet) color.*rainbow", "violet"),
@@ -2527,10 +2527,10 @@ KNOWLEDGE_QUESTIONS = [
     (r"which (?:one |word )?(?:does not|doesn't) belong", None),
     (r"which (?:one |word )?(?:is |are )?the odd one out", None),
     # ── Temperature ──
-    (r"water.*(?:boil|boiling).*celsius", "100"),
-    (r"water.*(?:boil|boiling).*fahrenheit", "212"),
-    (r"water.*(?:freeze|freezing).*celsius", "0"),
-    (r"water.*(?:freeze|freezing).*fahrenheit", "32"),
+    (r"(?:water.*(?:boil|boiling).*celsius|(?:boil|boiling).*water.*celsius)", "100"),
+    (r"(?:water.*(?:boil|boiling).*fahrenheit|(?:boil|boiling).*water.*fahrenheit)", "212"),
+    (r"(?:water.*(?:freeze|freezing).*celsius|(?:freeze|freezing).*water.*celsius)", "0"),
+    (r"(?:water.*(?:freeze|freezing).*fahrenheit|(?:freeze|freezing).*water.*fahrenheit)", "32"),
     (r"body.*temperature.*celsius", "37"),
     (r"body.*temperature.*fahrenheit", "98.6"),
     # ── More measurements ──
