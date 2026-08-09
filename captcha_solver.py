@@ -3000,6 +3000,367 @@ KNOWLEDGE_QUESTIONS = [
     (r"(?:what|which).*(?:hottest|warmest).*(?:planet|solar)", "venus"),
     (r"(?:what|which).*(?:coldest|chilliest).*(?:planet|solar)", "neptune"),
     (r"(?:what|which).*(?:planet|solar).*most.*(?:moon|satellite)", "saturn"),
+    # ──────────────────────────────────────────────────
+    # MASSIVE EXPANSION #2: 400+ more patterns
+    # ──────────────────────────────────────────────────
+    # -- Yes/No / True/False common questions --
+    (r"do cans have labels", "yes"),
+    (r"do bottles have caps", "yes"),
+    (r"do books have pages", "yes"),
+    (r"do cars have engines", "yes"),
+    (r"do birds have wings", "yes"),
+    (r"do fish have gills", "yes"),
+    (r"do dogs have tails", "yes"),
+    (r"do cats have whiskers", "yes"),
+    (r"do trees have leaves", "yes"),
+    (r"do clocks have hands", "yes"),
+    (r"is the sky blue", "yes"),
+    (r"is water wet", "yes"),
+    (r"is fire hot", "yes"),
+    (r"is ice cold", "yes"),
+    (r"is the earth round", "yes"),
+    (r"can birds fly", "yes"),
+    (r"can fish swim", "yes"),
+    (r"does the sun rise in the east", "yes"),
+    (r"does the sun set in the west", "yes"),
+    (r"are humans mammals", "yes"),
+    (r"are whales mammals", "yes"),
+    (r"is the moon (?:a|made).*planet", "no"),
+    (r"is the earth flat", "no"),
+    (r"can pigs fly", "no"),
+    (r"can elephants jump", "no"),
+    (r"do snakes have legs", "no"),
+    (r"are spiders insects", "no"),
+    # -- What is X called / What do you call X --
+    (r"what.*call.*(?:baby|young|infant).*dog", "puppy"),
+    (r"what.*call.*(?:baby|young|infant).*cat", "kitten"),
+    (r"what.*call.*(?:baby|young|infant).*cow", "calf"),
+    (r"what.*call.*(?:baby|young|infant).*horse", "foal"),
+    (r"what.*call.*(?:baby|young|infant).*sheep", "lamb"),
+    (r"what.*call.*(?:baby|young|infant).*pig", "piglet"),
+    (r"what.*call.*(?:baby|young|infant).*duck", "duckling"),
+    (r"what.*call.*(?:baby|young|infant).*chicken", "chick"),
+    (r"what.*call.*(?:baby|young|infant).*goat", "kid"),
+    (r"what.*call.*(?:baby|young|infant).*bear", "cub"),
+    (r"what.*call.*(?:baby|young|infant).*lion", "cub"),
+    (r"what.*call.*(?:baby|young|infant).*tiger", "cub"),
+    (r"what.*call.*(?:baby|young|infant).*deer", "fawn"),
+    (r"what.*call.*(?:baby|young|infant).*frog", "tadpole"),
+    (r"what.*call.*(?:baby|young|infant).*kangaroo", "joey"),
+    (r"what.*call.*(?:baby|young|infant).*rabbit", "kit"),
+    (r"what.*call.*(?:baby|young|infant).*fox", "kit"),
+    (r"what.*call.*(?:baby|young|infant).*eagle", "eaglet"),
+    (r"what.*call.*(?:baby|young|infant).*owl", "owlet"),
+    (r"what.*call.*(?:baby|young|infant).*swan", "cygnet"),
+    (r"what.*call.*(?:baby|young|infant).*(?:whale|dolphin|seal)", "calf"),
+    # -- What is the sound of X --
+    (r"what.*sound.*(?:dog|dogs|puppy)", "bark"),
+    (r"what.*sound.*(?:cat|cats|kitten)", "meow"),
+    (r"what.*sound.*(?:cow|cows|cattle)", "moo"),
+    (r"what.*sound.*(?:pig|pigs)", "oink"),
+    (r"what.*sound.*(?:sheep)", "baa"),
+    (r"what.*sound.*(?:horse|horses)", "neigh"),
+    (r"what.*sound.*(?:duck|ducks)", "quack"),
+    (r"what.*sound.*(?:bird|birds)", "chirp"),
+    (r"what.*sound.*(?:rooster|cock)", "crow"),
+    (r"what.*sound.*(?:lion|lions)", "roar"),
+    (r"what.*sound.*(?:wolf|wolves)", "howl"),
+    (r"what.*sound.*(?:frog|frogs)", "ribbit"),
+    (r"what.*sound.*(?:snake|snakes)", "hiss"),
+    (r"what.*sound.*(?:bee|bees)", "buzz"),
+    (r"what.*sound.*(?:owl|owls)", "hoot"),
+    (r"what.*sound.*(?:turkey|turkeys)", "gobble"),
+    (r"what.*sound.*(?:chicken|chickens|hen)", "cluck"),
+    (r"what.*sound.*(?:mouse|mice)", "squeak"),
+    (r"what.*sound.*(?:elephant|elephants)", "trumpet"),
+    (r"what.*sound.*(?:donkey|donkeys)", "bray"),
+    (r"what.*sound.*(?:crow|crows)", "caw"),
+    (r"what.*sound.*(?:cricket|crickets)", "chirp"),
+    (r"what.*sound.*(?:dolphin|dolphins)", "click"),
+    (r"what.*sound.*(?:whale|whales)", "sing"),
+    # -- Fill in the blank: "The capital of France is ___" --
+    (r"the capital of (?:france|french) is", "paris"),
+    (r"the capital of (?:england|britain|uk) is", "london"),
+    (r"the capital of (?:spain|spanish) is", "madrid"),
+    (r"the capital of (?:italy|italian) is", "rome"),
+    (r"the capital of (?:japan|japanese) is", "tokyo"),
+    (r"the capital of (?:germany|german) is", "berlin"),
+    (r"the capital of (?:china|chinese) is", "beijing"),
+    (r"the capital of (?:usa|america|united states) is", "washington dc"),
+    (r"the capital of (?:canada|canadian) is", "ottawa"),
+    (r"the capital of (?:australia|australian) is", "canberra"),
+    (r"the capital of (?:brazil|brazilian) is", "brasilia"),
+    (r"the largest (?:ocean|sea) is the", "pacific"),
+    (r"the largest (?:continent|landmass) is", "asia"),
+    (r"the longest river is the", "nile"),
+    (r"the highest mountain is", "everest"),
+    (r"the (?:color|colour) of the sky is", "blue"),
+    (r"the (?:color|colour) of grass is", "green"),
+    (r"the (?:color|colour) of snow is", "white"),
+    (r"the (?:color|colour) of blood is", "red"),
+    (r"ice is.*(?:frozen|solid)", "water"),
+    (r"the sun is a", "star"),
+    (r"water boils at.*celsius", "100"),
+    (r"water freezes at.*celsius", "0"),
+    # -- How many X in Y --
+    (r"how many (?:teeth|tooth).*adult human", "32"),
+    (r"how many (?:ribs|rib).*human", "24"),
+    (r"how many (?:vertebrae|vertebra).*human", "33"),
+    (r"how many (?:states|state).*usa|united states", "50"),
+    (r"how many (?:provinces|province).*canada", "10"),
+    (r"how many (?:countries|country).*europe", "44"),
+    (r"how many (?:countries|country).*africa", "54"),
+    (r"how many (?:countries|country).*asia", "48"),
+    (r"how many (?:countries|country).*south america", "12"),
+    (r"how many (?:countries|country).*world", "195"),
+    (r"how many (?:stars|star).*american flag", "50"),
+    (r"how many (?:stripes|stripe).*american flag", "13"),
+    (r"how many (?:elements|element).*periodic table", "118"),
+    (r"how many (?:books|book).*bible", "66"),
+    (r"how many (?:commandments|commandment)", "10"),
+    (r"how many (?:muses|muse).*greek", "9"),
+    (r"how many (?:wonders|wonder).*world", "7"),
+    (r"how many (?:dwarfs|dwarf).*snow white", "7"),
+    (r"how many (?:lives|life).*cat", "9"),
+    # -- What is X made of / composed of --
+    (r"what.*(?:made|composed|consists).*plastic", "oil"),
+    (r"what.*(?:made|composed|consists).*glass", "sand"),
+    (r"what.*(?:made|composed|consists).*paper", "wood"),
+    (r"what.*(?:made|composed|consists).*steel", "iron"),
+    (r"what.*(?:made|composed|consists).*concrete", "cement"),
+    (r"what.*(?:made|composed|consists).*cheese", "milk"),
+    (r"what.*(?:made|composed|consists).*butter", "cream"),
+    (r"what.*(?:made|composed|consists).*yogurt", "milk"),
+    (r"what.*(?:made|composed|consists).*tofu", "soybeans"),
+    (r"what.*(?:made|composed|consists).*wine", "grapes"),
+    (r"what.*(?:made|composed|consists).*vodka", "potatoes"),
+    (r"what.*(?:made|composed|consists).*whiskey", "grain"),
+    (r"what.*(?:made|composed|consists).*rum", "sugarcane"),
+    (r"what.*(?:made|composed|consists).*tequila", "agave"),
+    (r"what.*(?:made|composed|consists).*sake", "rice"),
+    (r"what.*(?:made|composed|consists).*honey", "bees"),
+    (r"what.*(?:made|composed|consists).*silk", "silkworms"),
+    (r"what.*(?:made|composed|consists).*pearl", "oysters"),
+    (r"what.*(?:made|composed|consists).*rubber", "rubber trees"),
+    (r"what.*(?:made|composed|consists).*cotton", "cotton plants"),
+    (r"what.*(?:made|composed|consists).*leather", "animal skin"),
+    (r"what.*(?:made|composed|consists).*wool", "sheep"),
+    # -- Languages spoken in countries --
+    (r"what language.*(?:france|french|paris)", "french"),
+    (r"what language.*(?:spain|spanish|madrid)", "spanish"),
+    (r"what language.*(?:germany|german|berlin)", "german"),
+    (r"what language.*(?:italy|italian|rome)", "italian"),
+    (r"what language.*(?:japan|japanese|tokyo)", "japanese"),
+    (r"what language.*(?:china|chinese|beijing)", "chinese"),
+    (r"what language.*(?:russia|russian|moscow)", "russian"),
+    (r"what language.*(?:brazil|brazilian)", "portuguese"),
+    (r"what language.*(?:portugal|portuguese)", "portuguese"),
+    (r"what language.*(?:netherlands|dutch|holland)", "dutch"),
+    (r"what language.*(?:greece|greek|athens)", "greek"),
+    (r"what language.*(?:turkey|turkish|ankara)", "turkish"),
+    (r"what language.*(?:poland|polish|warsaw)", "polish"),
+    (r"what language.*(?:sweden|swedish|stockholm)", "swedish"),
+    (r"what language.*(?:norway|norwegian|oslo)", "norwegian"),
+    (r"what language.*(?:denmark|danish|copenhagen)", "danish"),
+    (r"what language.*(?:finland|finnish|helsinki)", "finnish"),
+    # -- Currencies --
+    (r"what (?:currency|money).*(?:france|french|paris|euro)", "euro"),
+    (r"what (?:currency|money).*(?:spain|spanish|euro)", "euro"),
+    (r"what (?:currency|money).*(?:germany|german|euro)", "euro"),
+    (r"what (?:currency|money).*(?:italy|italian|euro)", "euro"),
+    (r"what (?:currency|money).*(?:japan|japanese|yen)", "yen"),
+    (r"what (?:currency|money).*(?:china|chinese|yuan|renminbi)", "yuan"),
+    (r"what (?:currency|money).*(?:russia|russian|ruble)", "ruble"),
+    (r"what (?:currency|money).*(?:uk|britain|british|england|pound)", "pound"),
+    (r"what (?:currency|money).*(?:usa|america|united states|dollar)", "dollar"),
+    (r"what (?:currency|money).*(?:canada|canadian)", "canadian dollar"),
+    (r"what (?:currency|money).*(?:australia|australian)", "australian dollar"),
+    (r"what (?:currency|money).*(?:mexico|mexican|peso)", "peso"),
+    (r"what (?:currency|money).*(?:brazil|brazilian|real)", "real"),
+    (r"what (?:currency|money).*(?:india|indian|rupee)", "rupee"),
+    (r"what (?:currency|money).*(?:switzerland|swiss|franc)", "franc"),
+    # -- Parts of speech --
+    (r"what part of speech.*(?:run|jump|walk|eat|sleep|talk)", "verb"),
+    (r"what part of speech.*(?:quickly|slowly|fast|well|badly)", "adverb"),
+    (r"what part of speech.*(?:beautiful|ugly|tall|short|big|small)", "adjective"),
+    (r"what part of speech.*(?:table|chair|dog|cat|house|car)", "noun"),
+    # -- Time zones --
+    (r"what.*time zone.*(?:new york|nyc|eastern)", "est"),
+    (r"what.*time zone.*(?:los angeles|la|pacific)", "pst"),
+    (r"what.*time zone.*(?:london|uk|britain)", "gmt"),
+    (r"what.*time zone.*(?:tokyo|japan)", "jst"),
+    # -- What comes next in sequence --
+    (r"what comes next.*(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)", None),
+    (r"what comes next.*(?:january|february|march|april|may|june|july|august|september|october|november|december)", None),
+    (r"what comes next.*(?:red|orange|yellow|green|blue|indigo|violet)", None),
+    (r"what comes next.*(?:spring|summer|autumn|fall|winter)", None),
+    # -- How many letters in alphabet --
+    (r"how many letters.*english alphabet", "26"),
+    (r"how many vowels.*english", "5"),
+    (r"how many consonants.*english", "21"),
+    # -- What is the Xth month --
+    (r"what.*(?:1st|first) month", "january"),
+    (r"what.*(?:2nd|second) month", "february"),
+    (r"what.*(?:3rd|third) month", "march"),
+    (r"what.*(?:4th|fourth) month", "april"),
+    (r"what.*(?:5th|fifth) month", "may"),
+    (r"what.*(?:6th|sixth) month", "june"),
+    (r"what.*(?:7th|seventh) month", "july"),
+    (r"what.*(?:8th|eighth) month", "august"),
+    (r"what.*(?:9th|ninth) month", "september"),
+    (r"what.*(?:10th|tenth) month", "october"),
+    (r"what.*(?:11th|eleventh) month", "november"),
+    (r"what.*(?:12th|twelfth) month", "december"),
+    # -- What is the Xth day --
+    (r"what.*(?:1st|first) day.*week", "sunday"),
+    (r"what.*(?:2nd|second) day.*week", "monday"),
+    (r"what.*(?:3rd|third) day.*week", "tuesday"),
+    (r"what.*(?:4th|fourth) day.*week", "wednesday"),
+    (r"what.*(?:5th|fifth) day.*week", "thursday"),
+    (r"what.*(?:6th|sixth) day.*week", "friday"),
+    (r"what.*(?:7th|seventh) day.*week", "saturday"),
+    # -- What is the Xth planet --
+    (r"what.*(?:1st|first) planet", "mercury"),
+    (r"what.*(?:2nd|second) planet", "venus"),
+    (r"what.*(?:3rd|third) planet", "earth"),
+    (r"what.*(?:4th|fourth) planet", "mars"),
+    (r"what.*(?:5th|fifth) planet", "jupiter"),
+    (r"what.*(?:6th|sixth) planet", "saturn"),
+    (r"what.*(?:7th|seventh) planet", "uranus"),
+    (r"what.*(?:8th|eighth) planet", "neptune"),
+    # -- What color is X --
+    (r"what color.*(?:apple|strawberry)", "red"),
+    (r"what color.*(?:orange fruit|orange citrus)", "orange"),
+    (r"what color.*banana", "yellow"),
+    (r"what color.*(?:broccoli|cucumber|lettuce)", "green"),
+    (r"what color.*(?:blueberry|blue berry)", "blue"),
+    (r"what color.*(?:grape|eggplant|plum)", "purple"),
+    (r"what color.*(?:lemon|lime)", "yellow"),
+    (r"what color.*(?:carrot|pumpkin)", "orange"),
+    (r"what color.*(?:tomato|cherry)", "red"),
+    (r"what color.*(?:milk|coconut)", "white"),
+    (r"what color.*(?:chocolate|coffee)", "brown"),
+    (r"what color.*(?:crow|raven|coal)", "black"),
+    (r"what color.*(?:flamingo|pig)", "pink"),
+    (r"what color.*(?:elephant)", "gray"),
+    # -- Which animal --
+    (r"which animal.*(?:man's best friend|best friend.*man)", "dog"),
+    (r"which animal.*(?:king.*jungle|king.*beasts)", "lion"),
+    (r"which animal.*(?:king.*forest)", "tiger"),
+    (r"which animal.*(?:stripes|black.*white.*stripes)", "zebra"),
+    (r"which animal.*(?:spots.*fast|fastest.*land)", "cheetah"),
+    (r"which animal.*(?:long neck|tallest)", "giraffe"),
+    (r"which animal.*(?:trunk|largest.*land)", "elephant"),
+    (r"which animal.*(?:pouch|jumps.*australia)", "kangaroo"),
+    (r"which animal.*(?:bamboo|black.*white.*china)", "panda"),
+    (r"which animal.*(?:honey|hibernate|cave)", "bear"),
+    (r"which animal.*(?:howls.*moon|pack)", "wolf"),
+    (r"which animal.*(?:eight.*legs|web)", "spider"),
+    (r"which animal.*(?:no.*legs|slithers)", "snake"),
+    (r"which animal.*(?:can.*change.*color|camouflage)", "chameleon"),
+    (r"which animal.*(?:rolls.*ball|spike)", "hedgehog"),
+    (r"which animal.*(?:glows|light.*bug)", "firefly"),
+    (r"which animal.*(?:plays dead|pretends)", "opossum"),
+    (r"which animal.*(?:builds.*dam|flat tail)", "beaver"),
+    (r"which animal.*(?:echolocation|sonar|blind.*bat)", "bat"),
+    (r"which animal.*(?:migration|v.*shape|fly.*south)", "goose"),
+    (r"which (?:bird|animal).*(?:talk|mimic|speak|parrot)", "parrot"),
+    (r"which (?:bird|animal).*(?:largest.*egg|ostrich)", "ostrich"),
+    (r"which (?:bird|animal).*(?:smallest|humming)", "bee hummingbird"),
+    # -- NFL / NBA / sports teams --
+    (r"how many (?:players|people).*(?:nfl|football).*(?:field|team)", "11"),
+    (r"how many (?:players|people).*(?:nba|basketball).*(?:court|team)", "5"),
+    (r"how many (?:players|people).*(?:mlb|baseball).*(?:field|team)", "9"),
+    (r"how many (?:players|people).*(?:nhl|hockey|ice).*(?:ice|team)", "6"),
+    (r"how many (?:points|point).*(?:touchdown|td)", "6"),
+    (r"how many (?:points|point).*(?:field goal|fg).*football", "3"),
+    (r"how many (?:points|point).*(?:basket|basketball)", "2"),
+    (r"how many (?:points|point).*(?:three pointer|three.pt)", "3"),
+    (r"how many (?:points|point).*(?:free throw)", "1"),
+    (r"how many (?:points|point).*(?:soccer goal|football goal)", "1"),
+    (r"how many (?:innings|inning).*(?:baseball|mlb)", "9"),
+    (r"how many (?:quarters|quarter).*(?:basketball|nba)", "4"),
+    (r"how many (?:quarters|quarter).*(?:football|nfl)", "4"),
+    (r"how many (?:periods|period).*(?:hockey|nhl)", "3"),
+    (r"how many (?:halves|half).*(?:soccer|football)", "2"),
+    # -- Movies & TV --
+    (r"(?:what|which).*(?:longest|most).*running.*tv show", "the simpsons"),
+    (r"(?:what|which).*(?:highest|most).*grossing.*movie", "avatar"),
+    (r"(?:what|which).*first.*animated.*feature.*film", "snow white"),
+    (r"(?:who|which).*(?:character|hero).*(?:spider.man|spiderman)", "peter parker"),
+    (r"(?:who|which).*(?:character|hero).*(?:batman|bruce)", "bruce wayne"),
+    (r"(?:who|which).*(?:character|hero).*(?:superman|clark)", "clark kent"),
+    # -- Internet / tech --
+    (r"what.*(?:www|world wide web)", "world wide web"),
+    (r"what.*(?:html|hypertext)", "hypertext markup language"),
+    (r"what.*(?:css|cascading)", "cascading style sheets"),
+    (r"what.*(?:http|hypertext transfer)", "hypertext transfer protocol"),
+    (r"what.*(?:url|uniform resource)", "uniform resource locator"),
+    (r"what.*(?:dns|domain name)", "domain name system"),
+    (r"what.*(?:isp|internet service)", "internet service provider"),
+    (r"what.*(?:vpn|virtual private)", "virtual private network"),
+    (r"what.*(?:ai|artificial intelligence)", "artificial intelligence"),
+    (r"what.*(?:os|operating system)", "operating system"),
+    (r"what.*(?:cpu|central processing)", "central processing unit"),
+    (r"what.*(?:ram|random access)", "random access memory"),
+    (r"what.*(?:rom|read only)", "read only memory"),
+    (r"what.*(?:usb|universal serial)", "universal serial bus"),
+    (r"what.*(?:wifi|wi.fi|wireless fidelity)", "wireless fidelity"),
+    (r"what.*(?:lte|long term)", "long term evolution"),
+    (r"what.*(?:led|light emitting)", "light emitting diode"),
+    (r"what.*(?:lcd|liquid crystal)", "liquid crystal display"),
+    (r"what.*(?:pdf|portable document)", "portable document format"),
+    (r"what.*(?:jpeg|jpg|joint photographic)", "joint photographic experts group"),
+    (r"what.*(?:gif|graphics interchange)", "graphics interchange format"),
+    (r"what.*(?:png|portable network)", "portable network graphics"),
+    # -- More body parts / anatomy --
+    (r"what.*(?:strongest|most powerful).*muscle", "tongue"),
+    (r"what.*(?:largest|biggest).*organ", "skin"),
+    (r"what.*(?:smallest|tiniest).*bone", "stapes"),
+    (r"what.*(?:longest|biggest).*bone", "femur"),
+    (r"what.*(?:hardest|strongest).*substance.*body", "enamel"),
+    (r"what.*(?:largest|biggest).*artery", "aorta"),
+    (r"what.*(?:largest|biggest).*vein", "vena cava"),
+    (r"what.*(?:fastest|quickest).*healing.*organ", "liver"),
+    (r"what.*(?:only).*organ.*(?:regenerate|regrow)", "liver"),
+    # -- Famous landmarks --
+    (r"(?:what|which).*statue.*(?:liberty|freedom).*new york", "statue of liberty"),
+    (r"(?:what|which).*eiffel.*tower.*(?:paris|france)", "eiffel tower"),
+    (r"(?:what|which).*great wall.*(?:china)", "great wall of china"),
+    (r"(?:what|which).*taj mahal", "taj mahal"),
+    (r"(?:what|which).*colosseum|coliseum", "colosseum"),
+    (r"(?:what|which).*machu picchu", "machu picchu"),
+    (r"(?:what|which).*pyramid.*(?:giza|egypt)", "great pyramid"),
+    (r"(?:what|which).*sphinx.*egypt", "sphinx"),
+    (r"(?:what|which).*leaning.*tower.*pisa", "leaning tower of pisa"),
+    (r"(?:what|which).*golden gate.*bridge", "golden gate bridge"),
+    (r"(?:what|which).*big ben", "big ben"),
+    (r"(?:what|which).*opera house.*sydney", "sydney opera house"),
+    (r"(?:what|which).*stonehenge", "stonehenge"),
+    (r"(?:what|which).*mount rushmore", "mount rushmore"),
+    (r"(?:what|which).*grand canyon", "grand canyon"),
+    (r"(?:what|which).*niagara falls", "niagara falls"),
+    # -- Religions extended --
+    (r"how many (?:pillars|pillar).*islam", "5"),
+    (r"how many (?:noble truths|truth).*buddhism", "4"),
+    (r"what.*holy book.*(?:christianity|christian|bible)", "bible"),
+    (r"what.*holy book.*(?:islam|muslim|quran)", "quran"),
+    (r"what.*holy book.*(?:judaism|jewish|torah)", "torah"),
+    (r"what.*holy book.*(?:hinduism|hindu|vedas)", "vedas"),
+    # -- Zodiac --
+    (r"how many.*zodiac signs", "12"),
+    (r"what.*zodiac.*(?:january|jan)", "capricorn"),
+    (r"what.*zodiac.*(?:february|feb)", "aquarius"),
+    (r"what.*zodiac.*(?:march|mar)", "pisces"),
+    (r"what.*zodiac.*(?:april|apr)", "aries"),
+    (r"what.*zodiac.*(?:may)", "taurus"),
+    (r"what.*zodiac.*(?:june|jun)", "gemini"),
+    (r"what.*zodiac.*(?:july|jul)", "cancer"),
+    (r"what.*zodiac.*(?:august|aug)", "leo"),
+    (r"what.*zodiac.*(?:september|sep)", "virgo"),
+    (r"what.*zodiac.*(?:october|oct)", "libra"),
+    (r"what.*zodiac.*(?:november|nov)", "scorpio"),
+    (r"what.*zodiac.*(?:december|dec)", "sagittarius"),
 ]
 # Category word sets for "which of these is a/an X" pickers
 # Category word sets for "which of these is a/an X" pickers
@@ -4844,6 +5205,272 @@ async def solve_hcaptcha_accessibility(page, iframe,
                 r'(?:use|used)\s+(?:to|for)\s+(\w+(?:ing)?)\s+.*',
                 t, re.IGNORECASE
             )
+
+        # ── YES / NO QUESTIONS: "Do cans have labels?", "Is the sky blue?" ──
+        yes_no = re.search(
+            r'^(?:do|does|is|are|can|will|has|have|was|were)\s+(.+?)\s*[?.!]?$',
+            t, re.IGNORECASE
+        )
+        if yes_no:
+            rest = yes_no.group(1).lower().strip()
+            yes_no_answers = {
+                # Obvious yes
+                'cans have labels': 'yes',
+                'labels on cans': 'yes',
+                'birds fly': 'yes',
+                'fish swim': 'yes',
+                'the sky blue': 'yes',
+                'the sun hot': 'yes',
+                'water wet': 'yes',
+                'fire hot': 'yes',
+                'ice cold': 'yes',
+                'humans breathe air': 'yes',
+                'humans need water': 'yes',
+                'humans need oxygen': 'yes',
+                'plants need water': 'yes',
+                'plants need sunlight': 'yes',
+                'dogs bark': 'yes',
+                'cats meow': 'yes',
+                'cows moo': 'yes',
+                'snakes have no legs': 'yes',
+                'spiders have eight legs': 'yes',
+                'the earth round': 'yes',
+                'the sun a star': 'yes',
+                'a week have seven days': 'yes',
+                'a year have twelve months': 'yes',
+                'a day have twenty four hours': 'yes',
+                'an hour have sixty minutes': 'yes',
+                'a triangle have three sides': 'yes',
+                'a square have four sides': 'yes',
+                'humans have two eyes': 'yes',
+                'humans have two ears': 'yes',
+                'humans have ten fingers': 'yes',
+                'cars have wheels': 'yes',
+                'bicycles have two wheels': 'yes',
+                'planes fly': 'yes',
+                'boats float': 'yes',
+                'snow cold': 'yes',
+                'the moon orbit the earth': 'yes',
+                'the earth orbit the sun': 'yes',
+                'penguins birds': 'yes',
+                'whales mammals': 'yes',
+                'dolphins mammals': 'yes',
+                'bats mammals': 'yes',
+                'owls nocturnal': 'yes',
+                'the sun rise in the east': 'yes',
+                'the sun set in the west': 'yes',
+                'there seven continents': 'yes',
+                'there five oceans': 'yes',
+                'a rainbow have seven colors': 'yes',
+                'tigers have stripes': 'yes',
+                'zebras have stripes': 'yes',
+                'giraffes have long necks': 'yes',
+                'elephants have trunks': 'yes',
+                'kangaroos live in australia': 'yes',
+                'polar bears live in the arctic': 'yes',
+                'penguins live in antarctica': 'yes',
+                # Obvious no
+                'the sun cold': 'no',
+                'ice hot': 'no',
+                'fire cold': 'no',
+                'water dry': 'no',
+                'the sky green': 'no',
+                'grass blue': 'no',
+                'humans have tails': 'no',
+                'humans can fly': 'no',
+                'fish have legs': 'no',
+                'birds have four legs': 'no',
+                'snakes have legs': 'no',
+                'dogs have wings': 'no',
+                'cats bark': 'no',
+                'cows fly': 'no',
+                'elephants can jump': 'no',
+                'pigs can fly': 'no',
+                'spiders insects': 'no',
+                'the earth flat': 'no',
+                'the moon a planet': 'no',
+                'pluto a planet': 'no',
+                'a week have eight days': 'no',
+                'a year have thirteen months': 'no',
+                'a triangle have four sides': 'no',
+                'a square have three sides': 'no',
+                'humans have four eyes': 'no',
+                'bicycles have four wheels': 'no',
+                'cars can fly': 'no',
+                'boats can fly': 'no',
+                'the sun orbit the earth': 'no',
+                'whales fish': 'no',
+                'penguins can fly': 'no',
+                'bats blind': 'no',
+                'the sun rise in the west': 'no',
+                'there ten continents': 'no',
+                'there seven oceans': 'no',
+                'lemons sweet': 'no',
+                'sugar sour': 'no',
+                'salt sweet': 'no',
+            }
+            for key, ans in yes_no_answers.items():
+                if key in rest:
+                    log(f"[Accessibility] Yes/No: '{rest[:60]}' -> {ans}")
+                    return ans
+            # Generic pattern match
+            obvious_yes = re.search(
+                r'\b(?:have|has|can|do|does|is|are|always|definitely|obviously)\b',
+                rest
+            )
+            if obvious_yes and not re.search(r'\b(?:no|not|never|none|can["\']?t|cannot|don["\']?t|doesn["\']?t|isn["\']?t|aren["\']?t|won["\']?t)\b', rest):
+                # Common sense: most "do X have Y" where X is a common object = yes
+                pass  # Don't guess - let it fall through to KB
+
+        # ── TRUE / FALSE questions ──
+        true_false = re.search(
+            r'(?:is it true|true or false|is the following (?:statement )?true|is this true)[:\s]*(.+)',
+            t, re.IGNORECASE
+        )
+        if true_false:
+            statement = true_false.group(1).lower().strip()
+            # Same logic as yes/no
+            for key, ans in yes_no_answers.items():
+                if key in statement:
+                    tf = 'true' if ans == 'yes' else 'false'
+                    log(f"[Accessibility] True/False: '{statement[:60]}' -> {tf}")
+                    return tf
+
+        # ── WORD COUNT: "How many words are in this sentence?" ──
+        wc_match = re.search(
+            r'how many words\s+(?:are|in)\s+(?:in\s+)?(?:this|the|the following)\s+(?:sentence|phrase|question)["\']?(.{3,})',
+            t, re.IGNORECASE
+        )
+        if wc_match:
+            sentence = wc_match.group(1).strip().rstrip('?.').strip()
+            word_count = len(sentence.split())
+            log(f"[Accessibility] Word count: '{sentence[:60]}' = {word_count} words")
+            return str(word_count)
+
+        # ── PLURAL: "What is the plural of X?" ──
+        plural = re.search(
+            r'(?:what|which)\s+(?:is|are)\s+(?:the\s+)?plural\s+(?:of|form of|for)\s+(?:the\s+word\s+)?["\']?(\w{2,})',
+            t, re.IGNORECASE
+        )
+        if plural:
+            word = plural.group(1).lower()
+            plurals = {
+                'child': 'children', 'man': 'men', 'woman': 'women',
+                'mouse': 'mice', 'goose': 'geese', 'tooth': 'teeth',
+                'foot': 'feet', 'person': 'people', 'ox': 'oxen',
+                'leaf': 'leaves', 'wolf': 'wolves', 'knife': 'knives',
+                'wife': 'wives', 'life': 'lives', 'calf': 'calves',
+                'half': 'halves', 'loaf': 'loaves', 'shelf': 'shelves',
+                'thief': 'thieves', 'self': 'selves', 'elf': 'elves',
+                'sheep': 'sheep', 'deer': 'deer', 'fish': 'fish',
+                'moose': 'moose', 'species': 'species', 'series': 'series',
+                'cactus': 'cacti', 'fungus': 'fungi', 'nucleus': 'nuclei',
+                'radius': 'radii', 'stimulus': 'stimuli', 'syllabus': 'syllabi',
+                'alumnus': 'alumni', 'focus': 'foci', 'datum': 'data',
+                'criterion': 'criteria', 'phenomenon': 'phenomena',
+                'analysis': 'analyses', 'thesis': 'theses', 'hypothesis': 'hypotheses',
+                'bacterium': 'bacteria', 'medium': 'media', 'memorandum': 'memoranda',
+                'appendix': 'appendices', 'index': 'indices', 'matrix': 'matrices',
+                'vertex': 'vertices', 'vortex': 'vortices',
+                'bus': 'buses', 'box': 'boxes', 'watch': 'watches',
+                'bus': 'buses', 'dish': 'dishes', 'church': 'churches',
+                'tomato': 'tomatoes', 'potato': 'potatoes', 'hero': 'heroes',
+                'echo': 'echoes', 'veto': 'vetoes', 'mango': 'mangoes',
+            }
+            if word in plurals:
+                ans = plurals[word]
+                log(f"[Accessibility] Plural: '{word}' -> '{ans}'")
+                return ans
+            # Default: add -s or -es
+            if word.endswith(('s', 'x', 'z', 'ch', 'sh')):
+                log(f"[Accessibility] Plural default: '{word}' -> '{word}es'")
+                return word + 'es'
+            elif word.endswith('y') and len(word) > 2 and word[-2] not in 'aeiou':
+                log(f"[Accessibility] Plural default: '{word}' -> '{word[:-1]}ies'")
+                return word[:-1] + 'ies'
+            else:
+                log(f"[Accessibility] Plural default: '{word}' -> '{word}s'")
+                return word + 's'
+
+        # ── PAST TENSE: "What is the past tense of X?" ──
+        past_tense = re.search(
+            r'(?:what|which)\s+(?:is|are)\s+(?:the\s+)?past\s+(?:tense|form)\s+(?:of|for)\s+(?:the\s+word\s+)?["\']?(\w{2,})',
+            t, re.IGNORECASE
+        )
+        if past_tense:
+            word = past_tense.group(1).lower()
+            past = {
+                'go': 'went', 'be': 'was', 'have': 'had',
+                'do': 'did', 'say': 'said', 'get': 'got',
+                'make': 'made', 'know': 'knew', 'think': 'thought',
+                'take': 'took', 'see': 'saw', 'come': 'came',
+                'find': 'found', 'give': 'gave', 'tell': 'told',
+                'feel': 'felt', 'become': 'became', 'leave': 'left',
+                'put': 'put', 'mean': 'meant', 'keep': 'kept',
+                'let': 'let', 'begin': 'began', 'show': 'showed',
+                'hear': 'heard', 'play': 'played', 'run': 'ran',
+                'move': 'moved', 'live': 'lived', 'believe': 'believed',
+                'hold': 'held', 'bring': 'brought', 'happen': 'happened',
+                'write': 'wrote', 'provide': 'provided', 'sit': 'sat',
+                'stand': 'stood', 'lose': 'lost', 'pay': 'paid',
+                'meet': 'met', 'include': 'included', 'continue': 'continued',
+                'set': 'set', 'learn': 'learned', 'change': 'changed',
+                'lead': 'led', 'understand': 'understood', 'watch': 'watched',
+                'follow': 'followed', 'stop': 'stopped', 'create': 'created',
+                'speak': 'spoke', 'read': 'read', 'allow': 'allowed',
+                'add': 'added', 'spend': 'spent', 'grow': 'grew',
+                'open': 'opened', 'walk': 'walked', 'win': 'won',
+                'offer': 'offered', 'remember': 'remembered', 'love': 'loved',
+                'consider': 'considered', 'appear': 'appeared', 'buy': 'bought',
+                'wait': 'waited', 'serve': 'served', 'die': 'died',
+                'send': 'sent', 'expect': 'expected', 'build': 'built',
+                'stay': 'stayed', 'fall': 'fell', 'cut': 'cut',
+                'reach': 'reached', 'kill': 'killed', 'remain': 'remained',
+                'suggest': 'suggested', 'raise': 'raised', 'pass': 'passed',
+                'sell': 'sold', 'require': 'required', 'report': 'reported',
+                'decide': 'decided', 'pull': 'pulled', 'break': 'broke',
+                'receive': 'received', 'agree': 'agreed', 'hit': 'hit',
+                'force': 'forced', 'refuse': 'refused', 'thank': 'thanked',
+                'choose': 'chose', 'fly': 'flew', 'drink': 'drank',
+                'eat': 'ate', 'sleep': 'slept', 'swim': 'swam',
+                'drive': 'drove', 'draw': 'drew', 'sing': 'sang',
+                'ride': 'rode', 'ring': 'rang', 'shake': 'shook',
+                'steal': 'stole', 'wear': 'wore', 'tear': 'tore',
+                'throw': 'threw', 'blow': 'blew', 'freeze': 'froze',
+            }
+            if word in past:
+                ans = past[word]
+                log(f"[Accessibility] Past tense: '{word}' -> '{ans}'")
+                return ans
+            # Regular: add -ed
+            if word.endswith('e'):
+                ans = word + 'd'
+            elif word.endswith('y') and len(word) > 2 and word[-2] not in 'aeiou':
+                ans = word[:-1] + 'ied'
+            elif len(word) >= 3 and word[-1] not in 'aeiouwy' and word[-2] in 'aeiou' and word[-3] not in 'aeiou':
+                ans = word + word[-1] + 'ed'
+            else:
+                ans = word + 'ed'
+            log(f"[Accessibility] Past tense default: '{word}' -> '{ans}'")
+            return ans
+
+        # ── SYLLABLE COUNT: "How many syllables in X?" ──
+        syllable = re.search(
+            r'how many syllables\s+(?:are\s+)?(?:in\s+)?(?:the\s+word\s+)?["\']?(\w{2,})',
+            t, re.IGNORECASE
+        )
+        if syllable:
+            word = syllable.group(1).lower()
+            # Simple vowel-group counting
+            vowels = re.findall(r'[aeiouy]+', word)
+            count = len(vowels)
+            if word.endswith('e') and count > 1:
+                count -= 1  # silent e
+            if word.endswith('le') and len(word) > 2 and word[-3] not in 'aeiou':
+                count += 1
+            count = max(1, count)
+            log(f"[Accessibility] Syllable count: '{word}' = {count}")
+            return str(count)
 
         # ── UNIVERSAL NUMBER SUM: last-resort fallback ──
         # If the question has 2+ numbers and nothing else matched,
