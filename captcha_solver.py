@@ -3474,6 +3474,13 @@ async def solve_hcaptcha_accessibility(page, iframe,
                     score -= 2
                 if re.search(r'read and answer|answer with|respond with|single word', line, re.IGNORECASE):
                     score -= 4
+                # Heavily penalize signup-form / non-captcha UI text
+                # (happens when the accessibility iframe fails to load and
+                #  the solver reads the parent page's signup form instead)
+                if re.search(r'\b(?:email\*?|password\*?|username\*?|display\s+name|create\s+(?:an\s+)?account|sign\s*(?:up|in)|log\s*in|this is how others see you)\b', line, re.IGNORECASE):
+                    score -= 15
+                if re.search(r'\b(?:available|nice!|special characters|emoji)\b', line, re.IGNORECASE):
+                    score -= 8
 
                 if score > best_score:
                     best_score = score
@@ -3492,8 +3499,21 @@ async def solve_hcaptcha_accessibility(page, iframe,
             return best_line
 
         # Priority fallback: concatenated text from any source
+        # BUT reject text that looks like a signup form or generic page UI
+        # (not a captcha question). This prevents infinite-loop on pages
+        # where the accessibility iframe fails to load a real challenge.
+        _FORM_SIGNALS = re.compile(
+            r'(?:email\*?|password\*?|username\*?|display\s+name|'
+            r'create\s+(?:an\s+)?account|sign\s*(?:up|in)|log\s*in|'
+            r'this is how others see you|nice!|special characters)',
+            re.IGNORECASE
+        )
         for source, text in all_texts:
             if len(text) > 10:
+                if _FORM_SIGNALS.search(text):
+                    log(f"[Accessibility] Raw text from {source} looks like a signup form — skipping",
+                        level="warn")
+                    continue
                 log(f"[Accessibility] No scored question — returning raw text from {source}")
                 return text[:500]
 
@@ -4012,12 +4032,31 @@ async def solve_hcaptcha_accessibility(page, iframe,
                     await asyncio.sleep(1.5)
 
                 # ── Answer every question in this chain ──
+                # Track recent Q texts & answers to detect infinite loops
+                # (same non-question text being answered repeatedly)
+                _prev_texts = []
+                _prev_answers = []
                 for q in range(1, max_questions + 1):
                     if await _token_present():
                         log("[Accessibility] Token appeared mid-chain!")
                         break
 
                     answer = await _get_answer(hcaptcha, q)
+                    # ── Duplicate detection: if we get the same question
+                    # text 3+ times in a row, the page isn't showing real
+                    # captcha challenges — abort this chain.
+                    if answer:
+                        cur_text = await _read_question_text()
+                        _prev_texts.append(cur_text[:200])
+                        _prev_answers.append(answer)
+                        if len(_prev_texts) >= 3:
+                            unique_texts = set(_prev_texts[-3:])
+                            unique_ans = set(a for a in _prev_answers[-3:] if a)
+                            if len(unique_texts) <= 1 and len(unique_ans) <= 1:
+                                log("[Accessibility] Same question+answer repeated 3x — "
+                                    "page isn't showing real challenges, aborting chain",
+                                    level="warn")
+                                break
                     if answer is None:
                         log(f"[Accessibility] Q{q}: No answer", level="warn")
                         break
