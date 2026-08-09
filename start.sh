@@ -8,7 +8,7 @@ echo "NoCaptchaAI API key: $([ -n "$API_KEY" ] && echo 'set' || echo 'NOT SET - 
 # AI text model — qwen3:1.7b (fast + knows captcha trivia). Override via env.
 export OLLAMA_MODEL="${OLLAMA_MODEL:-qwen3:1.7b}"
 export OLLAMA_TEXT_MODEL="${OLLAMA_TEXT_MODEL:-qwen3:1.7b}"
-export OLLAMA_VOTES="${OLLAMA_VOTES:-2}"
+export OLLAMA_VOTES="${OLLAMA_VOTES:-1}"  # 1 vote = fastest; 2+ for majority on fast servers
 
 # Start TOR for IP rotation (optional)
 echo "Starting TOR..."

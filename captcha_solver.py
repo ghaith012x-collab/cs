@@ -897,10 +897,10 @@ SCREEN_SIZES = [
     (r"what.*(?:sonar|sonar).*stand.*for", "sound navigation and ranging"),
     (r"what.*(?:scuba).*stand.*for", "self contained underwater breathing apparatus"),
     # -- "How many X in Y" faster catch --
-    (r"how many.*(?:day|days).*year", "365"),
+    (r"how many(?!.*\b31\b).*(?:day|days).*year", "365"),
     (r"how many.*(?:day|days).*leap year", "366"),
     (r"how many.*(?:week|weeks).*year", "52"),
-    (r"how many.*(?:month|months).*year", "12"),
+    (r"how many.*(?:month|months)(?!.*\b31\b).*year", "12"),
     (r"how many.*(?:day|days).*week", "7"),
     (r"how many.*(?:hour|hours).*day", "24"),
     (r"how many.*(?:minute|minutes).*hour", "60"),
@@ -1976,7 +1976,7 @@ KNOWLEDGE_QUESTIONS = [
     (r"how many wheels.*(?:motorcycle|motorbike)", "2"),
     (r"how many wheels.*bus", "4"),
     (r"how many days.*week", "7"),
-    (r"how many months.*year", "12"),
+    (r"how many months(?!.*\b31\b).*year", "12"),
     (r"how many seasons", "4"),
     (r"how many eyes", "2"),
     (r"how many fingers.*(?:one|single)? ?hand", "5"),
@@ -2028,8 +2028,8 @@ KNOWLEDGE_QUESTIONS = [
     (r"string instrument.*six strings|six strings.*instrument|what.*six strings", "guitar"),
     (r"instrument.*(?:6|six) strings", "guitar"),
     (r"instrument.*(?:4|four) strings|violin", "violin"),
-    (r"instrument.*(?:88|eighty.eight) keys|how many keys.*piano", "88"),
-    (r"instrument.*keys|what.*has keys.*black.*white|piano", "piano"),
+    (r"instrument.*(?:88|eighty.eight) keys", "piano"),
+    (r"instrument.*keys|what.*has keys.*black.*white", "piano"),
     (r"instrument.*(?:blow|wind).*flute", "flute"),
     (r"instrument.*(?:blow|brass).*trumpet", "trumpet"),
     (r"instrument.*(?:hit|percussion|drum)", "drums"),
@@ -2096,7 +2096,7 @@ KNOWLEDGE_QUESTIONS = [
     (r"string instrument.*six strings|six strings.*instrument|what.*six strings", "guitar"),
     (r"instrument.*(?:6|six) strings", "guitar"),
     (r"instrument.*(?:4|four) strings", "violin"),
-    (r"instrument.*(?:88|eighty.eight) keys|how many keys.*piano", "88"),
+    (r"instrument.*(?:88|eighty.eight) keys", "piano"),
     (r"instrument.*keys|what.*has keys.*black.*white", "piano"),
     (r"instrument.*(?:blow|wind).*(?:flute|recorder)", "flute"),
     (r"instrument.*(?:blow|brass).*trumpet", "trumpet"),
@@ -2531,6 +2531,212 @@ KNOWLEDGE_QUESTIONS = [
     (r"(?:water.*(?:boil|boiling).*fahrenheit|(?:boil|boiling).*water.*fahrenheit)", "212"),
     (r"(?:water.*(?:freeze|freezing).*celsius|(?:freeze|freezing).*water.*celsius)", "0"),
     (r"(?:water.*(?:freeze|freezing).*fahrenheit|(?:freeze|freezing).*water.*fahrenheit)", "32"),
+    (r"(?:what|which).*(?:baby|young).*(?:cow|bull)", "calf"),
+    (r"(?:what|which).*(?:baby|young).*(?:horse|mare|stallion)", "foal"),
+    (r"(?:what|which).*(?:baby|young).*(?:sheep|ewe|ram)", "lamb"),
+    (r"(?:what|which).*(?:baby|young).*(?:goat)", "kid"),
+    (r"(?:what|which).*(?:baby|young).*(?:cat)", "kitten"),
+    (r"(?:what|which).*(?:baby|young).*(?:dog)", "puppy"),
+    (r"(?:what|which).*(?:baby|young).*(?:duck)", "duckling"),
+    (r"(?:what|which).*(?:baby|young).*(?:chicken|hen)", "chick"),
+    (r"(?:what|which).*(?:baby|young).*(?:pig)", "piglet"),
+    (r"(?:what|which).*(?:baby|young).*(?:frog)", "tadpole"),
+    (r"(?:what|which).*(?:baby|young).*(?:bear)", "cub"),
+    (r"(?:what|which).*(?:baby|young).*(?:deer)", "fawn"),
+    (r"(?:what|which).*(?:baby|young).*(?:rabbit)", "kit"),
+    (r"(?:what|which).*(?:baby|young).*(?:swan)", "cygnet"),
+    (r"(?:what|which).*(?:baby|young).*(?:eagle)", "eaglet"),
+    (r"(?:what|which).*(?:baby|young).*(?:owl)", "owlet"),
+    (r"(?:what|which).*(?:baby|young).*(?:lion)", "cub"),
+    (r"(?:what|which).*(?:female).*(?:fox)", "vixen"),
+    (r"(?:what|which).*(?:female).*(?:horse|mare)", "mare"),
+    (r"(?:what|which).*(?:male).*(?:horse|stallion)", "stallion"),
+    (r"(?:what|which).*(?:female).*(?:sheep|ewe)", "ewe"),
+    (r"(?:what|which).*(?:male).*(?:sheep|ram)", "ram"),
+    (r"(?:what|which).*(?:female).*(?:chicken|hen)", "hen"),
+    (r"(?:what|which).*(?:male).*(?:chicken|rooster)", "rooster"),
+    (r"(?:what|which).*(?:group|collection).*(?:crows|ravens)", "murder"),
+    (r"(?:what|which).*(?:group|collection).*(?:fish)", "school"),
+    (r"(?:what|which).*(?:group|collection).*(?:wolves)", "pack"),
+    (r"(?:what|which).*(?:group|collection).*(?:geese)", "gaggle"),
+    (r"(?:what|which).*(?:group|collection).*(?:sheep)", "flock"),
+    (r"(?:what|which).*(?:group|collection).*(?:elephants)", "herd"),
+    (r"(?:what|which).*(?:group|collection).*(?:dolphins|whales)", "pod"),
+    (r"(?:what|which).*(?:group|collection).*(?:ants)", "colony"),
+    (r"(?:what|which).*(?:group|collection).*(?:birds)", "flock"),
+    (r"(?:what|which).*(?:group|collection).*(?:bees)", "swarm"),
+    (r"(?:what|which).*(?:says|makes|produces).*(?:meow|miaow)", "cat"),
+    (r"(?:what|which).*(?:says|makes|produces).*(?:woof|bark)", "dog"),
+    (r"(?:what|which).*(?:says|makes|produces).*(?:moo)", "cow"),
+    (r"(?:what|which).*(?:says|makes|produces).*(?:oink)", "pig"),
+    (r"(?:what|which).*(?:says|makes|produces).*(?:quack)", "duck"),
+    (r"(?:what|which).*(?:says|makes|produces).*(?:baa|bleat)", "sheep"),
+    (r"(?:what|which).*(?:says|makes|produces).*(?:neigh|whinny)", "horse"),
+    (r"(?:what|which).*(?:says|makes|produces).*(?:cluck)", "chicken"),
+    (r"(?:what|which).*(?:says|makes|produces).*(?:hiss)", "snake"),
+    (r"(?:what|which).*(?:says|makes|produces).*(?:ribbit)", "frog"),
+    (r"(?:what|which).*(?:says|makes|produces).*(?:roar)", "lion"),
+    (r"(?:what|which).*animal.*(?:has|with).*shell", "turtle"),
+    (r"(?:what|which).*animal.*(?:has|with).*hump", "camel"),
+    (r"(?:what|which).*animal.*(?:has|with).*mane", "lion"),
+    (r"(?:what|which).*animal.*(?:has|with).*(?:black and white stripes|stripes)", "zebra"),
+    (r"(?:what|which).*animal.*(?:has|with).*long neck", "giraffe"),
+    (r"(?:what|which).*animal.*(?:has|with).*(?:pouch|marsupium)", "kangaroo"),
+    (r"(?:what|which).*animal.*(?:has|with).*trunk", "elephant"),
+    (r"(?:what|which).*animal.*(?:changes|change).*color", "chameleon"),
+    (r"(?:what|which).*(?:animal|insect).*(?:spider).*(?:spin|make)", "web"),
+    (r"(?:what|which).*(?:caterpillar).*(?:become|turn)", "butterfly"),
+    (r"(?:what|which).*(?:pandas?).*(?:eat|eats)", "bamboo"),
+    (r"(?:what|which).*(?:koalas?).*(?:eat|eats)", "eucalyptus"),
+    (r"(?:what|which).*(?:rabbits?).*(?:eat|eats)", "carrots"),
+    (r"(?:what|which).*(?:bird).*(?:cannot|can't|can not|cant).*fly", "penguin"),
+    (r"(?:what|which).*(?:biggest|largest).*land.*predator", "polar bear"),
+    (r"(?:what|which).*man's best friend", "dog"),
+    (r"(?:what|which).*(?:animal).*(?:plays|play).*dead", "opossum"),
+    (r"(?:what|which).*animal.*lives.*(?:hive|beehive)", "bee"),
+    (r"(?:what|which).*mammal.*(?:fly|flies)", "bat"),
+    (r"(?:what|which).*king of the jungle", "lion"),
+    (r"(?:what|which).*fastest.*land.*animal", "cheetah"),
+    (r"(?:what|which).*fastest.*bird", "peregrine falcon"),
+    (r"(?:what|which).*slowest.*animal", "sloth"),
+    (r"(?:what|which).*tallest.*animal", "giraffe"),
+    (r"(?:what|which).*largest.*land.*animal", "elephant"),
+    (r"(?:what|which).*(?:bees?).*(?:make|produce|create)", "honey"),
+    (r"(?:what|which).*(?:cows?).*(?:produce|give)", "milk"),
+    (r"(?:what|which).*capital.*(?:of|in).*france", "paris"),
+    (r"(?:what|which).*capital.*(?:of|in).*italy", "rome"),
+    (r"(?:what|which).*capital.*(?:of|in).*spain", "madrid"),
+    (r"(?:what|which).*capital.*(?:of|in).*germany", "berlin"),
+    (r"(?:what|which).*capital.*(?:of|in).*japan", "tokyo"),
+    (r"(?:what|which).*capital.*(?:of|in).*(?:united kingdom|great britain|england)", "london"),
+    (r"(?:what|which).*capital.*(?:of|in).*canada", "ottawa"),
+    (r"(?:what|which).*capital.*(?:of|in).*brazil", "brasilia"),
+    (r"(?:what|which).*capital.*(?:of|in).*egypt", "cairo"),
+    (r"(?:what|which).*capital.*(?:of|in).*russia", "moscow"),
+    (r"(?:what|which).*capital.*(?:of|in).*india", "new delhi"),
+    (r"(?:what|which).*capital.*(?:of|in).*(?:united states|usa|america)", "washington"),
+    (r"(?:what|which).*largest.*country", "russia"),
+    (r"(?:what|which).*smallest.*country", "vatican"),
+    (r"(?:what|which).*largest.*continent", "asia"),
+    (r"(?:what|which).*smallest.*continent", "australia"),
+    (r"(?:what|which).*largest.*island", "greenland"),
+    (r"(?:what|which).*planet.*closest.*sun", "mercury"),
+    (r"(?:what|which).*planet.*(?:rings|ring)", "saturn"),
+    (r"(?:what|which).*(?:morning star|evening star)", "venus"),
+    (r"(?:what|which).*hottest.*planet", "venus"),
+    (r"(?:what|which).*planet.*(?:we|you|people).*live", "earth"),
+    (r"(?:what|which).*smallest.*planet", "mercury"),
+    (r"(?:what|which).*galaxy.*(?:live|in)", "milky way"),
+    (r"(?:what|which).*sun.*(?:is|be)", "star"),
+    (r"(?:what|which).*pumps.*blood", "heart"),
+    (r"(?:what|which).*(?:organ|part).*breathe", "lungs"),
+    (r"(?:what|which).*(?:part|organ).*smell", "nose"),
+    (r"(?:what|which).*(?:part|organ).*hear", "ears"),
+    (r"(?:what|which).*(?:part|organ).*see", "eyes"),
+    (r"(?:what|which).*(?:part|organ).*taste", "tongue"),
+    (r"(?:how many).*fingers", "10"),
+    (r"(?:how many).*toes", "10"),
+    (r"(?:how many).*(?:senses|sense organs)", "5"),
+    (r"(?:how many).*chambers.*heart", "4"),
+    (r"(?:what|which).*largest.*bone", "femur"),
+    (r"(?:what|which).*smallest.*bone", "stapes"),
+    (r"(?:how many).*days.*leap year", "366"),
+    (r"(?:how many)(?!.*\b31\b).*days.*year", "365"),
+    (r"(?:how many).*weeks.*year", "52"),
+    (r"(?:how many).*hours.*day", "24"),
+    (r"(?:how many).*minutes.*hour", "60"),
+    (r"(?:how many).*seconds.*minute", "60"),
+    (r"(?:what|which).*first month", "january"),
+    (r"(?:what|which).*last month", "december"),
+    (r"(?:what|which).*day.*after.*monday", "tuesday"),
+    (r"(?:what|which).*day.*before.*friday", "thursday"),
+    (r"(?:what|which).*month.*(?:has|have).*28.*days", "february"),
+    (r"(?:how many).*months.*31.*days", "7"),
+    (r"(?:what|which).*mix.*red.*yellow", "orange"),
+    (r"(?:what|which).*mix.*blue.*yellow", "green"),
+    (r"(?:what|which).*mix.*red.*blue", "purple"),
+    (r"(?:what|which).*mix.*black.*white", "gray"),
+    (r"(?:what|which).*color.*(?:sky|ocean)", "blue"),
+    (r"(?:what|which).*color.*grass", "green"),
+    (r"(?:what|which).*color.*school bus", "yellow"),
+    (r"(?:what|which).*color.*banana", "yellow"),
+    (r"(?:what|which).*color.*milk", "white"),
+    (r"(?:what|which).*opposite.*hot", "cold"),
+    (r"(?:what|which).*opposite.*big", "small"),
+    (r"(?:what|which).*opposite.*fast", "slow"),
+    (r"(?:what|which).*opposite.*up", "down"),
+    (r"(?:what|which).*opposite.*day", "night"),
+    (r"(?:what|which).*opposite.*light", "dark"),
+    (r"(?:what|which).*opposite.*happy", "sad"),
+    (r"(?:what|which).*opposite.*wet", "dry"),
+    (r"(?:what|which).*opposite.*open", "closed"),
+    (r"(?:what|which).*opposite.*new", "old"),
+    (r"(?:what|which).*opposite.*strong", "weak"),
+    (r"(?:what|which).*opposite.*early", "late"),
+    (r"(?:what|which).*opposite.*high", "low"),
+    (r"(?:what|which).*opposite.*clean", "dirty"),
+    (r"(?:what|which).*opposite.*loud", "quiet"),
+    (r"(?:what|which).*opposite.*full", "empty"),
+    (r"(?:what|which).*opposite.*near", "far"),
+    (r"(?:what|which).*opposite.*right", "left"),
+    (r"(?:what|which).*opposite.*first", "last"),
+    (r"(?:what|which).*opposite.*start", "end"),
+    (r"(?:what|which).*opposite.*buy", "sell"),
+    (r"(?:what|which).*opposite.*win", "lose"),
+    (r"(?:what|which).*opposite.*push", "pull"),
+    (r"(?:what|which).*opposite.*rich", "poor"),
+    (r"(?:what|which).*opposite.*hard", "soft"),
+    (r"(?:what|which).*opposite.*north", "south"),
+    (r"(?:what|which).*opposite.*east", "west"),
+    (r"(?:what|which).*opposite.*young", "old"),
+    (r"(?:what|which).*opposite.*tall", "short"),
+    (r"(?:what|which).*opposite.*inside", "outside"),
+    (r"(?:what|which).*opposite.*wide", "narrow"),
+    (r"(?:what|which).*opposite.*thick", "thin"),
+    (r"(?:what|which).*(?:person|someone|one).*(?:flies|fly).*plane", "pilot"),
+    (r"(?:what|which).*(?:person|someone|one).*cuts hair", "barber"),
+    (r"(?:what|which).*(?:person|someone|one).*(?:treats|fixes).*teeth", "dentist"),
+    (r"(?:what|which).*(?:person|someone|one).*(?:fixes|repairs).*cars?", "mechanic"),
+    (r"(?:what|which).*(?:person|someone|one).*(?:cooks|cooking)", "chef"),
+    (r"(?:what|which).*(?:person|someone|one).*teaches", "teacher"),
+    (r"(?:what|which).*(?:person|someone|one).*writes.*books", "author"),
+    (r"(?:what|which).*(?:person|someone|one).*acts.*movies", "actor"),
+    (r"(?:what|which).*(?:person|someone|one).*sings", "singer"),
+    (r"(?:what|which).*(?:person|someone|one).*(?:treats|helps).*animals", "veterinarian"),
+    (r"(?:what|which).*(?:person|someone|one).*studies.*(?:stars|space)", "astronomer"),
+    (r"(?:what|which).*(?:place|building).*borrow.*books", "library"),
+    (r"(?:what|which).*(?:place).*buy.*(?:medicine|medication)", "pharmacy"),
+    (r"(?:what|which).*(?:building|place).*(?:sick|ill).*people", "hospital"),
+    (r"(?:what|which).*(?:place|building).*movies.*shown", "cinema"),
+    (r"(?:what|which).*bread.*(?:made|make).*of", "flour"),
+    (r"(?:what|which).*sushi.*(?:made|make).*with", "rice"),
+    (r"(?:what|which).*fruit.*yellow.*curved", "banana"),
+    (r"(?:what|which).*vegetable.*(?:makes|make).*cry", "onion"),
+    (r"(?:what|which).*instrument.*(?:88|eighty-eight).*keys", "piano"),
+    (r"(?:what|which).*instrument.*black.*white.*keys", "piano"),
+    (r"(?:how many).*strings.*guitar", "6"),
+    (r"(?:how many).*strings.*violin", "4"),
+    (r"(?:what|which).*instrument.*(?:blow|blown)", "flute"),
+    (r"(?:what|which).*instrument.*(?:hit|strike).*(?:sticks|drum)", "drum"),
+    (r"(?:how many).*players.*(?:soccer|football).*team", "11"),
+    (r"(?:how many).*players.*basketball.*team", "5"),
+    (r"(?:what|which).*sport.*(?:shuttlecock|badminton)", "badminton"),
+    (r"(?:what|which).*chemical symbol.*silver", "ag"),
+    (r"(?:what|which).*chemical symbol.*iron", "fe"),
+    (r"(?:what|which).*chemical symbol.*oxygen", "o"),
+    (r"(?:what|which).*chemical symbol.*hydrogen", "h"),
+    (r"(?:what|which).*chemical symbol.*carbon", "c"),
+    (r"(?:what|which).*chemical symbol.*helium", "he"),
+    (r"(?:what|which).*chemical symbol.*nitrogen", "n"),
+    (r"(?:what|which).*chemical symbol.*sodium", "na"),
+    (r"(?:what|which).*chemical symbol.*water", "h2o"),
+    (r"(?:what|which).*lightest.*element", "hydrogen"),
+    (r"(?:what|which).*metal.*liquid.*room temperature", "mercury"),
+    (r"(?:what|which).*frozen water", "ice"),
+    (r"(?:what|which).*frozen rain", "hail"),
+    (r"(?:what|which).*(?:falls|fall).*clouds", "rain"),
+    (r"(?:what|which).*white.*falls.*winter", "snow"),
+    (r"(?:what|which).*hardest.*(?:natural)?.*substance", "diamond"),
     (r"body.*temperature.*celsius", "37"),
     (r"body.*temperature.*fahrenheit", "98.6"),
     # ── More measurements ──
@@ -4498,15 +4704,16 @@ async def solve_hcaptcha_accessibility(page, iframe,
         """Ask Ollama (text-only chat) for a single-word answer to a question.
         Uses few-shot examples + a majority vote (2 samples, tiebreak with a
         3rd) so small local models answer correctly instead of guessing.
-        Set OLLAMA_VOTES=1 to skip the vote for maximum speed."""
+        Default is 1 vote (fastest). Set OLLAMA_VOTES=2+ for majority
+        voting - only useful on a fast server."""
         try:
-            votes = max(1, int(os.environ.get("OLLAMA_VOTES", "2") or "2"))
+            votes = max(1, int(os.environ.get("OLLAMA_VOTES", "1") or "1"))
         except Exception:
-            votes = 2
-        # Give slow hosted instances time to generate: each parallel vote
-        # gets timeout/votes + 2s slack (was timeout/(votes+1), which
-        # silently killed slow answers on free Railway/CPU boxes).
-        per_sample = max(10.0, timeout / votes + 2.0)
+            votes = 1
+        # Each vote gets the FULL timeout budget. A single-GPU Ollama
+        # serializes parallel requests, so the old timeout/votes budget made
+        # EVERY vote time out on slow instances - the logs' "2 x 22s".
+        per_sample = max(12.0, timeout + 5.0)
 
         async def _post() -> str:
             import aiohttp
@@ -4540,39 +4747,35 @@ async def solve_hcaptcha_accessibility(page, iframe,
                 log(f"[Accessibility] Ollama text request error: {e}", level="warn")
                 return ""
 
+        # Fire all votes concurrently; return the FIRST non-empty answer and
+        # cancel the stragglers. Waiting for every vote to finish (majority
+        # voting) is exactly what produced the repeated "2 x 22s" timeouts on
+        # a slow single-GPU server.
+        pending = [asyncio.ensure_future(_post()) for _ in range(votes)]
+        answers = []
         try:
-            # All votes run in parallel — same wall-clock as a single call,
-            # but the majority answer is far more reliable on small models.
-            raw = await asyncio.gather(*[_post() for _ in range(votes)],
-                                       return_exceptions=True)
-            answers = [a for a in raw if isinstance(a, str) and a]
-            if not answers:
-                # Previously this returned '' silently - you would only ever
-                # see "LLM returned nothing". Now say WHY: timeouts on a slow
-                # hosted instance look exactly like this.
-                log("[Accessibility] Ollama text: all votes empty/timed out "
-                    f"({votes} x {per_sample:.0f}s) - model too slow or unreachable",
-                    level="warn")
-                return ""
-            if len(answers) >= 2 and answers[0] == answers[1]:
+            while pending and not answers:
+                done, pending = await asyncio.wait(
+                    pending, return_when=asyncio.FIRST_COMPLETED)
+                for t in done:
+                    try:
+                        v = t.result()
+                    except Exception:
+                        continue
+                    if isinstance(v, str) and v:
+                        answers.append(v)
+            if answers:
                 return answers[0]
-            if len(answers) >= 2:
-                extra = await asyncio.wait_for(_post(), timeout=per_sample)
-                if extra:
-                    answers.append(extra)
-            counts = {}
-            for a in answers:
-                counts[a] = counts.get(a, 0) + 1
-            best = max(counts, key=counts.get)
-            if counts[best] >= 2 or len(answers) < 3:
-                return best
-            return answers[0]
-        except asyncio.TimeoutError:
-            log(f"[Accessibility] Ollama text timeout after {timeout:.0f}s", level="warn")
+            log("[Accessibility] Ollama text: all votes empty/timed out "
+                f"({votes} x {per_sample:.0f}s) - model too slow or unreachable",
+                level="warn")
             return ""
         except Exception as e:
             log(f"[Accessibility] Ollama text error: {e}", level="warn")
             return ""
+        finally:
+            for t in pending:
+                t.cancel()
 
 
     def _clean_llm_answer(raw: str) -> str:
@@ -4644,7 +4847,10 @@ async def solve_hcaptcha_accessibility(page, iframe,
                 level="warn")
             return ""
 
-        for attempt in range(1, 3):  # up to 2 attempts per provider round
+        # SINGLE attempt: on a slow Ollama a retry just doubles the timeout
+        # burn (logs showed 'LLM returned nothing - retrying once...' costing
+        # 2x44s on the same question). The Skip button handles failures.
+        for attempt in range(1, 2):  # one attempt per provider round
             # ── Option 1: Hosted OpenAI-compatible endpoint (smartest) ──
             # Tried BEFORE Ollama when configured: a hosted model (e.g.
             # gpt-4o-mini) actually knows the facts a tiny local model
@@ -4693,10 +4899,6 @@ async def solve_hcaptcha_accessibility(page, iframe,
                 cleaned = _clean_llm_answer(ans)
                 if cleaned:
                     return cleaned
-
-            if attempt == 1:
-                log("[Accessibility] LLM returned nothing — retrying once...", level="warn")
-                await asyncio.sleep(1.0)
 
         return ""
 
@@ -5358,9 +5560,16 @@ async def solve_hcaptcha_accessibility(page, iframe,
         # Strategy 4: Find the longest word (likely the target)
         words = re.findall(r'\b([a-zA-Z]{3,})\b', text)
         if words:
-            # Filter out common question words
-            skip = {'what','the','and','remove','first','last','letter','write',
-                    'backwards','reverse','type','this','that','with','your'}
+            # Filter out common question words (incl. the removal verbs and
+            # puzzle instructions so 'remaining'/'backward' can't win)
+            skip = {'what','the','and','remove','removing','removed','delete',
+                    'deleting','deleted','drop','dropped','strip','take','taken',
+                    'erase','erased','first','last','letter','letters','character',
+                    'characters','write','writing','backwards','backward',
+                    'reverse','reversed','remaining','type','this','that',
+                    'with','your','after','from','word','them','it','into',
+                    'before','then','which','given','named','called','please',
+                    'answer','following','question','off','out','of','the','and'}
             candidates = [w for w in words if w.lower() not in skip]
             if candidates:
                 return max(candidates, key=len)
@@ -5419,16 +5628,27 @@ async def solve_hcaptcha_accessibility(page, iframe,
         # TIGHTER: require that "first" AND "last" are followed by
         # "letter"/"character" within a few words. Prevents matching
         # "remove the first item from the list and the last" (no letter).
+        # Detection is deliberately LOOSE: any removal verb (removing/remove/
+        # delete/drop/strip/take/eliminate/erase, any tense) + first & last +
+        # letter/character(s), in EITHER word order. hCaptcha's common
+        # phrasing is 'After removing the first and last letters write the
+        # remaining letters backward from the word adam' - the old regex
+        # demanded 'first letter' adjacency and \bremove\b (which misses
+        # 'removing'), so this exact question fell through to the LLM and
+        # timed out for 88s. Now solved locally in milliseconds.
+        _wverb = r'(?:remov(?:e|es|ed|ing)?|delet(?:e|es|ed|ing)?|drop(?:ped|ping)?|strip(?:ped|ping)?|take(?:n|ing)?|eliminat(?:e|es|ed|ing)?|erase(?:d|s)?)'
         word_pat = re.compile(
-            r'(?:remov(?:e|es|ed|ing)?|delet(?:e|es|ed|ing)?|drop|strip|take)\s+(?:out\s+)?(?:the\s+)?'
-            r'(?:first|1st)\s+(?:letter|character|char)s?\s+(?:and|&)\s+(?:the\s+)?'
-            r'(?:last)\s+(?:letter|character|char)s?',
+            r'(?:' + _wverb + r'\s+(?:out\s+)?(?:the\s+)?'
+            r'(?:first|1st)(?:\s*(?:and|&)\s*(?:the\s+)?(?:last|2nd))?\s+'
+            r'(?:letter|character|char)s?'
+            r'|(?:first|1st)(?:\s*(?:and|&)\s*(?:the\s+)?(?:last|2nd))?\s+'
+            r'(?:letter|character|char)s?.*' + _wverb + r')',
             re.IGNORECASE
         )
-        if word_pat.search(orig) or (re.search(r'\bremove\b', t)
-                                     and re.search(r'\bfirst\b', t)
-                                     and re.search(r'\blast\b', t)
-                                     and re.search(r'\bletter', t)):
+        if word_pat.search(orig) or (re.search(_wverb, t)
+                                     and re.search(r'\b(?:first|1st)\b', t)
+                                     and re.search(r'\b(?:last|2nd)\b', t)
+                                     and re.search(r'\b(?:letter|character|char)s?\b', t)):
             # Strategy A: quoted / "of the word X" / "word is X" / ALL-CAPS
             # (most reliable — hCaptcha always names the word explicitly)
             word = _find_target_word(orig)
@@ -7111,6 +7331,22 @@ async def solve_hcaptcha_accessibility(page, iframe,
                 return None
             log(f"[Accessibility] Q{q} answer was rejected — retrying: '{text[:120]}'",
                 level="warn")
+
+        # ---- Non-text instruction questions (drag/slide/image-pick) ----
+        # These are GESTURE or IMAGE challenges the text input cannot answer.
+        # Detect and skip INSTANTLY - calling the LLM on them just burns the
+        # full timeout ('Drag the animal into the correct silhouette' cost
+        # 2x22s x2 attempts = 88s of wasted LLM time in one run).
+        if text:
+            _tl = text.lower()
+            if (re.search(r'\b(drag|silhouette|slider)\b', _tl)
+                    or re.search(r'\b(select|click|pick|choose)\b.*\b(images?|pictures?|photos?)\b', _tl)
+                    or re.search(r'\b(images?|pictures?|photos?)\b.*\b(select|click|pick|choose)\b', _tl)
+                    or re.search(r'\bwhich (?:image|picture|photo)\b', _tl)
+                    or re.search(r'\b(draw|trace|swipe|rotate)\b', _tl)
+                    or re.search(r'\bcomplete (?:the|this) (?:pattern|shape|puzzle)\b', _tl)):
+                log(f"[Accessibility] Q{{q}} non-text instruction ('drag/silhouette' style) - skipping without LLM")
+                return None
 
         if text:
             # ── Layers 1+2: local KB ──
