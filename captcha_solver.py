@@ -4340,7 +4340,7 @@ async def solve_hcaptcha_accessibility(page, iframe,
                           if n.split(":")[0] not in
                           {v.split(":")[0] for v in vision_only}]
             candidates = text_names or names
-            preferred = ["qwen2.5", "qwen2", "llama3.2", "llama3.1", "llama3",
+            preferred = ["qwen3", "qwen2.5", "qwen2", "gemma3", "llama3.2", "llama3.1", "llama3",
                          "gemma2", "gemma", "mistral", "phi3", "phi",
                          "deepseek", "tinyllama", "dolphin-llama3", "orca-mini"]
             for p in preferred:
