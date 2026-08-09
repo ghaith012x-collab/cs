@@ -2235,6 +2235,119 @@ KNOWLEDGE_QUESTIONS = [
     (r"container.*holds?.*coins?|holds?.*coins?.*container|call.*container.*coins?", "jar"),
     (r"what.*call.*coin.*holder|coin.*holder.*called", "bank"),
     (r"what.*call.*money.*container|money.*container.*called", "bank"),
+    # ── Spelling / letters / word structure ──
+    (r"(?:what|which).*first letter.*word\s+(\w{2,})", None),  # handled by _solve_text_question
+    (r"(?:what|which).*last letter.*word\s+(\w{2,})", None),
+    (r"how many letters.*(?:word|in the word)\s+(\w{2,})", None),
+    (r"(?:what|which) letter comes after\s+(\w)", None),
+    (r"(?:what|which) letter comes before\s+(\w)", None),
+    (r"(?:what|which) (?:number|digit) comes after\s+(\d+)", None),
+    (r"(?:what|which) (?:number|digit) comes before\s+(\d+)", None),
+    # ── Rhymes ──
+    (r"(?:what|which) word rhymes with\s+(\w+)", None),
+    # ── Baby animals ──
+    (r"baby.*(?:dog|puppy)|puppy.*called|baby dog called", "puppy"),
+    (r"baby.*(?:cat|kitten)|kitten.*called|baby cat called", "kitten"),
+    (r"baby.*(?:cow|calf)|calf.*called|baby cow called", "calf"),
+    (r"baby.*(?:horse|foal)|foal.*called|baby horse called", "foal"),
+    (r"baby.*(?:chicken|chick)|chick.*called|baby chicken called", "chick"),
+    (r"baby.*(?:duck|duckling)|duckling.*called|baby duck called", "duckling"),
+    (r"baby.*(?:sheep|lamb)|lamb.*called|baby sheep called", "lamb"),
+    (r"baby.*(?:goat|kid)|baby goat called", "kid"),
+    (r"baby.*(?:pig|piglet)|piglet.*called|baby pig called", "piglet"),
+    (r"baby.*(?:bear|cub)|cub.*called|baby bear called", "cub"),
+    (r"baby.*(?:deer|fawn)|fawn.*called|baby deer called", "fawn"),
+    (r"baby.*(?:frog|tadpole)|tadpole.*called|baby frog called", "tadpole"),
+    (r"baby.*(?:kangaroo|joey)|joey.*called|baby kangaroo called", "joey"),
+    # ── Animal groups ──
+    (r"(?:group|collective).*(?:wolf|wolves)", "pack"),
+    (r"(?:group|collective).*(?:fish)", "school"),
+    (r"(?:group|collective).*(?:bird)", "flock"),
+    (r"(?:group|collective).*(?:lion)", "pride"),
+    (r"(?:group|collective).*(?:bee)", "swarm"),
+    (r"(?:group|collective).*(?:cattle|cow)", "herd"),
+    (r"(?:group|collective).*(?:sheep)", "flock"),
+    # ── Family relations ──
+    (r"father.*(?:father|parent).*called|father's father", "grandfather"),
+    (r"mother.*(?:mother|parent).*called|mother's mother", "grandmother"),
+    (r"(?:father|dad).*brother.*called|father's brother", "uncle"),
+    (r"(?:mother|mom).*sister.*called|mother's sister", "aunt"),
+    (r"(?:brother|sister).*son.*called", "nephew"),
+    (r"(?:brother|sister).*daughter.*called", "niece"),
+    (r"son.*(?:brother|sister).*called", "nephew"),
+    # ── More everyday objects ──
+    (r"(?:what|which).*object.*give.*time|tells?.*time", "clock"),
+    (r"(?:what|which).*object.*(?:sit|chair|seat)", "chair"),
+    (r"(?:what|which).*object.*(?:sleep|bed)", "bed"),
+    (r"(?:what|which).*object.*(?:write|pen)", "pen"),
+    (r"(?:what|which).*object.*(?:cut|knife|scissors)", "scissors"),
+    (r"(?:what|which).*object.*(?:drink|cup|glass)", "cup"),
+    (r"(?:what|which).*object.*(?:eat.*with|spoon|fork)", "spoon"),
+    (r"(?:what|which).*object.*(?:open.*door|key)", "key"),
+    (r"(?:what|which).*object.*(?:call.*phone|telephone)", "phone"),
+    # ── Which is not like the others ──
+    (r"which (?:one |word )?(?:is |are )?not like the others", None),
+    (r"which (?:one |word )?(?:does not|doesn't) belong", None),
+    (r"which (?:one |word )?(?:is |are )?the odd one out", None),
+    # ── Temperature ──
+    (r"water.*(?:boil|boiling).*celsius", "100"),
+    (r"water.*(?:boil|boiling).*fahrenheit", "212"),
+    (r"water.*(?:freeze|freezing).*celsius", "0"),
+    (r"water.*(?:freeze|freezing).*fahrenheit", "32"),
+    (r"body.*temperature.*celsius", "37"),
+    (r"body.*temperature.*fahrenheit", "98.6"),
+    # ── More measurements ──
+    (r"how many (?:inches|inch).*foot", "12"),
+    (r"how many (?:feet|foot).*yard", "3"),
+    (r"how many (?:yards|yard).*mile", "1760"),
+    (r"how many (?:centimeters|cm).*meter", "100"),
+    (r"how many (?:meters|m).*kilometer", "1000"),
+    (r"how many (?:grams|g).*kilogram", "1000"),
+    (r"how many (?:pounds|lbs).*kilogram", "2.2"),
+    (r"how many (?:ounces|oz).*pound", "16"),
+    (r"how many (?:quarts|quart).*gallon", "4"),
+    (r"how many (?:pints|pint).*gallon", "8"),
+    (r"how many (?:cups|cup).*gallon", "16"),
+    # ── Famous people / history ──
+    (r"(?:who|which).*discovered.*(?:gravity|apple)", "newton"),
+    (r"(?:who|which).*discovered.*(?:america|new world)", "columbus"),
+    (r"(?:who|which).*invented.*(?:telephone|phone)", "bell"),
+    (r"(?:who|which).*invented.*(?:lightbulb|light bulb)", "edison"),
+    (r"(?:who|which).*painted.*(?:mona lisa)", "da vinci"),
+    (r"(?:who|which).*wrote.*(?:romeo|juliet|hamlet)", "shakespeare"),
+    (r"(?:who|which).*(?:first president).*(?:usa|america)", "washington"),
+    # ── Math / numbers ──
+    (r"(?:what|which).*number.*(?:dozen|12)", "12"),
+    (r"(?:what|which).*(?:half|50 percent).*100", "50"),
+    (r"(?:what|which).*(?:quarter|25 percent).*100", "25"),
+    (r"(?:what|which).*square root.*(?:4|four)", "2"),
+    (r"(?:what|which).*square root.*(?:9|nine)", "3"),
+    (r"(?:what|which).*square root.*(?:16|sixteen)", "4"),
+    (r"(?:what|which).*square root.*(?:25|twenty.five)", "5"),
+    (r"(?:what|which).*(?:roman numeral).*(?:5|five)", "v"),
+    (r"(?:what|which).*(?:roman numeral).*(?:10|ten)", "x"),
+    (r"(?:what|which).*(?:roman numeral).*(?:50|fifty)", "l"),
+    (r"(?:what|which).*(?:roman numeral).*(?:100|hundred)", "c"),
+    (r"(?:what|which).*(?:roman numeral).*(?:1000|thousand)", "m"),
+    # ── Music / notes ──
+    (r"how many notes.*(?:musical scale|octave)", "8"),
+    (r"how many strings.*(?:standard )?guitar", "6"),
+    (r"how many strings.*(?:standard )?bass", "4"),
+    (r"how many strings.*violin", "4"),
+    (r"how many strings.*harp", "47"),
+    # ── Technology ──
+    (r"(?:what|which).*(?:www|world wide web)", "world wide web"),
+    (r"(?:what|which).*(?:url|website address)", "url"),
+    (r"(?:what|which).*(?:browser|chrome|firefox)", "browser"),
+    (r"(?:what|which).*(?:search engine|google|bing)", "search engine"),
+    (r"(?:what|which).*(?:social media|facebook|twitter)", "social media"),
+    # ── Religion / culture ──
+    (r"(?:what|which).*(?:festival|celebration).*(?:lights|diwali)", "diwali"),
+    (r"(?:what|which).*(?:festival|celebration).*(?:ramadan|fasting)", "ramadan"),
+    (r"(?:what|which).*(?:festival|celebration).*(?:hanukkah|menorah)", "hanukkah"),
+    # ── which one is correct spelling ──
+    (r"which (?:one |word )?is (?:spelled|spelt) correctly", None),
+    (r"which (?:of these|word).*(?:correct|right) spelling", None),
 ]
 # Category word sets for "which of these is a/an X" pickers
 CATEGORY_WORDS = {
@@ -3712,6 +3825,80 @@ async def solve_hcaptcha_accessibility(page, iframe,
         lone_num = re.search(r'^\s*(\d+)\s*$', t)
         if lone_num:
             return lone_num.group(1)
+
+        # ── FIRST / LAST LETTER: "What is the first letter of X?" ──
+        fl_letter = re.search(
+            r'(?:what|which).*(?:first|1st)\s+letter\s+(?:of|in)\s+(?:the\s+)?(?:word\s+)?["\']?(\w{2,})',
+            t, re.IGNORECASE
+        )
+        if fl_letter:
+            word = fl_letter.group(1)
+            if len(word) > 1:
+                log(f"[Accessibility] First letter of '{word}' = '{word[0]}'")
+                return word[0].lower()
+
+        ll_letter = re.search(
+            r'(?:what|which).*(?:last)\s+letter\s+(?:of|in)\s+(?:the\s+)?(?:word\s+)?["\']?(\w{2,})',
+            t, re.IGNORECASE
+        )
+        if ll_letter:
+            word = ll_letter.group(1)
+            if len(word) > 1:
+                log(f"[Accessibility] Last letter of '{word}' = '{word[-1]}'")
+                return word[-1].lower()
+
+        # ── LETTER COUNT: "How many letters in the word X?" ──
+        letter_count = re.search(
+            r'how many letters\s+(?:in|are in)\s+(?:the\s+)?(?:word\s+)?["\']?(\w{2,})',
+            t, re.IGNORECASE
+        )
+        if letter_count:
+            word = letter_count.group(1)
+            count = len(word)
+            log(f"[Accessibility] Letter count of '{word}' = {count}")
+            return str(count)
+
+        # ── LETTER AFTER/BEFORE: "What letter comes after X?" ──
+        letter_after = re.search(
+            r'(?:what|which)\s+letter\s+comes?\s+after\s+["\']?(\w)["\']?',
+            t, re.IGNORECASE
+        )
+        if letter_after:
+            ch = letter_after.group(1).lower()
+            if 'a' <= ch < 'z':
+                nxt = chr(ord(ch) + 1)
+                log(f"[Accessibility] Letter after '{ch}' = '{nxt}'")
+                return nxt
+
+        letter_before = re.search(
+            r'(?:what|which)\s+letter\s+comes?\s+before\s+["\']?(\w)["\']?',
+            t, re.IGNORECASE
+        )
+        if letter_before:
+            ch = letter_before.group(1).lower()
+            if 'a' < ch <= 'z':
+                prev = chr(ord(ch) - 1)
+                log(f"[Accessibility] Letter before '{ch}' = '{prev}'")
+                return prev
+
+        # ── NUMBER AFTER/BEFORE: "What number comes after X?" ──
+        num_after = re.search(
+            r'(?:what|which)\s+(?:number|digit)\s+comes?\s+after\s+(\d+)',
+            t, re.IGNORECASE
+        )
+        if num_after:
+            n = int(num_after.group(1))
+            log(f"[Accessibility] Number after {n} = {n + 1}")
+            return str(n + 1)
+
+        num_before = re.search(
+            r'(?:what|which)\s+(?:number|digit)\s+comes?\s+before\s+(\d+)',
+            t, re.IGNORECASE
+        )
+        if num_before:
+            n = int(num_before.group(1))
+            log(f"[Accessibility] Number before {n} = {n - 1}")
+            return str(n - 1)
 
         # ── UNIVERSAL NUMBER SUM: last-resort fallback ──
         # If the question has 2+ numbers and nothing else matched,
