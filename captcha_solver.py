@@ -4418,28 +4418,86 @@ async def solve_hcaptcha_accessibility(page, iframe,
             log(f"[Accessibility] Ollama error: {e}", level="error")
             return ""
 
+    # Few-shot examples injected into the LLM prompt. Small local models
+    # (llama3.2:1b etc.) only answer CAPTCHA trivia correctly when they are
+    # shown the same question TYPE first, so pick the most relevant examples
+    # for each question before asking.
+    _FEWSHOT_POOL = [
+        ("You start with 6 coins in a jar. On Wednesday, you put 9 coins into the jar. How many coins are in your jar now?", "15"),
+        ("Your coin jar has 8 coins. On Monday, you add 9 coins. How many coins are in the jar?", "17"),
+        ("What vegetable is white inside and brown outside?", "potato"),
+        ("What direction does the sun set in?", "west"),
+        ("What liquid do you use to wash your body?", "soap"),
+        ("What do we call a container that holds coins?", "jar"),
+        ("What is the capital of France?", "paris"),
+        ("How many days are in a week?", "7"),
+        ("What color is the sky?", "blue"),
+        ("What do bees make?", "honey"),
+        ("What is the largest planet in our solar system?", "jupiter"),
+        ("How many legs does a spider have?", "8"),
+        ("What do we call a baby dog?", "puppy"),
+        ("What is the opposite of hot?", "cold"),
+        ("What gas do plants absorb?", "carbon dioxide"),
+        ("What instrument has 88 keys?", "piano"),
+        ("What do you use to cut paper?", "scissors"),
+        ("How many minutes are in an hour?", "60"),
+        ("What animal says moo?", "cow"),
+        ("What is the tallest land animal?", "giraffe"),
+        ("What do you call the person who flies a plane?", "pilot"),
+        ("What color do you get when you mix red and white?", "pink"),
+        ("How many wheels does a car have?", "4"),
+        ("What is the first month of the year?", "january"),
+        ("What do you use to write on a blackboard?", "chalk"),
+        ("What is the freezing point of water in celsius?", "0"),
+        ("Can bread be stored frozen?", "yes"),
+        ("Do cats meow?", "yes"),
+    ]
+
+    def _build_llm_prompt(question: str) -> str:
+        """Pick the 4 most relevant few-shot examples and build the prompt."""
+        stop = {"what", "which", "how", "many", "much", "does", "do", "is", "are",
+                "the", "and", "with", "your", "you", "that", "this", "from", "into",
+                "there", "have", "has", "can", "would", "about", "when", "where",
+                "its", "answer", "question", "following", "single", "word", "number",
+                "phrase", "please", "put", "add", "call", "calls", "one", "using"}
+        qw = {w for w in re.findall(r"[a-z]{3,}", question.lower()) if w not in stop}
+        scored = []
+        for eq, ea in _FEWSHOT_POOL:
+            ew = {w for w in re.findall(r"[a-z]{3,}", eq.lower())}
+            scored.append((len(qw & ew), eq, ea))
+        scored.sort(key=lambda x: -x[0])
+        lines = ["Answer each question with exactly ONE word or number.",
+                 "No punctuation, no explanation, no quotes."]
+        for _score, eq, ea in scored[:4]:
+            lines.append("Question: " + eq)
+            lines.append("Answer: " + ea)
+        lines.append("Question: " + question)
+        lines.append("Answer:")
+        return "\n".join(lines)
+
     async def _ollama_answer_text(question: str, timeout: float = 20.0) -> str:
         """Ask Ollama (text-only chat) for a single-word answer to a question.
-        Uses a TEXT-capable model (never the vision model). Capped by
-        asyncio.wait_for so a slow Ollama server can't stall the captcha."""
+        Uses few-shot examples + a majority vote (2 samples, tiebreak with a
+        3rd) so small local models answer correctly instead of guessing.
+        Set OLLAMA_VOTES=1 to skip the vote for maximum speed."""
+        try:
+            votes = max(1, int(os.environ.get("OLLAMA_VOTES", "2") or "2"))
+        except Exception:
+            votes = 2
+        per_sample = max(6.0, timeout / (votes + 1))
+
         async def _post() -> str:
             import aiohttp
             payload = {
                 "model": ollama_text_model or ollama_model,
                 "stream": False,
                 "keep_alive": "30m",
-                "options": {"temperature": 0, "num_predict": 24},
-                "messages": [{
-                    "role": "user",
-                    "content": (
-                        "You are solving a CAPTCHA accessibility question. "
-                        "Answer with exactly ONE word or number. No punctuation, "
-                        "no explanation, lowercase.\n\nQuestion: " + question
-                    ),
-                }],
+                "options": {"temperature": 0.2, "num_predict": 16,
+                            "stop": ["\n", "."]},
+                "messages": [{"role": "user", "content": _build_llm_prompt(question)}],
             }
             async with aiohttp.ClientSession(
-                timeout=aiohttp.ClientTimeout(total=timeout)
+                timeout=aiohttp.ClientTimeout(total=per_sample)
             ) as session:
                 async with session.post(
                     f"{ollama_url}/api/chat", json=payload
@@ -4448,10 +4506,29 @@ async def solve_hcaptcha_accessibility(page, iframe,
                         log(f"[Accessibility] Ollama text HTTP {resp.status}", level="warn")
                         return ""
                     data = await resp.json()
-                    return data["message"]["content"].strip()
+                    return _clean_llm_answer(data["message"]["content"])
 
         try:
-            return await asyncio.wait_for(_post(), timeout=timeout)
+            answers = []
+            for _i in range(votes):
+                ans = await asyncio.wait_for(_post(), timeout=per_sample)
+                if ans:
+                    answers.append(ans)
+            if not answers:
+                return ""
+            if len(answers) >= 2 and answers[0] == answers[1]:
+                return answers[0]
+            if len(answers) >= 2:
+                ans3 = await asyncio.wait_for(_post(), timeout=per_sample)
+                if ans3:
+                    answers.append(ans3)
+            counts = {}
+            for a in answers:
+                counts[a] = counts.get(a, 0) + 1
+            best = max(counts, key=counts.get)
+            if counts[best] >= 2 or len(answers) < 3:
+                return best
+            return answers[0]
         except asyncio.TimeoutError:
             log(f"[Accessibility] Ollama text timeout after {timeout:.0f}s", level="warn")
             return ""
@@ -4530,14 +4607,10 @@ async def solve_hcaptcha_accessibility(page, iframe,
             return ""
 
         for attempt in range(1, 3):  # up to 2 attempts per provider round
-            # ── Option 1: Ollama ──
-            if ollama_url:
-                ans = await _ollama_answer_text(question, timeout=timeout)
-                cleaned = _clean_llm_answer(ans)
-                if cleaned:
-                    return cleaned
-
-            # ── Option 2: OpenAI-compatible endpoint ──
+            # ── Option 1: Hosted OpenAI-compatible endpoint (smartest) ──
+            # Tried BEFORE Ollama when configured: a hosted model (e.g.
+            # gpt-4o-mini) actually knows the facts a tiny local model
+            # (llama3.2:1b) can only guess at, so it should answer first.
             if api_url:
                 try:
                     import aiohttp
@@ -4555,10 +4628,11 @@ async def solve_hcaptcha_accessibility(page, iframe,
                                 "Answer with exactly ONE word, number, or short phrase. "
                                 "No punctuation, no explanation, no quotes, lowercase."
                             )},
-                            {"role": "user", "content": "Question: " + question},
+                            {"role": "user", "content": _build_llm_prompt(question)},
                         ],
                         "temperature": 0,
                         "max_tokens": 20,
+                        "stop": ["\n"],
                     }
                     async with aiohttp.ClientSession(
                         timeout=aiohttp.ClientTimeout(total=timeout)
@@ -4574,6 +4648,13 @@ async def solve_hcaptcha_accessibility(page, iframe,
                                     return cleaned
                 except Exception as e:
                     log(f"[Accessibility] LLM API error: {e}", level="warn")
+
+            # ── Option 2: Ollama (self-hosted, fallback) ──
+            if ollama_url:
+                ans = await _ollama_answer_text(question, timeout=timeout)
+                cleaned = _clean_llm_answer(ans)
+                if cleaned:
+                    return cleaned
 
             if attempt == 1:
                 log("[Accessibility] LLM returned nothing — retrying once...", level="warn")
