@@ -4340,7 +4340,7 @@ async def solve_hcaptcha_accessibility(page, iframe,
                           if n.split(":")[0] not in
                           {v.split(":")[0] for v in vision_only}]
             candidates = text_names or names
-            preferred = ["llama3.2", "llama3.1", "llama3", "qwen2.5", "qwen2",
+            preferred = ["qwen2.5", "qwen2", "llama3.2", "llama3.1", "llama3",
                          "gemma2", "gemma", "mistral", "phi3", "phi",
                          "deepseek", "tinyllama", "dolphin-llama3", "orca-mini"]
             for p in preferred:
@@ -4461,21 +4461,46 @@ async def solve_hcaptcha_accessibility(page, iframe,
 
 
     def _clean_llm_answer(raw: str) -> str:
-        """Normalize an LLM answer: lowercase, strip punctuation,
-        keep up to 3 words (captcha answers can be phrases like
-        'dog food' or 'living room'). Returns '' if empty."""
+        """Normalize an LLM answer: lowercase, strip punctuation and
+        rambling preambles, keep up to 3 words (captcha answers can be
+        phrases like 'dog food' or 'living room'). Returns '' if empty."""
         if not raw:
             return ""
         # Lowercase, drop quotes/brackets/periods but keep word separators
         s = re.sub(r"[\"'`\[\](){}<>]", "", raw)
         s = s.replace(".", " ").replace(",", " ").replace(";", " ").replace(":", " ")
         s = s.replace("\n", " ").replace("\t", " ").replace("-", " ")
-        words = [w for w in s.lower().split() if re.search(r"[a-z0-9]", w)]
+        s = s.lower()
+        # Strip rambling preambles repeatedly so the answer word survives:
+        # "i think the answer is X", "it is X", "probably X", "my answer is X"
+        _preamble = re.compile(
+            r'^(?:(?:i\s+(?:think|believe|guess|would\s+say|am\s+pretty\s+sure))'
+            r'|(?:the\s+answer\s+(?:is|would\s+be))'
+            r'|(?:the\s+(?:correct|right)\s+answer\s+(?:is|would\s+be))'
+            r'|(?:my\s+answer\s+is)'
+            r'|(?:that\s+would\s+be)'
+            r'|(?:it\s+is)'
+            r'|(?:it\'?s)'
+            r'|(?:the\s+word\s+is)'
+            r'|(?:this\s+is)'
+            r'|(?:probably|maybe|likely|definitely|obviously))'
+            r'\b[\s,:;-]*')
+        for _ in range(3):
+            if not s:
+                break
+            s2 = _preamble.sub('', s)
+            if s2 == s:
+                break
+            s = s2
+        words = [w for w in s.split() if re.search(r"[a-z0-9]", w)]
         if not words:
             return ""
         # Drop filler words that sometimes leak out
         stop = {"the", "a", "an", "is", "are", "it", "of", "to", "in", "for",
-                "answer", "with", "and", "or", "be", "please"}
+                "answer", "with", "and", "or", "be", "please",
+                "i", "think", "believe", "guess", "probably", "maybe", "likely",
+                "would", "should", "could", "that", "this", "its", "correct", "right",
+                "my", "so", "just", "really", "very", "most"}
         cleaned = [w for w in words if w not in stop]
         if not cleaned:
             return ""
