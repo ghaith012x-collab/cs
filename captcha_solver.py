@@ -2471,6 +2471,7 @@ KNOWLEDGE_QUESTIONS = [
     (r"container.*holds?.*coins?|holds?.*coins?.*container|call.*container.*coins?", "jar"),
     (r"what.*call.*coin.*holder|coin.*holder.*called", "bank"),
     (r"what.*call.*money.*container|money.*container.*called", "bank"),
+    (r"what.*call.*paper.*money|paper.*money.*(?:called|call)", "currency"),
     # ── Spelling / letters / word structure ──
     (r"(?:what|which).*first letter.*word\s+(\w{2,})", None),  # handled by _solve_text_question
     (r"(?:what|which).*last letter.*word\s+(\w{2,})", None),
@@ -4497,7 +4498,10 @@ async def solve_hcaptcha_accessibility(page, iframe,
             votes = max(1, int(os.environ.get("OLLAMA_VOTES", "2") or "2"))
         except Exception:
             votes = 2
-        per_sample = max(6.0, timeout / (votes + 1))
+        # Give slow hosted instances time to generate: each parallel vote
+        # gets timeout/votes + 2s slack (was timeout/(votes+1), which
+        # silently killed slow answers on free Railway/CPU boxes).
+        per_sample = max(10.0, timeout / votes + 2.0)
 
         async def _post() -> str:
             import aiohttp
@@ -4509,17 +4513,23 @@ async def solve_hcaptcha_accessibility(page, iframe,
                             "stop": ["\n", "."]},
                 "messages": [{"role": "user", "content": _build_llm_prompt(question)}],
             }
-            async with aiohttp.ClientSession(
-                timeout=aiohttp.ClientTimeout(total=per_sample)
-            ) as session:
-                async with session.post(
-                    f"{ollama_url}/api/chat", json=payload
-                ) as resp:
-                    if resp.status != 200:
-                        log(f"[Accessibility] Ollama text HTTP {resp.status}", level="warn")
-                        return ""
-                    data = await resp.json()
-                    return _clean_llm_answer(data["message"]["content"])
+            try:
+                async with aiohttp.ClientSession(
+                    timeout=aiohttp.ClientTimeout(total=per_sample)
+                ) as session:
+                    async with session.post(
+                        f"{ollama_url}/api/chat", json=payload
+                    ) as resp:
+                        if resp.status != 200:
+                            log(f"[Accessibility] Ollama text HTTP {resp.status}", level="warn")
+                            return ""
+                        data = await resp.json()
+                        return _clean_llm_answer(data["message"]["content"])
+            except asyncio.TimeoutError:
+                return ""  # too slow - reported by the caller below
+            except Exception as e:
+                log(f"[Accessibility] Ollama text request error: {e}", level="warn")
+                return ""
 
         try:
             # All votes run in parallel — same wall-clock as a single call,
@@ -4528,6 +4538,12 @@ async def solve_hcaptcha_accessibility(page, iframe,
                                        return_exceptions=True)
             answers = [a for a in raw if isinstance(a, str) and a]
             if not answers:
+                # Previously this returned '' silently - you would only ever
+                # see "LLM returned nothing". Now say WHY: timeouts on a slow
+                # hosted instance look exactly like this.
+                log("[Accessibility] Ollama text: all votes empty/timed out "
+                    f"({votes} x {per_sample:.0f}s) - model too slow or unreachable",
+                    level="warn")
                 return ""
             if len(answers) >= 2 and answers[0] == answers[1]:
                 return answers[0]
@@ -7077,7 +7093,7 @@ async def solve_hcaptcha_accessibility(page, iframe,
             # Ollama /api/chat as text (no screenshot, no vision model).
             # Hard timeout so a slow model can't stall the captcha.
             log(f"[Accessibility] Q{q} UNKNOWN question (no local match) — calling Layer 3 LLM")
-            ans = await _llm_answer_question(text, timeout=25.0)
+            ans = await _llm_answer_question(text, timeout=40.0)
             if ans:
                 log(f"[Accessibility] Q{q} Layer 3 LLM answered: {ans}")
                 return ans
