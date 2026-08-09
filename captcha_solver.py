@@ -4288,12 +4288,13 @@ async def solve_hcaptcha_accessibility(page, iframe,
       1. Use frame_locator('iframe[title="hCaptcha challenge"]') for iframe.
       2. Click #menu-info (the 3-dots) inside the hCaptcha iframe.
       3. Select "Accessibility Challenge".
-      4. Screenshot and send to Ollama vision model.
+      4. Read the question TEXT from the page; solve with local
+         solvers first, then Ollama text LLM (no screenshots).
       5. Type answer and submit.
 
     Requirements:
-      - Ollama running with a vision model (e.g. `ollama pull minicpm-v`)
-      - Fast GPU recommended for fast inference
+      - Ollama running with a text model (e.g. `ollama pull llama3.2`)
+      - Set OLLAMA_URL when Ollama is not on the same machine
     """
     log = log or (lambda msg, level="info": None)
 
@@ -4309,10 +4310,10 @@ async def solve_hcaptcha_accessibility(page, iframe,
     import asyncio
     import base64
 
-    async def _discover_vision_model() -> str:
+    async def _discover_text_model() -> str:
         """Ask Ollama /api/tags which models are actually loaded and pick a
-        vision-capable one. The configured model may not exist on the server,
-        which silently breaks every vision solve."""
+        text-capable one for answering questions. The configured model may not
+        exist on the server, which silently breaks every LLM solve."""
         try:
             import aiohttp
             async with aiohttp.ClientSession(
@@ -4325,41 +4326,78 @@ async def solve_hcaptcha_accessibility(page, iframe,
             names = [m.get("name", "") for m in data.get("models", [])]
             if not names:
                 log("[Accessibility] [CRITICAL] Ollama endpoint has NO models pulled — "
-                    "vision cannot solve image questions. Pull a vision model "
-                    "e.g. `ollama pull llava:7b` (or moondream) on the server, or set "
+                    "LLM cannot answer questions. Pull a text model "
+                    "e.g. `ollama pull llama3.2` on the server, or set "
                     "OLLAMA_URL to a server that has one.", level="error")
                 return ollama_model
-            # Prefer known vision models, else the first one that supports images
-            preferred = ["llava", "moondream", "minicpm-v", "bakllava",
-                         "llava-llama3", "llava:13b", "llava:7b", "llava:34b"]
+            # Prefer fast text chat models (one-word answers). solver-v1 is
+            # this repo's fine-tuned qwen solver. Vision models (moondream,
+            # llava, minicpm-v) are only a last resort for text answering.
+            preferred = ["solver-v1", "solver", "qwen2.5", "qwen2", "qwen",
+                         "llama3.2", "llama3.1", "llama3", "llama2", "llama",
+                         "gemma2", "gemma", "mistral", "mixtral", "phi3", "phi",
+                         "tinyllama", "deepseek", "internlm2"]
             for p in preferred:
                 for n in names:
                     if n.split(":")[0].lower() == p or n == p:
                         return n
-            for n in names:
-                try:
-                    async with aiohttp.ClientSession(
-                        timeout=aiohttp.ClientTimeout(total=10)
-                    ) as session:
-                        async with session.get(f"{ollama_url}/api/show",
-                                               params={"name": n}) as resp:
-                            if resp.status == 200:
-                                d = await resp.json()
-                                if "vision" in str(d.get("model_info", {})).lower() or \
-                                   "clip" in str(d.get("model_info", {})).lower():
-                                    return n
-                except Exception:
-                    continue
             return names[0]
         except Exception as e:
             log(f"[Accessibility] Model discovery error: {e}", level="warn")
             return ollama_model
 
-    discovered = await _discover_vision_model()
+    discovered = await _discover_text_model()
     if discovered and discovered != ollama_model:
-        log(f"[Accessibility] Using available vision model: {discovered}")
+        log(f"[Accessibility] Using available text model: {discovered}")
         ollama_model = discovered
+    log(f"[Accessibility] Text model in use: {ollama_model}")
     log(f"[Accessibility] Vision model in use: {ollama_model}")
+
+    async def _discover_text_model() -> str:
+        """Pick a TEXT-capable model for answering questions as text.
+        Vision-only models (moondream, llava, minicpm-v) answer text prompts
+        poorly, so prefer real chat models if the server has any."""
+        try:
+            import aiohttp
+            async with aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=8)
+            ) as session:
+                async with session.get(f"{ollama_url}/api/tags") as resp:
+                    if resp.status != 200:
+                        return ollama_model
+                    data = await resp.json()
+            names = [m.get("name", "") for m in data.get("models", [])]
+            if not names:
+                return ollama_model
+            vision_only = {"moondream", "llava", "llava-llama3", "bakllava",
+                           "minicpm-v", "minicpm-v:8b"}
+            text_names = [n for n in names
+                          if n.split(":")[0] not in
+                          {v.split(":")[0] for v in vision_only}]
+            candidates = text_names or names
+            preferred = ["llama3.2", "llama3.1", "llama3", "qwen2.5", "qwen2",
+                         "gemma2", "gemma", "mistral", "phi3", "phi",
+                         "deepseek", "tinyllama", "dolphin-llama3", "orca-mini"]
+            for p in preferred:
+                for n in candidates:
+                    if n.split(":")[0] == p or n == p:
+                        return n
+            return candidates[0]
+        except Exception:
+            return ollama_model
+
+    # Text model for answering questions as text (separate from the vision
+    # model used only when NO text is extractable from the page).
+    ollama_text_model = (os.environ.get("OLLAMA_TEXT_MODEL") or "").strip()
+    if not ollama_text_model:
+        ollama_text_model = await _discover_text_model()
+    if not ollama_text_model:
+        ollama_text_model = ollama_model
+    log(f"[Accessibility] Text model in use: {ollama_text_model}")
+    if ollama_text_model.split(":")[0].lower() in {"moondream", "llava", "minicpm-v", "bakllava"}:
+        log("[Accessibility] [WARN] Only a VISION model is available — text questions may get "
+            "empty answers. Pull a text model (e.g. `ollama pull llama3.2`) on the Ollama server "
+            "or set OLLAMA_TEXT_MODEL.", level="warn")
 
     # ── Helpers ────────────────────────────────────────────
 
@@ -4390,14 +4428,16 @@ async def solve_hcaptcha_accessibility(page, iframe,
             log(f"[Accessibility] Ollama error: {e}", level="error")
             return ""
 
-    async def _ollama_answer_text(question: str, timeout: float = 30.0) -> str:
+    async def _ollama_answer_text(question: str, timeout: float = 20.0) -> str:
         """Ask Ollama (text-only chat) for a single-word answer to a question.
-        Used as fallback when the local knowledge base has no answer."""
-        try:
+        Uses a TEXT-capable model (never the vision model). Capped by
+        asyncio.wait_for so a slow Ollama server can't stall the captcha."""
+        async def _post() -> str:
             import aiohttp
             payload = {
-                "model": ollama_model,
+                "model": ollama_text_model or ollama_model,
                 "stream": False,
+                "options": {"temperature": 0, "num_predict": 24},
                 "messages": [{
                     "role": "user",
                     "content": (
@@ -4414,12 +4454,20 @@ async def solve_hcaptcha_accessibility(page, iframe,
                     f"{ollama_url}/api/chat", json=payload
                 ) as resp:
                     if resp.status != 200:
+                        log(f"[Accessibility] Ollama text HTTP {resp.status}", level="warn")
                         return ""
                     data = await resp.json()
                     return data["message"]["content"].strip()
+
+        try:
+            return await asyncio.wait_for(_post(), timeout=timeout)
+        except asyncio.TimeoutError:
+            log(f"[Accessibility] Ollama text timeout after {timeout:.0f}s", level="warn")
+            return ""
         except Exception as e:
             log(f"[Accessibility] Ollama text error: {e}", level="warn")
             return ""
+
 
     def _clean_llm_answer(raw: str) -> str:
         """Normalize an LLM answer: lowercase, strip punctuation,
@@ -4523,7 +4571,7 @@ async def solve_hcaptcha_accessibility(page, iframe,
             try:
                 el = await target.locator(selector).first.element_handle(timeout=4000)
                 if el:
-                    img = await el.screenshot(type="png")
+                    img = await el.screenshot(type="png", timeout=4000)
                     return base64.b64encode(img).decode()
             except Exception:
                 pass
@@ -4553,7 +4601,7 @@ async def solve_hcaptcha_accessibility(page, iframe,
             try:
                 el = await hcaptcha.locator(sel).first.element_handle(timeout=1500)
                 if el:
-                    img = await el.screenshot(type="png")
+                    img = await el.screenshot(type="png", timeout=4000)
                     b64 = base64.b64encode(img).decode()
                     if b64:
                         return b64
@@ -6849,33 +6897,6 @@ async def solve_hcaptcha_accessibility(page, iframe,
 
         return None
 
-    async def _vision_answer(hcaptcha, question_text: str = "") -> str:
-        """Screenshot the challenge and ask the VISION model (moondream).
-        moondream is a vision model — it reads questions from images far
-        better than from raw text. This is the path that actually works."""
-        try:
-            b64 = await _screenshot_question(hcaptcha)
-            if not b64:
-                log("[Accessibility] Vision: empty screenshot", level="warn")
-                return ""
-            prompt = (
-                "This is an hCaptcha accessibility challenge. Read the question "
-                "shown in this image and answer it with exactly one word, number, "
-                "or short phrase. No punctuation, no explanation, lowercase."
-            )
-            if question_text:
-                prompt += "\nThe question is about: " + question_text[:200]
-            raw = await _ollama_chat(b64, prompt, timeout=60.0)
-            cleaned = _clean_llm_answer(raw)
-            if cleaned:
-                log(f"[Accessibility] Vision model answered: {cleaned}")
-            else:
-                log(f"[Accessibility] Vision model returned nothing (raw='{raw[:60]}')", level="warn")
-            return cleaned
-        except Exception as e:
-            log(f"[Accessibility] Vision error: {e}", level="warn")
-            return ""
-
     async def _get_answer(hcaptcha, q: int) -> Optional[str]:
         """Get the answer with 3 layers:
         Layer 1: regex patterns (513)   — exact phrasings
@@ -6895,11 +6916,16 @@ async def solve_hcaptcha_accessibility(page, iframe,
                 log(f"[Accessibility] Q{q} solved locally: {local}")
                 return local
 
-            # ── Layer 3: LLM fallback DISABLED ──
-            # LLM/vision calls were wasting 30s on timeouts and giving wrong
-            # answers. The local solvers (math, word puzzles, knowledge KB,
-            # semantic table, number sum) are faster and more reliable.
-            log(f"[Accessibility] Q{q} UNKNOWN question (no local match) — skipping (AI disabled)", level="warn")
+            # ── Layer 3: LLM fallback (Ollama text model) ──
+            # The question TEXT is already extracted — send it straight to
+            # Ollama /api/chat as text (no screenshot, no vision model).
+            # Hard timeout so a slow model can't stall the captcha.
+            log(f"[Accessibility] Q{q} UNKNOWN question (no local match) — calling Layer 3 LLM")
+            ans = await _llm_answer_question(text, timeout=18.0)
+            if ans:
+                log(f"[Accessibility] Q{q} Layer 3 LLM answered: {ans}")
+                return ans
+            log(f"[Accessibility] Q{q} Layer 3 could not answer either", level="warn")
         else:
             log(f"[Accessibility] Q{q} NO TEXT FOUND — trying vision directly", level="warn")
             if ollama_url:
