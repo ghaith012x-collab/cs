@@ -3,16 +3,12 @@
 hCaptcha Universal Solver — Free, Self-Contained Edition
 =========================================================
 Zero paid APIs. Uses your trained brains (models/):
-  model_grid.pth      — 33-class tile classifier (ResNet18)
-  model_drag.pth      — drag position regressor (ResNet18 fc=2)
   motion_params.json  — human mouse-behavior stats
 
 Tactics:
   · curl_cffi for TLS fingerprinting (mimics Chrome)
   · Playwright for HSW proof-of-work token generation
   · Synthetic motion data (no multibot.in)
-  · ResNet18 classifier for tile grids (trained brain)
-  · OpenCV template matching for drag puzzles (in-browser + API)
   · Offline pixel-similarity for FunCAPTCHA / Arkose tiles
   · Direct API calls + in-browser drag solving
 
@@ -26,7 +22,7 @@ Usage:
 
   # In a browser script (import helpers):
   from captcha_solver import (
-      solve_hcaptcha_drag, solve_funcaptcha_pixels,
+      solve_funcaptcha_pixels,
       extract_hcaptcha_sitekey, read_hcaptcha_token, set_hcaptcha_token_on_page,
   )
 """
@@ -1225,176 +1221,6 @@ class HSWGenerator:
 
 
 # ═══════════════════════════════════════════════════════════════
-# Tile Classifier (ResNet18 — trained brain)
-# ═══════════════════════════════════════════════════════════════
-
-class TileClassifier:
-    """Loads model_grid.pth and classifies tile images."""
-
-    CLASSES = ["bicycle", "bus", "motorcycle", "truck", "train",
-               "cat", "dog", "bird", "car", "airplane", "boat", "traffic light"]
-
-    def __init__(self, model_path: Optional[str] = None):
-        self.model = None
-        self.use_model = False
-        if not model_path:
-            for candidate in (MODELS_DIR / "model_grid.pth", Path("model.pth")):
-                if candidate.exists():
-                    model_path = str(candidate)
-                    break
-        if model_path and Path(model_path).exists():
-            try:
-                import torch
-                from torchvision import models, transforms
-                raw = torch.load(model_path, map_location="cpu", weights_only=False)
-                if isinstance(raw, dict) and "state_dict" in raw:
-                    state = raw["state_dict"]
-                    saved_classes = raw.get("classes")
-                    if saved_classes:
-                        self.CLASSES = list(saved_classes)
-                else:
-                    state = raw
-                self.model = models.resnet18(weights=None)
-                self.model.fc = torch.nn.Linear(self.model.fc.in_features, len(self.CLASSES))
-                self.model.load_state_dict(state)
-                self.model.eval()
-                self.transform = transforms.Compose([
-                    transforms.Resize(256), transforms.CenterCrop(224),
-                    transforms.ToTensor(),
-                    transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
-                ])
-                self.use_model = True
-                print(f"  🧠 Loaded tile classifier ({len(self.CLASSES)} classes)")
-            except Exception as e:
-                print(f"  ⚠️  Tile classifier load failed ({e}) — heuristic fallback")
-
-    def classify(self, img_bytes: bytes) -> str:
-        if self.use_model and self.model is not None:
-            import torch
-            try:
-                img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
-                x = self.transform(img).unsqueeze(0)
-                with torch.no_grad():
-                    pred = self.model(x).argmax(1).item()
-                return self.CLASSES[pred]
-            except Exception:
-                pass
-        # Heuristic fallback
-        arr = np.frombuffer(img_bytes, np.uint8)
-        img = cv2.imdecode(arr, cv2.IMREAD_GRAYSCALE)
-        if img is None:
-            return "unknown"
-        edges = cv2.Canny(img, 50, 150)
-        return f"object_{edges.sum() % 12}"
-
-
-# ═══════════════════════════════════════════════════════════════
-# Drag Brain (ResNet18 regressor — trained model_drag.pth)
-# ═══════════════════════════════════════════════════════════════
-
-class DragBrain:
-    """Loads model_drag.pth and regresses normalized (x,y) drag target."""
-
-    def __init__(self, model_path: Optional[str] = None):
-        self.model = None
-        self.use_model = False
-        if not model_path:
-            model_path = MODELS_DIR / "model_drag.pth"
-        if model_path and Path(model_path).exists():
-            try:
-                import torch
-                from torchvision import models, transforms
-                raw = torch.load(model_path, map_location="cpu", weights_only=False)
-                state = raw.get("state_dict", raw) if isinstance(raw, dict) else raw
-                self.model = models.resnet18(weights=None)
-                self.model.fc = torch.nn.Linear(self.model.fc.in_features, 2)
-                self.model.load_state_dict(state)
-                self.model.eval()
-                self.transform = transforms.Compose([
-                    transforms.Resize((224, 224)), transforms.ToTensor(),
-                    transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
-                ])
-                self.use_model = True
-                print("  🧠 Loaded drag brain")
-            except Exception as e:
-                print(f"  ⚠️  Drag brain load failed ({e}) — OpenCV only")
-
-    def predict(self, bg_bgr: np.ndarray) -> Optional[Tuple[float, float]]:
-        if not self.use_model or self.model is None:
-            return None
-        try:
-            import torch
-            rgb = cv2.cvtColor(bg_bgr, cv2.COLOR_BGR2RGB)
-            x = self.transform(Image.fromarray(rgb)).unsqueeze(0)
-            with torch.no_grad():
-                out = self.model(x)[0].tolist()
-            return float(out[0]), float(out[1])
-        except Exception:
-            return None
-
-
-_DRAG_BRAIN: Optional[DragBrain] = None
-
-def get_drag_brain() -> DragBrain:
-    global _DRAG_BRAIN
-    if _DRAG_BRAIN is None:
-        _DRAG_BRAIN = DragBrain()
-    return _DRAG_BRAIN
-
-
-# ═══════════════════════════════════════════════════════════════
-# Drag Solver (OpenCV template matching + brain fallback)
-# ═══════════════════════════════════════════════════════════════
-
-def solve_drag(piece_bytes: bytes, bg_bytes: bytes) -> Tuple[int, int, float]:
-    """Match puzzle piece to background. Returns (x, y, confidence%)."""
-    piece = cv2.imdecode(np.frombuffer(piece_bytes, np.uint8), cv2.IMREAD_COLOR)
-    bg = cv2.imdecode(np.frombuffer(bg_bytes, np.uint8), cv2.IMREAD_COLOR)
-    if piece is None or bg is None:
-        return 0, 0, 0.0
-
-    ph, pw = piece.shape[:2]
-    bh, bw = bg.shape[:2]
-    if ph < 8 or pw < 8 or ph > bh or pw > bw:
-        return bw // 2, bh // 2, 0.0
-
-    piece_gray = cv2.cvtColor(piece, cv2.COLOR_BGR2GRAY)
-    bg_gray = cv2.cvtColor(bg, cv2.COLOR_BGR2GRAY)
-    piece_edges = cv2.Canny(piece_gray, 50, 150)
-    bg_edges = cv2.Canny(bg_gray, 50, 150)
-
-    best_x, best_y, best_conf = 0, 0, -999.0
-    for scale in np.linspace(0.6, 1.4, 12):
-        spw, sph = int(pw * scale), int(ph * scale)
-        if spw < 8 or sph < 8 or spw > bw or sph > bh:
-            continue
-        sp = cv2.resize(piece, (spw, sph))
-        sp_edges = cv2.resize(piece_edges, (spw, sph), interpolation=cv2.INTER_NEAREST)
-        for tmpl, tgt in [
-            (sp, bg), (sp_edges, bg_edges),
-            (sp, bg),  # TM_CCORR_NORMED
-        ]:
-            result = cv2.matchTemplate(tgt, tmpl, cv2.TM_CCOEFF_NORMED)
-            _, max_val, _, max_loc = cv2.minMaxLoc(result)
-            conf = max_val * 100
-            if conf > best_conf:
-                best_conf = conf
-                best_x, best_y = max_loc
-
-    # Brain fallback when OpenCV is unsure
-    if best_conf < 55:
-        brain = get_drag_brain()
-        if brain.use_model:
-            pred = brain.predict(bg)
-            if pred:
-                nx, ny = pred
-                bx, by = int(nx * bw), int(ny * bh)
-                if 0 <= bx < bw and 0 <= by < bh:
-                    return bx, by, 70.0
-    return best_x, best_y, best_conf
-
-
-# ═══════════════════════════════════════════════════════════════
 # DOM helpers
 # ═══════════════════════════════════════════════════════════════
 
@@ -1744,426 +1570,6 @@ async def solve_funcaptcha_pixels(page, iframe=None,
 
 
 # ═══════════════════════════════════════════════════════════════
-# hCaptcha Puzzle Drag — In-Browser OpenCV Solver
-# ═══════════════════════════════════════════════════════════════
-
-def _puzzle_edge_profile(img: Image.Image) -> List[float]:
-    gray = img.convert('L')
-    w, h = gray.size
-    px = gray.load()
-    best: List[float] = []
-    for band_top, band_bot in ((int(h * 0.08), int(h * 0.85)),
-                               (int(h * 0.05), int(h * 0.95))):
-        prof = [0.0] * w
-        for y in range(band_top, band_bot):
-            prev = px[0, y]
-            for x in range(1, w):
-                cur = px[x, y]
-                prof[x] += abs(cur - prev)
-                prev = cur
-        n = max(1, band_bot - band_top)
-        prof = [p / n for p in prof]
-        if not best or max(prof) > max(best):
-            best = prof
-    return best
-
-
-def _find_outline_pairs(img: Image.Image, max_pairs: int = 16) -> List[tuple]:
-    prof = _puzzle_edge_profile(img)
-    w = len(prof)
-    if w < 40:
-        return []
-    mean = sum(prof) / len(prof)
-    peaks = []
-    for threshold in (mean * 2.0 + 1.5, mean * 1.3 + 0.8, mean * 1.05 + 0.4):
-        found = []
-        for x in range(1, w - 1):
-            if prof[x] >= threshold and prof[x] >= prof[x - 1] and prof[x] >= prof[x + 1]:
-                found.append((x, prof[x]))
-        if len(found) >= 2:
-            peaks = found
-            break
-    if not peaks:
-        return []
-    peaks.sort(key=lambda p: -p[1])
-    kept = []
-    for x, s in peaks:
-        if all(abs(x - kx) > 3 for kx, _ in kept):
-            kept.append((x, s))
-        if len(kept) >= 12:
-            break
-    kept.sort()
-    min_w = int(w * 0.22)
-    max_w = int(w * 0.85)
-    pairs = []
-    for i in range(len(kept)):
-        for j in range(i + 1, len(kept)):
-            lx, ls = kept[i]
-            rx, rs = kept[j]
-            if min_w <= rx - lx <= max_w:
-                pairs.append((lx, rx, ls + rs))
-    pairs.sort(key=lambda p: -p[2])
-    return pairs[:max_pairs]
-
-
-def _puzzle_deltas(img: Image.Image) -> List[int]:
-    w = img.size[0]
-    pairs = _find_outline_pairs(img)
-    if len(pairs) < 2:
-        return []
-    clusters = []
-    for p in pairs:
-        pw = p[1] - p[0]
-        for cl in clusters:
-            if abs(cl['w'] - pw) <= int(w * 0.05):
-                cl['pairs'].append(p)
-                n = len(cl['pairs'])
-                cl['w'] = (cl['w'] * (n - 1) + pw) / n
-                break
-        else:
-            clusters.append({'w': float(pw), 'pairs': [p]})
-    clusters.sort(key=lambda c: (-len(c['pairs']), -max(p[2] for p in c['pairs'])))
-    members = sorted(clusters[0]['pairs'], key=lambda p: -p[2])
-    keep = []
-    for p in members:
-        if all(abs(p[0] - k[0]) > 15 and abs(p[1] - k[1]) > 15 for k in keep):
-            keep.append(p)
-        if len(keep) >= 3:
-            break
-    if len(keep) < 2:
-        return []
-    cands = []
-    for i in range(len(keep)):
-        for j in range(len(keep)):
-            if i == j:
-                continue
-            d = keep[j][0] - keep[i][0]
-            if d != 0 and abs(d) < w * 0.8:
-                cands.append((-keep[i][2], abs(d), d))
-    cands.sort()
-    seen, out = set(), []
-    for _s, _a, d in cands:
-        if d not in seen:
-            seen.add(d)
-            out.append(d)
-        if len(out) >= 5:
-            break
-    return out
-
-
-def _find_piece_boxes(img: Image.Image, max_boxes: int = 4) -> list:
-    gray = img.convert('L')
-    w, h = gray.size
-    if w < 60 or h < 60:
-        return []
-    px = gray.load()
-    band_top = int(h * 0.08)
-    band_bot = int(h * 0.85)
-    prof = [0.0] * w
-    for y in range(band_top, band_bot):
-        prev = px[0, y]
-        for x in range(1, w):
-            cur = px[x, y]
-            prof[x] += abs(cur - prev)
-            prev = cur
-    n = max(1, band_bot - band_top)
-    prof = [p / n for p in prof]
-    mean = sum(prof) / len(prof)
-    thresh = max(mean * 2.0 + 1.0, 2.0)
-    peaks = []
-    for x in range(1, w - 1):
-        if prof[x] >= thresh and prof[x] >= prof[x - 1] and prof[x] >= prof[x + 1]:
-            peaks.append(x)
-    if len(peaks) < 2:
-        return []
-    clusters = []
-    for p in peaks:
-        if clusters and p - clusters[-1][-1] <= 5:
-            clusters[-1].append(p)
-        else:
-            clusters.append([p])
-    scored = [(c[len(c) // 2], sum(prof[x] for x in c)) for c in clusters]
-    min_sep = int(w * 0.15)
-    pairs = []
-    for i in range(len(scored)):
-        for j in range(i + 1, len(scored)):
-            a, ea = scored[i]
-            b, eb = scored[j]
-            if a > b:
-                a, b = b, a
-            bw2 = b - a
-            if bw2 < min_sep or bw2 > int(w * 0.8):
-                continue
-            pairs.append((a, b, ea + eb))
-    pairs.sort(key=lambda t: -t[2])
-    boxes = []
-    for a, b, _s in pairs:
-        dup = any(abs(a - bx) < 8 and abs(b - (bx + bw_)) < 8
-                  for (bx, _by, bw_, _bh) in boxes)
-        if dup:
-            continue
-        pw = b - a
-        row_prof = []
-        for y in range(band_top, band_bot):
-            e = sum(abs(px[x, y] - px[x - 1, y]) for x in range(max(1, a), b))
-            row_prof.append(e)
-        rmean = sum(row_prof) / max(1, len(row_prof))
-        rvar = sum((e - rmean) ** 2 for e in row_prof) / max(1, len(row_prof))
-        rstd = rvar ** 0.5
-        rthresh = rmean + 1.5 * rstd
-        best_run, cur_run = [], []
-        for i, e in enumerate(row_prof):
-            if e >= rthresh:
-                cur_run.append(i)
-            else:
-                if len(cur_run) > len(best_run):
-                    best_run = cur_run
-                cur_run = []
-        if len(cur_run) > len(best_run):
-            best_run = cur_run
-        y_top, y_bot = band_top, band_bot
-        if len(best_run) >= 15:
-            y_top = band_top + best_run[0]
-            y_bot = band_top + best_run[-1] + 1
-        ph = y_bot - y_top
-        if ph < 20:
-            y_top, ph = band_top, band_bot - band_top
-        boxes.append((a, y_top, pw, ph))
-        if len(boxes) >= max_boxes:
-            break
-    return boxes
-
-
-def _template_match_hole(img: Image.Image, piece_box: tuple,
-                         scale: int = 4) -> Optional[tuple]:
-    try:
-        x, y, w, h = piece_box
-        if w < 24 or h < 24:
-            return None
-        inset = max(2, int(min(w, h) * 0.06))
-        tpl = img.crop((x + inset, y + inset, x + w - inset, y + h - inset))
-        if tpl.width < 8 or tpl.height < 8:
-            return None
-        tw = max(6, tpl.width // scale)
-        th = max(6, tpl.height // scale)
-        tpl_s = tpl.convert('L').resize((tw, th), Image.BILINEAR)
-        band = img.crop((0, y + inset, img.width, y + h - inset))
-        bw = max(6, band.width // scale)
-        bh = max(6, band.height // scale)
-        band_s = band.convert('L').resize((bw, bh), Image.BILINEAR)
-        if bw - tw < 10:
-            return None
-        piece_cx_s = int(((x + inset) + (x + w - inset)) / 2 / scale)
-        best_score = float('inf')
-        best_x = None
-        for sx in range(0, bw - tw + 1):
-            if abs(sx + tw / 2 - piece_cx_s) < tw * 0.75:
-                continue
-            diff = ImageChops.difference(band_s.crop((sx, 0, sx + tw, th)), tpl_s)
-            score = sum(diff.getdata()) / (tw * th)
-            if score < best_score:
-                best_score = score
-                best_x = sx
-        if best_x is None:
-            return None
-        coarse = best_x * scale
-        tpl_f = tpl.convert('L')
-        band_f = band.convert('L')
-        twf, thf = tpl_f.size
-        best_f = None
-        lo = max(0, coarse - scale * 2)
-        hi = min(band_f.width - twf, coarse + scale * 2)
-        for fx in range(lo, hi + 1):
-            region = band_f.crop((fx, 0, fx + twf, thf))
-            diff = ImageChops.difference(region, tpl_f)
-            score = sum(diff.getdata()) / (twf * thf)
-            if best_f is None or score < best_f[0]:
-                best_f = (score, fx)
-        if best_f is not None:
-            return best_f[1], best_f[0]
-        return coarse, best_score
-    except Exception:
-        return None
-
-
-async def _drag_handle(page, start_x: float, start_y: float, delta: int,
-                       steps: int = 16) -> None:
-    await page.mouse.move(start_x, start_y)
-    await asyncio.sleep(random.uniform(0.06, 0.14))
-    await page.mouse.down()
-    await asyncio.sleep(random.uniform(0.05, 0.10))
-    for i in range(1, steps + 1):
-        await page.mouse.move(
-            start_x + delta * i / steps,
-            start_y + random.uniform(-0.8, 0.8),
-            steps=2,
-        )
-        await asyncio.sleep(random.uniform(0.004, 0.02))
-    await asyncio.sleep(random.uniform(0.06, 0.14))
-    await page.mouse.up()
-
-
-async def _challenge_solved(page, iframe) -> bool:
-    try:
-        if await read_hcaptcha_token(page):
-            return True
-    except Exception:
-        pass
-    try:
-        frame = await iframe.content_frame()
-        if frame:
-            hidden = await frame.evaluate("""() => {
-                const chal = document.querySelector('[class*="challenge"], [class*="Challenge"]');
-                if (!chal) return false;
-                const cs = getComputedStyle(chal);
-                return cs.display === 'none' || cs.visibility === 'hidden';
-            }""")
-            if hidden:
-                return True
-    except Exception:
-        pass
-    return False
-
-
-async def _probe_drag_dom(iframe) -> dict:
-    try:
-        frame = await iframe.content_frame()
-        if not frame:
-            return {}
-        handle = await frame.evaluate("""() => {
-            const cands = [];
-            const ch = window.innerHeight || 400;
-            for (const el of document.querySelectorAll('*')) {
-                if (el.children.length > 4) continue;
-                const cs = getComputedStyle(el);
-                const r = el.getBoundingClientRect();
-                if (r.width < 18 || r.width > 700 || r.height < 12 || r.height > 200) continue;
-                const isKnob = ['grab', 'grabbing', 'move', 'ew-resize', 'col-resize', 'pointer'].includes(cs.cursor) ||
-                               el.getAttribute('role') === 'slider' ||
-                               el.getAttribute('aria-valuenow') !== null;
-                if (!isKnob) continue;
-                cands.push({x: r.x + r.width / 2, y: r.y + r.height / 2, area: r.width * r.height, y0: r.y});
-            }
-            if (!cands.length) return null;
-            const bottom = cands.filter(c => c.y0 > ch * 0.55);
-            const pool = bottom.length ? bottom : cands;
-            pool.sort((a, b) => b.y0 - a.y0 || a.area - b.area);
-            return {x: pool[0].x, y: pool[0].y};
-        }""")
-        area = await frame.evaluate("""() => {
-            let best = null, bestArea = 0;
-            for (const el of document.querySelectorAll('canvas, img[src], [class*="puzzle" i], [class*="task-image" i], [style*="background-image"]')) {
-                const r = el.getBoundingClientRect();
-                const a = r.width * r.height;
-                if (r.width >= 80 && r.height >= 80 && a > bestArea) {
-                    bestArea = a;
-                    best = {x: r.x, y: r.y, w: r.width, h: r.height};
-                }
-            }
-            return best;
-        }""")
-        return {"handle": handle, "area": area}
-    except Exception:
-        return {}
-
-
-async def solve_hcaptcha_drag(page, iframe, log=None,
-                              max_attempts: int = 6) -> bool:
-    """Solve the hCaptcha puzzle drag challenge directly in the browser.
-
-    Screenshots the puzzle, finds the piece with edge analysis, template-matches
-    its pixels to locate the hole, then drags the slider. Returns True only when
-    hCaptcha actually accepts the solve.
-    """
-    log = log or (lambda msg, level="info": None)
-    try:
-        iframe_box = await iframe.bounding_box()
-        if not iframe_box or iframe_box['width'] < 60 or iframe_box['height'] < 60:
-            log("[Drag] Challenge iframe too small", level="error")
-            return False
-
-        probe = await _probe_drag_dom(iframe)
-        area = probe.get("area")
-        handle = probe.get("handle")
-        if not handle and not area:
-            return False
-        shot_box = iframe_box
-        if area and area.get("w", 0) >= 40:
-            shot_box = {
-                'x': iframe_box['x'] + area['x'],
-                'y': iframe_box['y'] + area['y'],
-                'width': area['w'],
-                'height': area['h'],
-            }
-        if handle:
-            hx = iframe_box['x'] + handle['x']
-            hy = iframe_box['y'] + handle['y']
-        else:
-            hx = iframe_box['x'] + iframe_box['width'] * 0.85
-            hy = iframe_box['y'] + iframe_box['height'] * 0.85
-
-        try:
-            dpr = float(await page.evaluate("() => window.devicePixelRatio || 1"))
-        except Exception:
-            dpr = 1.0
-        if not dpr or dpr <= 0:
-            dpr = 1.0
-
-        for attempt in range(1, max_attempts + 1):
-            shot = await page.screenshot(clip=shot_box)
-            img = Image.open(io.BytesIO(shot))
-
-            delta_img = None
-            best_match = None
-            for box in _find_piece_boxes(img):
-                found = _template_match_hole(img, box)
-                if not found:
-                    continue
-                hole_x, score = found
-                piece_cx = box[0] + box[2] / 2
-                d = int(round(hole_x - piece_cx))
-                if best_match is None or score < best_match[0]:
-                    best_match = (score, d)
-            if best_match:
-                delta_img = best_match[1]
-                log(f"[Drag] Attempt {attempt}: template offset {delta_img:+d}px")
-            if delta_img is None:
-                deltas = _puzzle_deltas(img)
-                if deltas:
-                    delta_img = deltas[0]
-                    log(f"[Drag] Attempt {attempt}: edge offset {delta_img:+d}px (candidates {deltas})")
-            if delta_img is None:
-                log(f"[Drag] Attempt {attempt}: no piece/hole detected", level="warn")
-                await asyncio.sleep(1.2)
-                continue
-
-            delta = int(round(delta_img / dpr))
-            for adjust in (0, -4, 4):
-                d = delta + adjust
-                if d == 0:
-                    continue
-                await _drag_handle(page, hx, hy, d)
-                for _ in range(2):
-                    await asyncio.sleep(1.0)
-                    if await _challenge_solved(page, iframe):
-                        log("[Drag] ✅ Puzzle solved!")
-                        return True
-            log(f"[Drag] Attempt {attempt} did not pass", level="warn")
-            probe = await _probe_drag_dom(iframe)
-            handle = probe.get("handle")
-            if handle:
-                hx = iframe_box['x'] + handle['x']
-                hy = iframe_box['y'] + handle['y']
-            await asyncio.sleep(0.8)
-
-        log("[Drag] ❌ Could not solve after retries", level="error")
-        return False
-    except Exception as e:
-        log(f"[Drag] solver error: {e}", level="error")
-        return False
-
-
-# ═══════════════════════════════════════════════════════════════
 # Brain-Based hCaptcha Solver (curl_cffi API flow)
 # ═══════════════════════════════════════════════════════════════
 
@@ -2178,7 +1584,6 @@ class HCaptchaSolver:
         self.session = make_session(proxy)
         self.motion = MotionData()
         self.motion.host = self.host
-        self.classifier = TileClassifier(model_path)
 
         resp = self.session.get("https://hcaptcha.com/1/api.js",
                                 params={"render": "explicit"})
@@ -2213,65 +1618,6 @@ class HCaptchaSolver:
         if resp.status_code != 200:
             return None
         return resp.json()
-
-    def solve_tile_grid(self, challenge: dict) -> dict:
-        tasklist = challenge.get("tasklist", [])
-        question = challenge.get("requester_question", {}).get("en", "")
-
-        target_class = None
-        for cls in self.classifier.CLASSES:
-            if cls in question.lower():
-                target_class = cls
-                break
-
-        selected = {}
-        for i, task in enumerate(tasklist):
-            img_url = task.get("datapoint_uri")
-            if not img_url:
-                continue
-            try:
-                resp = self.session.get(img_url)
-                img_bytes = resp.content
-            except Exception:
-                continue
-            cls = self.classifier.classify(img_bytes)
-            if target_class and cls == target_class:
-                selected[task["task_key"]] = "true"
-            elif not target_class:
-                selected[task["task_key"]] = "true" if i < 2 else "false"
-            else:
-                selected[task["task_key"]] = "false"
-
-        total = sum(1 for v in selected.values() if v == "true")
-        print(f"  Target: {target_class or 'unknown'} → {total} tiles selected")
-        return selected
-
-    def solve_drag(self, challenge: dict) -> dict:
-        tasklist = challenge.get("tasklist", [])
-        if not tasklist:
-            return {}
-        main_task = tasklist[0]
-        task_key = main_task.get("task_key")
-        entities = main_task.get("entities", [])
-        bg_url = main_task.get("datapoint_uri")
-        answers = []
-        for entity in entities:
-            piece_url = entity.get("datapoint_uri")
-            if not piece_url or not bg_url:
-                continue
-            try:
-                pg_resp = self.session.get(piece_url)
-                bg_resp = self.session.get(bg_url)
-            except Exception:
-                continue
-            tx, ty, conf = solve_drag(pg_resp.content, bg_resp.content)
-            print(f"  Drag: entity={entity.get('entity_id')} → ({tx},{ty}) conf={conf:.1f}%")
-            answers.append({
-                "entity_name": entity.get("entity_id"),
-                "entity_type": "default",
-                "entity_coords": [tx, ty],
-            })
-        return {task_key: answers}
 
     async def submit(self, challenge: dict, answers: dict,
                       hsw: HSWGenerator) -> Optional[dict]:
@@ -2336,11 +1682,7 @@ class HCaptchaSolver:
                 req_type = challenge.get("request_type", "unknown")
                 print(f"  Type: {req_type}")
 
-                if req_type == "image_label_binary":
-                    answers = self.solve_tile_grid(challenge)
-                elif req_type == "image_drag_drop":
-                    answers = self.solve_drag(challenge)
-                elif req_type == "image_label_area_select":
+                if req_type == "image_label_area_select":
                     answers = {}
                     for task in challenge.get("tasklist", []):
                         answers[task["task_key"]] = [{
@@ -5581,33 +4923,25 @@ async def solve_hcaptcha_accessibility(page, iframe,
         t = text.strip().lower()
         orig = text.strip()
 
-        # ── COIN / JAR word problems: sum all numbers ──
-        # "Your jar has 3 coins. On Sunday, you add 6 coins. Then on Saturday,
-        #  you add 8 coins. How many coins are there?" → 3+6+8 = 17
-        # Repeats DO count: "put in 5... put in 5" = +5 twice → 9+5+5=19.
-        coin_jar = re.search(
-            r'(?:jar|coins?|add|put|total|altogether|in\s+all)',
-            t, re.IGNORECASE
-        )
-        if coin_jar:
-            # SMART: split by sentences, only sum numbers from sentences
-            # about the jar owner (you/your/jar/put/add). Ignores numbers
-            # from other people (friend/they/he/she).
-            sentences = re.split(r'[.!?]', orig)
-            own_nums = []
-            for sent in sentences:
-                s_lower = sent.lower().strip()
-                if any(w in s_lower for w in ('you', 'your', 'jar', "you're", 'put', 'add', 'placed')):
-                    own_nums.extend(re.findall(r'(\d+)', sent))
-                elif any(w in s_lower for w in ('friend', 'they', 'he', 'she', 'them', 'brother', 'sister')):
-                    continue
-                else:
-                    own_nums.extend(re.findall(r'(\d+)', sent))
-            if not own_nums:
-                own_nums = re.findall(r'(\d+)', orig)
-            if len(own_nums) >= 1:
-                total = sum(int(n) for n in own_nums)
-                log(f"[Accessibility] Coin/jar smart sum: {'+'.join(own_nums)} = {total}")
+        # ── JAR SOLVER (simple & bulletproof) ──
+        # If the word "jar" appears anywhere in the question, it's a jar
+        # question. Take ALL digits, add them together, that's the answer.
+        # e.g. "You have a jar with 6 coins. On Tuesday, you put 3 coins into
+        #       the jar. How many coins are in the jar?" → 6+3 = 9
+        if re.search(r'\bjar\b', t, re.IGNORECASE):
+            all_nums = re.findall(r'\b(\d+)\b', orig)
+            if all_nums:
+                total = sum(int(n) for n in all_nums)
+                log(f"[Accessibility] Jar solver: {'+'.join(all_nums)} = {total}")
+                return str(total)
+
+        # ── COIN word problems (no 'jar' word): sum all numbers ──
+        # "There are 3 coins in the box. On Sunday you add 6 coins..." → 3+6+8
+        if re.search(r'\bcoins?\b|\badd\b|\bput\b|\baltogether\b|\bin\s+all\b', t, re.IGNORECASE):
+            all_nums = re.findall(r'\b(\d+)\b', orig)
+            if all_nums:
+                total = sum(int(n) for n in all_nums)
+                log(f"[Accessibility] Coin sum: {'+'.join(all_nums)} = {total}")
                 return str(total)
 
         # ── MATH: robust chain detection ──
@@ -7447,8 +6781,6 @@ async def main():
                         help="hCaptcha sitekey (default: Discord)")
     parser.add_argument("--host", default="discord.com", help="Target host")
     parser.add_argument("--proxy", help="HTTP proxy URL")
-    parser.add_argument("--model", default=None,
-                        help="Path to trained model (default: models/model_grid.pth)")
     args = parser.parse_args()
 
     print("═" * 50)
@@ -7461,7 +6793,6 @@ async def main():
         sitekey=args.sitekey,
         host=args.host,
         proxy=args.proxy,
-        model_path=args.model,
     )
     result = await solver.solve()
     if result["success"]:
