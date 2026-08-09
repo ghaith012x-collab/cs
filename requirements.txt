@@ -33,3 +33,6 @@ numpy>=1.24.0
 curl_cffi>=0.7.0
 torch>=2.0.0
 torchvision>=0.15.0
+
+# Email checker (MX record lookups; optional - falls back to plain DNS)
+dnspython>=2.6.0
