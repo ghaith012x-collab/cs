@@ -17,9 +17,7 @@ from captcha_solver import (
     read_hcaptcha_token,
     set_hcaptcha_token_on_page,
     solve_funcaptcha_pixels,
-    solve_hcaptcha_drag,
     solve_hcaptcha_accessibility,
-    _probe_drag_dom,
 )
 from duckmail import TempMail
 
@@ -710,26 +708,12 @@ class DiscordAutomation:
             return "drag"
 
     async def _try_solve_drag(self, iframe) -> Optional[bool]:
-        """Try the in-browser drag solver.
-
-        Returns True on a verified solve, False when a real drag puzzle was
-        found but could not be solved, and None when nothing puzzle-like was
-        present (widget still loading / not a drag challenge at all).
+        """Drag puzzles are no longer supported — the accessibility text
+        solver is the only solver. Return None so the caller keeps trying.
         """
-        probe = await _probe_drag_dom(iframe)
-        if not probe.get("handle") and not probe.get("area"):
-            self._log("[Captcha] No puzzle found yet - will re-check after load",
-                      level="warn")
-            return None
-        solved = await solve_hcaptcha_drag(self._page, iframe, log=self._log)
-        if solved:
-            self._log("[Captcha] [OK] Drag puzzle solved!")
-            await self._click_form_submit()
-            await asyncio.sleep(3)
-            return True
-        self._log("[Captcha] Drag solve failed - falling back to NoCaptchaAI API",
+        self._log("[Captcha] Drag solver removed — using accessibility solver only",
                   level="warn")
-        return False
+        return None
 
     async def _extract_sitekey_with_retry(self, timeout: float = 15.0,
                                           poll: float = 3.0) -> str:
