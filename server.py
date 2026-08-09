@@ -1553,7 +1553,19 @@ class DiscordAutomation:
 
 
 async def run_discord_automation():
-    bot = DiscordAutomation(headless=True)
+    # Standalone CLI path — use a residential session when available
+    # (vaultproxies.txt / VAULTPROXY_* env), TOR otherwise.
+    proxy = None
+    try:
+        from proxies import pool as _proxy_pool
+        if _proxy_pool.count == 0:
+            await _proxy_pool.refresh()
+        if _proxy_pool.count > 0:
+            proxy = _proxy_pool.take()
+            print(f"[CLI] Using proxy session: {proxy.get('key', '?')[:48]}...", flush=True)
+    except Exception as e:
+        print(f"[CLI] Proxy pool unavailable ({e}) — using TOR", flush=True)
+    bot = DiscordAutomation(headless=True, proxy=proxy)
     try:
         await bot.initialize()
         success = await bot.start_discord_signup()

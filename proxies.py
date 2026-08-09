@@ -155,6 +155,13 @@ def vault_proxies() -> List[Dict[str, str]]:
     return list(out.values())
 
 
+def configured() -> bool:
+    """True when residential proxy sessions are available (vaultproxies.txt
+    file or VAULTPROXY_* env vars). Used by app.py to decide whether the
+    workers must ALWAYS use proxies (no TOR fallback)."""
+    return bool(_vault_proxy_urls())
+
+
 async def fetch_free_proxies(max_proxies: int = 500) -> List[Dict[str, str]]:
     """Fetch proxies from all sources + local files, return unique proxy dicts."""
     try:

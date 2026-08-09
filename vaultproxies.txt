@@ -1,0 +1,15 @@
+# Residential proxy sessions (resi-gb.vaultproxies.com) — one per account.
+# Sessions are sticky: the string after "-s-" is the session id (each = a
+# different residential IP). They expire after ttl-600 (600s) — when they do,
+# paste fresh sessions here (or set VAULTPROXY_URLS / VAULTPROXY_SESSIONS env).
+# Format: user:pass@host:port
+eae66eca318c489d9ed7a8a0fc15e4bb-s-bn7utt9z-ttl-600:784f55ae6216f9afb5c207c297534709@resi-gb.vaultproxies.com:80
+eae66eca318c489d9ed7a8a0fc15e4bb-s-uro9srir-ttl-600:784f55ae6216f9afb5c207c297534709@resi-gb.vaultproxies.com:80
+eae66eca318c489d9ed7a8a0fc15e4bb-s-terh8bgd-ttl-600:784f55ae6216f9afb5c207c297534709@resi-gb.vaultproxies.com:80
+eae66eca318c489d9ed7a8a0fc15e4bb-s-zh4p209y-ttl-600:784f55ae6216f9afb5c207c297534709@resi-gb.vaultproxies.com:80
+eae66eca318c489d9ed7a8a0fc15e4bb-s-tm4vtyut-ttl-600:784f55ae6216f9afb5c207c297534709@resi-gb.vaultproxies.com:80
+eae66eca318c489d9ed7a8a0fc15e4bb-s-x8q90ici-ttl-600:784f55ae6216f9afb5c207c297534709@resi-gb.vaultproxies.com:80
+eae66eca318c489d9ed7a8a0fc15e4bb-s-8f9zmxtv-ttl-600:784f55ae6216f9afb5c207c297534709@resi-gb.vaultproxies.com:80
+eae66eca318c489d9ed7a8a0fc15e4bb-s-jqwnv7b8-ttl-600:784f55ae6216f9afb5c207c297534709@resi-gb.vaultproxies.com:80
+eae66eca318c489d9ed7a8a0fc15e4bb-s-3qqrimpb-ttl-600:784f55ae6216f9afb5c207c297534709@resi-gb.vaultproxies.com:80
+eae66eca318c489d9ed7a8a0fc15e4bb-s-h73b81xe-ttl-600:784f55ae6216f9afb5c207c297534709@resi-gb.vaultproxies.com:80

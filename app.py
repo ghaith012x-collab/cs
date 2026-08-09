@@ -17,12 +17,22 @@ except ImportError:
     print("[app] db.py not found - token saving disabled", flush=True)
 
 try:
-    from proxies import pool as proxy_pool
+    from proxies import pool as proxy_pool, configured as _proxies_configured
     _proxies_available = True
 except ImportError:
     proxy_pool = None
+    _proxies_configured = lambda: False
     _proxies_available = False
     print("[app] proxies.py not found - direct connections only", flush=True)
+
+# "force use the proxies no matter what" — when residential sessions are
+# configured (vaultproxies.txt in the repo, or VAULTPROXY_* env) the workers
+# NEVER fall back to TOR. Set PROXY_MODE=force to force even without a file.
+PROXY_FORCE = (
+    (os.environ.get("PROXY_MODE") or "").strip().lower()
+    in ("force", "1", "true", "yes")
+    or _proxies_configured()
+)
 
 from server import DiscordAutomation
 
@@ -114,20 +124,30 @@ async def _worker_capture_loop(wid: str, cfg: dict, stagger: int) -> None:
         await asyncio.sleep(interval)
 
 
-def _next_proxy():
-    """Grab the least-recently-used proxy session, or None for TOR."""
-    if _proxies_available and proxy_pool is not None and proxy_pool.count > 0:
+async def _next_proxy(force: bool = False):
+    """Grab the least-recently-used proxy session, or None (auto mode only —
+    the caller may fall back to TOR). In force mode the pool is refreshed on
+    demand so proxies are ALWAYS used and the bot never silently goes TOR."""
+    if not (_proxies_available and proxy_pool is not None):
+        return None
+    if proxy_pool.count == 0:
+        try:
+            await proxy_pool.refresh()
+        except Exception:
+            pass
+    if proxy_pool.count > 0:
         return proxy_pool.take()
     return None
 
 
 async def _run_worker(wid: str, cfg: dict, proxy=None) -> None:
-    """Worker loop: one sticky residential session per signup attempt when
-    the vault proxy pool is configured; fresh TOR circuit fallback."""
+    """Worker loop: one sticky residential session per signup attempt.
+    When proxies are configured (PROXY_FORCE) TOR is NEVER used — the worker
+    waits/refreshes until sessions are available instead."""
     state = _workers[wid]
     state["status"] = "starting"
     state["started_at"] = time.time()
-    max_tries = 12  # 12 proxy/TOR attempts before giving up
+    max_tries = 30 if PROXY_FORCE else 12
 
     bot = None
 
@@ -137,9 +157,14 @@ async def _run_worker(wid: str, cfg: dict, proxy=None) -> None:
             if bot: await bot.close()
             return
 
-        # ── Pick a session for this attempt (fallback: TOR) ──
+        # ── Pick a session for this attempt (never TOR in force mode) ──
         if proxy is None:
-            proxy = _next_proxy()
+            proxy = await _next_proxy(force=PROXY_FORCE)
+        if PROXY_FORCE and proxy is None:
+            _log(f"[{wid}] [Proxy] No proxy sessions (forced mode) — refreshing and waiting...", level="warn")
+            state["proxy"] = "waiting-for-proxy"
+            await asyncio.sleep(5)
+            continue
         state["proxy"] = proxy.get("key", "tor") if proxy else "tor"
         label = state["proxy"]
 
@@ -226,16 +251,24 @@ async def _start_all_async(cfg: dict) -> None:
     for wid in WORKER_IDS:
         _workers[wid] = _init_worker(wid)
 
-    # Load residential proxy sessions (vaultproxies.com etc.) — TOR fallback
+    # Load residential proxy sessions (vaultproxies.com etc.) — retry a few
+    # times before deciding anything.
     n_sessions = 0
     try:
         if _proxies_available and proxy_pool is not None:
-            await proxy_pool.refresh()
-            n_sessions = proxy_pool.count
+            for _r in range(3):
+                await proxy_pool.refresh()
+                n_sessions = proxy_pool.count
+                if n_sessions:
+                    break
+                await asyncio.sleep(2)
     except Exception as e:
         _log(f"[Proxy] pool refresh error: {e}", level="warn")
     if n_sessions:
-        _log(f"[Proxy] {n_sessions} residential sessions loaded — one sticky IP per account")
+        _log(f"[Proxy] {n_sessions} residential sessions loaded — one sticky IP per account (forced mode)" if PROXY_FORCE
+             else f"[Proxy] {n_sessions} residential sessions loaded — one sticky IP per account")
+    elif PROXY_FORCE:
+        _log("[Proxy] [ERROR] PROXY FORCE MODE but 0 sessions loaded — workers will keep retrying, TOR is DISABLED", level="error")
     else:
         _log("[Proxy] No proxy sessions — TOR-only fallback (fresh circuit per attempt)")
 

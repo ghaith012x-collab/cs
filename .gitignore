@@ -11,9 +11,6 @@ env/
 .env.local
 .env.*.local
 
-# Residential proxy sessions (user:pass@host) — never commit
-vaultproxies.txt
-
 # Misc
 *.log
 .DS_Store
