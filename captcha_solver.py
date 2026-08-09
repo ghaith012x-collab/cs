@@ -3562,7 +3562,7 @@ async def solve_hcaptcha_accessibility(page, iframe,
         #  you add 8 coins. How many coins are there?" → 3+6+8 = 17
         # Repeats DO count: "put in 5... put in 5" = +5 twice → 9+5+5=19.
         coin_jar = re.search(
-            r'(?:jar|coins?|coin|add|put|total|altogether|in\s+all|starts?.with|how.many)',
+            r'(?:jar|coins?|add|put|total|altogether|in\s+all)',
             t, re.IGNORECASE
         )
         if coin_jar:
@@ -3573,7 +3573,7 @@ async def solve_hcaptcha_accessibility(page, iframe,
             own_nums = []
             for sent in sentences:
                 s_lower = sent.lower().strip()
-                if any(w in s_lower for w in ('you', 'your', 'jar', "you're", 'put', 'add', 'placed', 'starts', 'coin', 'coins')):
+                if any(w in s_lower for w in ('you', 'your', 'jar', "you're", 'put', 'add', 'placed')):
                     own_nums.extend(re.findall(r'(\d+)', sent))
                 elif any(w in s_lower for w in ('friend', 'they', 'he', 'she', 'them', 'brother', 'sister')):
                     continue
