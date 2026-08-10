@@ -1,26 +1,36 @@
 #!/bin/bash
 set -e
 
-echo "Starting NoCaptchaAI Captcha Solver..."
-echo "Email: auto-generated via duckmail.sbs (or config.json)"
-echo "NoCaptchaAI API key: $([ -n "$API_KEY" ] && echo 'set' || echo 'NOT SET - FunCAPTCHA offline solver only')"
+echo "Starting Eyes GEN — Discord token generator"
+echo "========================================"
 
-# AI text model — qwen3:1.7b (fast + knows captcha trivia). Override via env.
-export OLLAMA_MODEL="${OLLAMA_MODEL:-qwen3:1.7b}"
-export OLLAMA_TEXT_MODEL="${OLLAMA_TEXT_MODEL:-qwen3:1.7b}"
-export OLLAMA_VOTES="${OLLAMA_VOTES:-1}"  # 1 vote = fastest; 2+ for majority on fast servers
+# ── Mullvad VPN daemon ────────────────────────────────────
+if [ -x /usr/bin/mullvad-daemon ]; then
+    echo "[Mullvad] Starting daemon..."
+    /usr/bin/mullvad-daemon -v --disable-stdout-timestamps 2>&1 | \
+        sed 's/^/[mullvad-d] /' &
+    sleep 3
 
-# Start TOR for IP rotation (optional)
-echo "Starting TOR..."
-tor -f /etc/tor/torrc 2>/dev/null &
-TOR_PID=$!
-sleep 2
-if kill -0 $TOR_PID 2>/dev/null; then
-    echo "TOR ready (SOCKS5 :9050)"
+    if [ -n "$MULLVAD_LOGIN" ]; then
+        echo "[Mullvad] Logging in..."
+        mullvad account login "$MULLVAD_LOGIN" 2>&1 || echo "[Mullvad] Login failed"
+        sleep 1
+        echo "[Mullvad] Connecting..."
+        mullvad connect 2>&1 || echo "[Mullvad] Connect failed (may need --cap-add=NET_ADMIN --device=/dev/net/tun)"
+    else
+        echo "[Mullvad] MULLVAD_LOGIN not set — skipping auto-connect"
+    fi
 else
-    echo "TOR not available"
+    echo "[Mullvad] CLI not installed — VPN rotation disabled"
 fi
 
+# Start TOR for IP rotation (fallback)
+echo "[TOR] Starting..."
+tor -f /etc/tor/torrc 2>/dev/null &
+sleep 2
+echo "[TOR] Ready (SOCKS5 :9050)" 2>/dev/null || echo "[TOR] Not available"
+
 # Start the Python app
-echo "Starting web server + Discord automation..."
+echo ""
+echo "Starting web server..."
 exec python -u app.py

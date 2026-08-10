@@ -19,9 +19,11 @@ inherits the VPN tunnel automatically.
 """
 
 import asyncio
+import json
 import os
 import random
 import re
+import time
 from typing import Callable, Optional
 
 
@@ -165,16 +167,16 @@ class MullvadVPN:
     async def account_info(self) -> dict:
         """Get Mullvad account details: validity, expiration, remaining time.
 
-        Runs 'mullvad account get' and parses the output.
+        Queries Mullvad's public account API first (plain HTTPS, works with or
+        without the CLI installed - so the dashboard countdown works on
+        Railway/Azure too). Falls back to 'mullvad account get' CLI parsing.
         Returns a dict with:
           - valid: bool (account is active/not expired)
           - account_number: str (masked, last 4 digits)
-          - expires: str (raw expiration string from CLI)
+          - expires: str (raw expiration string)
           - expires_ts: float (Unix timestamp of expiration, 0 if unknown)
           - remaining: str (human-readable remaining time, e.g. "23d 5h")
-          - raw: str (full CLI output for debugging)
-
-        If not logged in or CLI fails, returns valid=False with error info.
+          - raw: str (raw response for debugging)
         """
         if not self._account:
             self._account = (os.environ.get("MULLVAD_LOGIN") or "").strip()
@@ -188,6 +190,73 @@ class MullvadVPN:
                 "raw": "",
             }
 
+        api_result = await self._account_info_api()
+        if api_result:
+            return api_result
+        return await self._account_info_cli()
+
+    async def _account_info_api(self) -> Optional[dict]:
+        """Query https://api.mullvad.net/www/accounts/{account} over plain HTTPS.
+        No CLI needed - works from any host. Returns None if the API is
+        unreachable or the account number is rejected."""
+        url = f"https://api.mullvad.net/www/accounts/{self._account}"
+        try:
+            import aiohttp
+            async with aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=15)
+            ) as s:
+                async with s.get(url) as r:
+                    if r.status != 200:
+                        return None
+                    data = await r.json(content_type=None)
+        except Exception:
+            return None
+        if not isinstance(data, dict):
+            return None
+
+        active = bool(data.get("active"))
+        expires = str(data.get("expires") or "")
+        expires_ts = float(data.get("expiry_unix") or 0)
+        result = {
+            "valid": active,
+            "account_number": self._account[-4:],
+            "expires": expires,
+            "expires_ts": expires_ts,
+            "remaining": "",
+            "raw": json.dumps(data)[:500],
+        }
+
+        # Fall back to parsing the ISO date string if expiry_unix is missing
+        if not expires_ts and expires:
+            try:
+                from datetime import datetime, timezone
+                dt = datetime.strptime(expires, "%Y-%m-%d %H:%M:%S")
+                expires_ts = dt.replace(tzinfo=timezone.utc).timestamp()
+                result["expires_ts"] = expires_ts
+            except Exception:
+                pass
+
+        if expires_ts:
+            left = expires_ts - time.time()
+            if left <= 0:
+                result["valid"] = False
+                result["remaining"] = "EXPIRED"
+            else:
+                days = int(left // 86400)
+                hours = int((left % 86400) // 3600)
+                mins = int((left % 3600) // 60)
+                if days > 0:
+                    result["remaining"] = f"{days}d {hours}h"
+                elif hours > 0:
+                    result["remaining"] = f"{hours}h {mins}m"
+                else:
+                    result["remaining"] = f"{mins}m"
+        if not result["remaining"]:
+            result["remaining"] = "OK" if active else "INVALID"
+        return result
+
+    async def _account_info_cli(self) -> dict:
+        """Fallback: parse 'mullvad account get' output (requires CLI)."""
         out, ok = await self._run("account get")
         if not ok:
             return {

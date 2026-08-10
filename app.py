@@ -6,6 +6,8 @@ import threading
 import time
 from typing import Dict, List, Optional
 
+import aiohttp
+
 from flask import Flask, jsonify, request, Response
 
 try:
@@ -149,6 +151,47 @@ async def _next_proxy(force: bool = False):
     return None
 
 
+def _gateway_proxy() -> Optional[dict]:
+    """The Mullvad gateway proxy (from MULLVAD_GATEWAY env), or None."""
+    if _proxies_available and proxy_pool is not None:
+        return getattr(proxy_pool, "gateway_proxy", None)
+    return None
+
+
+async def _mullvad_gateway_rotate() -> dict:
+    """Ask the VPS gateway to switch to a fresh Mullvad server/IP.
+
+    Control endpoint: MULLVAD_GATEWAY_CONTROL env, else http://<gw-host>:8081/rotate.
+    Returns {"ok": bool, "ip": str, "country": str, "error": str}.
+    """
+    gw = _gateway_proxy()
+    if not gw:
+        return {"ok": False, "error": "No MULLVAD_GATEWAY configured"}
+    control = (os.environ.get("MULLVAD_GATEWAY_CONTROL") or "").strip()
+    if not control:
+        control = f"http://{gw['host']}:8081/rotate"
+    try:
+        async with aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=30)
+        ) as s:
+            async with s.get(control) as r:
+                if r.status != 200:
+                    return {"ok": False, "error": f"Gateway /rotate returned HTTP {r.status}"}
+                try:
+                    data = await r.json(content_type=None)
+                except Exception:
+                    data = {}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+    ok = bool(data.get("ok", True))
+    return {
+        "ok": ok,
+        "ip": str(data.get("ip") or ""),
+        "country": str(data.get("country") or ""),
+        "error": str(data.get("error") or "") if not ok else "",
+    }
+
+
 async def _run_worker(wid: str, cfg: dict, proxy=None) -> None:
     """Worker loop: one sticky residential session per signup attempt.
     When Mullvad VPN is connected, ALL traffic routes through the VPN
@@ -164,7 +207,10 @@ async def _run_worker(wid: str, cfg: dict, proxy=None) -> None:
 
     # ── Mullvad VPN: login + initial connect ──
     _use_mullvad = False
-    if _mullvad_available and _mullvad is not None:
+    _gateway_mode = _gateway_proxy() is not None
+    if _gateway_mode:
+        _log(f"[{wid}] [Mullvad] Gateway mode — traffic via MULLVAD_GATEWAY (local CLI not needed)")
+    elif _mullvad_available and _mullvad is not None:
         if not _mullvad.connected:
             await _mullvad.login()
         _use_mullvad = _mullvad.connected
@@ -193,6 +239,16 @@ async def _run_worker(wid: str, cfg: dict, proxy=None) -> None:
                 await asyncio.sleep(5)
                 continue
             state["proxy"] = proxy.get("key", "tor") if proxy else "tor"
+
+        # ── Mullvad gateway mode: rotate the VPS tunnel for a fresh IP ──
+        if proxy and proxy.get("mullvad"):
+            rot = await _mullvad_gateway_rotate()
+            if rot.get("ok"):
+                _log(f"[{wid}] [Mullvad] Gateway rotated -> {rot.get('ip') or rot.get('country') or 'new IP'}")
+                state["proxy"] = f"mullvad-gw:{rot.get('ip') or rot.get('country') or 'rotated'}"
+            else:
+                _log(f"[{wid}] [Mullvad] Gateway rotate failed: {rot.get('error')}", level="warn")
+
         label = state["proxy"]
 
         # ── Launch or reuse browser ──
@@ -302,7 +358,9 @@ async def _start_all_async(cfg: dict) -> None:
 
     # ── Mullvad VPN pre-check ──
     _use_mullvad = False
-    if _mullvad_available and _mullvad is not None:
+    if _gateway_proxy() is not None:
+        _log("[Mullvad] Gateway mode detected — skipping local CLI login, all traffic routes through MULLVAD_GATEWAY")
+    elif _mullvad_available and _mullvad is not None:
         if not _mullvad.connected:
             await _mullvad.login()
         _use_mullvad = _mullvad.connected
@@ -324,7 +382,10 @@ async def _start_all_async(cfg: dict) -> None:
                     await asyncio.sleep(2)
         except Exception as e:
             _log(f"[Proxy] pool refresh error: {e}", level="warn")
-        if n_sessions:
+        if _proxies_available and proxy_pool is not None and proxy_pool.gateway_proxy:
+            gw = proxy_pool.gateway_proxy
+            _log(f"[Mullvad] Gateway proxy ready: {gw['host']}:{gw['port']} — all browser traffic routes through the Mullvad tunnel (rotated per attempt)")
+        elif n_sessions:
             _log(f"[Proxy] {n_sessions} residential sessions loaded — one sticky IP per account (forced mode)" if PROXY_FORCE
                  else f"[Proxy] {n_sessions} residential sessions loaded — one sticky IP per account")
         elif PROXY_FORCE:
@@ -477,28 +538,50 @@ def handle_tokens():
 
 @app.route('/mullvad/status')
 def handle_mullvad_status():
-    """Get Mullvad VPN account status: valid/invalid, expiration, remaining time."""
+    """Get Mullvad VPN account status: valid/invalid, expiration, remaining time.
+    Uses Mullvad's public account API so it works without the CLI installed."""
+    gw = _gateway_proxy()
     if not _mullvad_available or _mullvad is None:
         return jsonify({"valid": False, "error": "Mullvad VPN module not loaded"})
     try:
         acc = _run_in_loop(_mullvad.account_info())
         if acc is None:
             return jsonify({"valid": False, "error": "Timed out"})
+        acc = dict(acc)
+        acc["gateway"] = bool(gw)
+        acc["gateway_host"] = gw["host"] if gw else ""
         return jsonify(acc)
     except Exception as e:
         return jsonify({"valid": False, "error": str(e)})
 
 
+@app.route('/mullvad/rotate', methods=['POST'])
+def handle_mullvad_rotate():
+    """Ask the Mullvad gateway (VPS) to switch to a fresh Mullvad server/IP."""
+    if _gateway_proxy() is None:
+        return jsonify({"ok": False, "error": "No MULLVAD_GATEWAY configured - set MULLVAD_GATEWAY=socks5://[user:pass@]VPS_IP:1080"})
+    result = _run_in_loop(_mullvad_gateway_rotate())
+    if result is None:
+        return jsonify({"ok": False, "error": "Timed out"})
+    return jsonify(result)
+
+
 @app.route('/mullvad/login', methods=['POST'])
 def handle_mullvad_login():
-    """Trigger a fresh Mullvad login attempt."""
+    """Trigger a fresh Mullvad login attempt (or report gateway mode)."""
     if not _mullvad_available or _mullvad is None:
         return jsonify({"ok": False, "error": "Mullvad VPN module not loaded"})
+    if _gateway_proxy() is not None:
+        return jsonify({"ok": True, "connected": True, "gateway": True,
+                        "msg": "Gateway mode - Mullvad runs on the VPS"})
     try:
         ok = _run_in_loop(_mullvad.login())
         if ok is None:
             return jsonify({"ok": False, "error": "Timed out"})
-        return jsonify({"ok": bool(ok), "connected": _mullvad.connected,
+        if not ok:
+            return jsonify({"ok": False, "connected": _mullvad.connected,
+                            "error": "CLI not available on this host - set MULLVAD_GATEWAY to route via a VPS, or install Mullvad here"})
+        return jsonify({"ok": True, "connected": _mullvad.connected,
                         "ip": _mullvad.current_ip})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)})
@@ -660,7 +743,7 @@ h3{font-size:12px;color:var(--dim);text-transform:uppercase;letter-spacing:1px;m
     <div class="row">
       <div style="flex:1;min-width:0">
         <div style="font-weight:800;font-size:14px">
-          <span id="mvDot" style="color:#a78bfa">⬤</span> Mullvad VPN
+          <span id="mvDot" style="color:#a78bfa">[VPN]</span> Mullvad VPN
           <span id="mvStatus" style="font-size:11px;margin-left:6px" class="badge b-idle">--</span>
         </div>
         <div id="mvDetail" style="color:var(--dim);font-size:12px;margin-top:3px">Loading...</div>
@@ -668,7 +751,10 @@ h3{font-size:12px;color:var(--dim);text-transform:uppercase;letter-spacing:1px;m
       <div style="text-align:right;white-space:nowrap">
         <div id="mvCountdown" style="font-size:20px;font-weight:900;color:#a78bfa;font-variant-numeric:tabular-nums">--</div>
         <div style="font-size:10px;color:var(--dim)">until expiry</div>
-        <button class="btn-sm" onclick="mullvadLogin()" style="margin-top:4px">Login</button>
+        <div style="display:flex;gap:6px;margin-top:4px">
+          <button class="btn-sm" onclick="mullvadLogin()">Login</button>
+          <button class="btn-sm" onclick="mullvadRotate()">Rotate</button>
+        </div>
       </div>
     </div>
   </div>
@@ -909,16 +995,18 @@ async function checkMullvad(){
       if(cd) cd.textContent = '--';
       if(dot) dot.style.color = '#7c85a8';
       _mvExpiresTs = 0;
+    }else if(x.gateway){
+      det.textContent = 'Via gateway ' + (x.gateway_host||'') + (x.valid ? ' - ' + (x.remaining||'active') : ' - account check pending');
     }else if(x.valid && x.expires_ts){
       _mvExpiresTs = x.expires_ts;
       st.textContent = 'ACTIVE'; st.className = 'badge b-done';
-      det.textContent = 'Acct ...' + (x.account_number||'?') + ' · expires ' + (x.expires||'?');
+      det.textContent = 'Acct ...' + (x.account_number||'?') + ' - expires ' + (x.expires||'?');
       stNum.textContent = x.remaining||'OK'; stNum.style.color = '#a78bfa';
       if(dot) dot.style.color = '#34d399';
       updateCountdown();
     }else if(x.valid){
       st.textContent = 'ACTIVE'; st.className = 'badge b-done';
-      det.textContent = 'Account ...' + (x.account_number||'?') + ' · ' + (x.remaining||'?');
+      det.textContent = 'Account ...' + (x.account_number||'?') + ' - ' + (x.remaining||'?');
       stNum.textContent = x.remaining||'OK'; stNum.style.color = '#a78bfa';
       if(cd) cd.textContent = x.remaining||'OK';
       if(dot) dot.style.color = '#34d399';
@@ -926,8 +1014,8 @@ async function checkMullvad(){
     }else{
       st.textContent = x.remaining==='EXPIRED'?'EXPIRED':'INVALID';
       st.className = 'badge b-error';
-      det.textContent = 'Account ...' + (x.account_number||'?') + ' · ' + (x.remaining||'Check login');
-      stNum.textContent = '✗'; stNum.style.color = '#f87171';
+      det.textContent = 'Account ...' + (x.account_number||'?') + ' - ' + (x.remaining||'Check login');
+      stNum.textContent = 'X'; stNum.style.color = '#f87171';
       if(cd) cd.textContent = '--';
       if(dot) dot.style.color = '#f87171';
       _mvExpiresTs = 0;
@@ -942,10 +1030,21 @@ async function mullvadLogin(){
   if(btn){ btn.textContent = '...'; btn.disabled = true; }
   try{
     var r = await api('/mullvad/login', {method:'POST'}); var x = await r.json();
-    if(x.ok){ checkMullvad(); }
+    if(x.ok){ if(x.msg) alert(x.msg); checkMullvad(); }
     else{ alert('Mullvad login failed: ' + (x.error||'unknown')); }
   }catch(e){ alert('Mullvad login error: ' + e.message); }
   if(btn){ btn.textContent = 'Login'; btn.disabled = false; }
+}
+
+async function mullvadRotate(){
+  var btn = event ? event.target : null;
+  if(btn){ btn.textContent = '...'; btn.disabled = true; }
+  try{
+    var r = await api('/mullvad/rotate', {method:'POST'}); var x = await r.json();
+    if(x.ok){ checkMullvad(); }
+    else{ alert('Rotate failed: ' + (x.error||'unknown')); }
+  }catch(e){ alert('Rotate error: ' + e.message); }
+  if(btn){ btn.textContent = 'Rotate'; btn.disabled = false; }
 }
 
 setInterval(refresh, 2500);
