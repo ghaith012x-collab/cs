@@ -151,8 +151,9 @@ async def _next_proxy(force: bool = False):
 
 async def _run_worker(wid: str, cfg: dict, proxy=None) -> None:
     """Worker loop: one sticky residential session per signup attempt.
-    When proxies are configured (PROXY_FORCE) TOR is NEVER used — the worker
-    waits/refreshes until sessions are available instead."""
+    When Mullvad VPN is connected, ALL traffic routes through the VPN
+    tunnel — no proxy pool, no TOR. IP rotation happens via Mullvad.
+    Otherwise falls back to proxy pool + TOR as before."""
     state = _workers[wid]
     state["status"] = "starting"
     state["started_at"] = time.time()
@@ -162,9 +163,11 @@ async def _run_worker(wid: str, cfg: dict, proxy=None) -> None:
     consecutive_tunnel_fails = 0  # fast-fail after consecutive dead connections
 
     # ── Mullvad VPN: login + initial connect ──
+    _use_mullvad = False
     if _mullvad_available and _mullvad is not None:
         if not _mullvad.connected:
             await _mullvad.login()
+        _use_mullvad = _mullvad.connected
 
     for attempt in range(max_tries):
         if not _running:
@@ -173,20 +176,23 @@ async def _run_worker(wid: str, cfg: dict, proxy=None) -> None:
             return
 
         # ── Mullvad VPN: rotate to new country for a fresh IP ──
-        if _mullvad_available and _mullvad is not None and _mullvad.connected:
+        if _use_mullvad:
             new_ip = await _mullvad.rotate()
             if new_ip:
                 _log(f"[{wid}] [Mullvad] New IP: {new_ip}")
-
-        # ── Pick a session for this attempt (never TOR in force mode) ──
-        if proxy is None:
-            proxy = await _next_proxy(force=PROXY_FORCE)
-        if PROXY_FORCE and proxy is None:
-            _log(f"[{wid}] [Proxy] No proxy sessions (forced mode) — refreshing and waiting...", level="warn")
-            state["proxy"] = "waiting-for-proxy"
-            await asyncio.sleep(5)
-            continue
-        state["proxy"] = proxy.get("key", "tor") if proxy else "tor"
+            # Mullvad routes ALL traffic — no proxy pool needed
+            proxy = None
+            state["proxy"] = f"mullvad:{_mullvad.current_ip or 'vpn'}"
+        else:
+            # ── Pick a session for this attempt (never TOR in force mode) ──
+            if proxy is None:
+                proxy = await _next_proxy(force=PROXY_FORCE)
+            if PROXY_FORCE and proxy is None:
+                _log(f"[{wid}] [Proxy] No proxy sessions (forced mode) — refreshing and waiting...", level="warn")
+                state["proxy"] = "waiting-for-proxy"
+                await asyncio.sleep(5)
+                continue
+            state["proxy"] = proxy.get("key", "tor") if proxy else "tor"
         label = state["proxy"]
 
         # ── Launch or reuse browser ──
@@ -294,26 +300,37 @@ async def _start_all_async(cfg: dict) -> None:
     for wid in WORKER_IDS:
         _workers[wid] = _init_worker(wid)
 
-    # Load residential proxy sessions (vaultproxies.com etc.) — retry a few
-    # times before deciding anything.
-    n_sessions = 0
-    try:
-        if _proxies_available and proxy_pool is not None:
-            for _r in range(3):
-                await proxy_pool.refresh()
-                n_sessions = proxy_pool.count
-                if n_sessions:
-                    break
-                await asyncio.sleep(2)
-    except Exception as e:
-        _log(f"[Proxy] pool refresh error: {e}", level="warn")
-    if n_sessions:
-        _log(f"[Proxy] {n_sessions} residential sessions loaded — one sticky IP per account (forced mode)" if PROXY_FORCE
-             else f"[Proxy] {n_sessions} residential sessions loaded — one sticky IP per account")
-    elif PROXY_FORCE:
-        _log("[Proxy] [ERROR] PROXY FORCE MODE but 0 sessions loaded — workers will keep retrying, TOR is DISABLED", level="error")
+    # ── Mullvad VPN pre-check ──
+    _use_mullvad = False
+    if _mullvad_available and _mullvad is not None:
+        if not _mullvad.connected:
+            await _mullvad.login()
+        _use_mullvad = _mullvad.connected
+
+    # ── Proxy pool: skip when Mullvad VPN handles all routing ──
+    if _use_mullvad:
+        _log(f"[VPN] Mullvad connected ({_mullvad.current_ip}) — bypassing proxy pool, all traffic through VPN tunnel")
     else:
-        _log("[Proxy] No proxy sessions — TOR-only fallback (fresh circuit per attempt)")
+        # Load residential proxy sessions (vaultproxies.com etc.) — retry a few
+        # times before deciding anything.
+        n_sessions = 0
+        try:
+            if _proxies_available and proxy_pool is not None:
+                for _r in range(3):
+                    await proxy_pool.refresh()
+                    n_sessions = proxy_pool.count
+                    if n_sessions:
+                        break
+                    await asyncio.sleep(2)
+        except Exception as e:
+            _log(f"[Proxy] pool refresh error: {e}", level="warn")
+        if n_sessions:
+            _log(f"[Proxy] {n_sessions} residential sessions loaded — one sticky IP per account (forced mode)" if PROXY_FORCE
+                 else f"[Proxy] {n_sessions} residential sessions loaded — one sticky IP per account")
+        elif PROXY_FORCE:
+            _log("[Proxy] [ERROR] PROXY FORCE MODE but 0 sessions loaded — workers will keep retrying, TOR is DISABLED", level="error")
+        else:
+            _log("[Proxy] No proxy sessions — TOR-only fallback (fresh circuit per attempt)")
 
     for i, wid in enumerate(WORKER_IDS):
         _log(f"[{wid}] Starting worker...")
@@ -458,6 +475,35 @@ def handle_tokens():
     })
 
 
+@app.route('/mullvad/status')
+def handle_mullvad_status():
+    """Get Mullvad VPN account status: valid/invalid, expiration, remaining time."""
+    if not _mullvad_available or _mullvad is None:
+        return jsonify({"valid": False, "error": "Mullvad VPN module not loaded"})
+    try:
+        acc = _run_in_loop(_mullvad.account_info())
+        if acc is None:
+            return jsonify({"valid": False, "error": "Timed out"})
+        return jsonify(acc)
+    except Exception as e:
+        return jsonify({"valid": False, "error": str(e)})
+
+
+@app.route('/mullvad/login', methods=['POST'])
+def handle_mullvad_login():
+    """Trigger a fresh Mullvad login attempt."""
+    if not _mullvad_available or _mullvad is None:
+        return jsonify({"ok": False, "error": "Mullvad VPN module not loaded"})
+    try:
+        ok = _run_in_loop(_mullvad.login())
+        if ok is None:
+            return jsonify({"ok": False, "error": "Timed out"})
+        return jsonify({"ok": bool(ok), "connected": _mullvad.connected,
+                        "ip": _mullvad.current_ip})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)})
+
+
 @app.route('/config', methods=['GET', 'POST'])
 def handle_config():
     if request.method == 'POST':
@@ -599,6 +645,7 @@ h3{font-size:12px;color:var(--dim);text-transform:uppercase;letter-spacing:1px;m
   <div class="stat"><div class="num acc" id="stRunning">0</div><div class="lbl">Running</div></div>
   <div class="stat"><div class="num good" id="stTokens">0</div><div class="lbl">Tokens</div></div>
   <div class="stat"><div class="num prox" id="stProxies">0</div><div class="lbl">Proxies</div></div>
+  <div class="stat"><div class="num" id="stMullvad" style="color:#a78bfa">--</div><div class="lbl">Mullvad</div></div>
 </div>
 
 <div id="tabHome" class="tab on">
@@ -608,6 +655,22 @@ h3{font-size:12px;color:var(--dim);text-transform:uppercase;letter-spacing:1px;m
       <button class="btn-stop" onclick="stop()">STOP</button>
     </div>
     <div id="statusLine" class="sub" style="margin:10px 0 0">Idle - press START to launch all browsers</div>
+  </div>
+  <div class="card" id="mullvadCard">
+    <div class="row">
+      <div style="flex:1;min-width:0">
+        <div style="font-weight:800;font-size:14px">
+          <span id="mvDot" style="color:#a78bfa">⬤</span> Mullvad VPN
+          <span id="mvStatus" style="font-size:11px;margin-left:6px" class="badge b-idle">--</span>
+        </div>
+        <div id="mvDetail" style="color:var(--dim);font-size:12px;margin-top:3px">Loading...</div>
+      </div>
+      <div style="text-align:right;white-space:nowrap">
+        <div id="mvCountdown" style="font-size:20px;font-weight:900;color:#a78bfa;font-variant-numeric:tabular-nums">--</div>
+        <div style="font-size:10px;color:var(--dim)">until expiry</div>
+        <button class="btn-sm" onclick="mullvadLogin()" style="margin-top:4px">Login</button>
+      </div>
+    </div>
   </div>
   <h3>Live Cams</h3>
   <div class="cams" id="cams"></div>
@@ -796,9 +859,100 @@ function copyLine(val, btn){
   }
 }
 
+var _mvExpiresTs = 0;
+function updateCountdown(){
+  var el = document.getElementById('mvCountdown');
+  var dot = document.getElementById('mvDot');
+  if(!el || !_mvExpiresTs) return;
+  var now = Date.now()/1000;
+  var left = _mvExpiresTs - now;
+  if(left <= 0){
+    el.textContent = 'EXPIRED';
+    el.style.color = '#f87171';
+    if(dot) dot.style.color = '#f87171';
+  }else if(left < 3600){
+    var m = Math.floor(left/60);
+    var s = Math.floor(left%60);
+    el.textContent = m+'m '+s+'s';
+    el.style.color = '#fbbf24';
+    if(dot) dot.style.color = '#fbbf24';
+  }else if(left < 86400){
+    var h = Math.floor(left/3600);
+    var m = Math.floor((left%3600)/60);
+    el.textContent = h+'h '+m+'m';
+    el.style.color = '#a78bfa';
+    if(dot) dot.style.color = '#a78bfa';
+  }else{
+    var d = Math.floor(left/86400);
+    var h = Math.floor((left%86400)/3600);
+    el.textContent = d+'d '+h+'h';
+    el.style.color = '#a78bfa';
+    if(dot) dot.style.color = '#34d399';
+  }
+}
+setInterval(updateCountdown, 1000);
+
+async function checkMullvad(){
+  try{
+    var r = await api('/mullvad/status'); var x = await r.json();
+    var card = document.getElementById('mullvadCard');
+    if(!card) return;
+    var st = document.getElementById('mvStatus');
+    var det = document.getElementById('mvDetail');
+    var stNum = document.getElementById('stMullvad');
+    var cd = document.getElementById('mvCountdown');
+    var dot = document.getElementById('mvDot');
+    if(x.error){
+      st.textContent = 'N/A'; st.className = 'badge b-idle';
+      det.textContent = x.error;
+      stNum.textContent = '--'; stNum.style.color = '#7c85a8';
+      if(cd) cd.textContent = '--';
+      if(dot) dot.style.color = '#7c85a8';
+      _mvExpiresTs = 0;
+    }else if(x.valid && x.expires_ts){
+      _mvExpiresTs = x.expires_ts;
+      st.textContent = 'ACTIVE'; st.className = 'badge b-done';
+      det.textContent = 'Acct ...' + (x.account_number||'?') + ' · expires ' + (x.expires||'?');
+      stNum.textContent = x.remaining||'OK'; stNum.style.color = '#a78bfa';
+      if(dot) dot.style.color = '#34d399';
+      updateCountdown();
+    }else if(x.valid){
+      st.textContent = 'ACTIVE'; st.className = 'badge b-done';
+      det.textContent = 'Account ...' + (x.account_number||'?') + ' · ' + (x.remaining||'?');
+      stNum.textContent = x.remaining||'OK'; stNum.style.color = '#a78bfa';
+      if(cd) cd.textContent = x.remaining||'OK';
+      if(dot) dot.style.color = '#34d399';
+      _mvExpiresTs = 0;
+    }else{
+      st.textContent = x.remaining==='EXPIRED'?'EXPIRED':'INVALID';
+      st.className = 'badge b-error';
+      det.textContent = 'Account ...' + (x.account_number||'?') + ' · ' + (x.remaining||'Check login');
+      stNum.textContent = '✗'; stNum.style.color = '#f87171';
+      if(cd) cd.textContent = '--';
+      if(dot) dot.style.color = '#f87171';
+      _mvExpiresTs = 0;
+    }
+  }catch(e){
+    _mvExpiresTs = 0;
+  }
+}
+
+async function mullvadLogin(){
+  var btn = event ? event.target : document.querySelector('#mullvadCard .btn-sm');
+  if(btn){ btn.textContent = '...'; btn.disabled = true; }
+  try{
+    var r = await api('/mullvad/login', {method:'POST'}); var x = await r.json();
+    if(x.ok){ checkMullvad(); }
+    else{ alert('Mullvad login failed: ' + (x.error||'unknown')); }
+  }catch(e){ alert('Mullvad login error: ' + e.message); }
+  if(btn){ btn.textContent = 'Login'; btn.disabled = false; }
+}
+
 setInterval(refresh, 2500);
 refresh();
 setInterval(refreshTokens, 15000);
+setInterval(checkMullvad, 8000);
+checkMullvad();
 </script></body></html>"""
 
 

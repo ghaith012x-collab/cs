@@ -162,6 +162,107 @@ class MullvadVPN:
             "ip": ip,
         }
 
+    async def account_info(self) -> dict:
+        """Get Mullvad account details: validity, expiration, remaining time.
+
+        Runs 'mullvad account get' and parses the output.
+        Returns a dict with:
+          - valid: bool (account is active/not expired)
+          - account_number: str (masked, last 4 digits)
+          - expires: str (raw expiration string from CLI)
+          - expires_ts: float (Unix timestamp of expiration, 0 if unknown)
+          - remaining: str (human-readable remaining time, e.g. "23d 5h")
+          - raw: str (full CLI output for debugging)
+
+        If not logged in or CLI fails, returns valid=False with error info.
+        """
+        if not self._account:
+            self._account = (os.environ.get("MULLVAD_LOGIN") or "").strip()
+        if not self._account:
+            return {
+                "valid": False,
+                "account_number": "",
+                "expires": "",
+                "expires_ts": 0,
+                "remaining": "MULLVAD_LOGIN not set",
+                "raw": "",
+            }
+
+        out, ok = await self._run("account get")
+        if not ok:
+            return {
+                "valid": False,
+                "account_number": self._account[-4:],
+                "expires": "",
+                "expires_ts": 0,
+                "remaining": "CLI error",
+                "raw": out[:300],
+            }
+
+        result = {
+            "valid": False,
+            "account_number": self._account[-4:],
+            "expires": "",
+            "expires_ts": 0,
+            "remaining": "",
+            "raw": out[:500],
+        }
+
+        # ── Parse expiration date ──
+        # Mullvad outputs formats like:
+        #   Expires: 2025-12-31 23:59:59 UTC
+        #   Expires: 2025-12-31
+        exp_match = re.search(
+            r"Expires?:\s*(\d{4}-\d{2}-\d{2})\s*(\d{2}:\d{2}:\d{2})?",
+            out, re.IGNORECASE
+        )
+        if exp_match:
+            date_str = exp_match.group(1)
+            time_str = exp_match.group(2) or "00:00:00"
+            expires_str = f"{date_str} {time_str}".strip()
+            result["expires"] = expires_str
+
+            # Parse to timestamp for comparison
+            try:
+                from datetime import datetime, timezone, timedelta
+                dt = datetime.strptime(expires_str, "%Y-%m-%d %H:%M:%S")
+                # Assume UTC if not specified (Mullvad uses UTC)
+                dt = dt.replace(tzinfo=timezone.utc)
+                result["expires_ts"] = dt.timestamp()
+                now_ts = dt.now(timezone.utc).timestamp()
+                remaining_secs = result["expires_ts"] - now_ts
+
+                if remaining_secs > 0:
+                    result["valid"] = True
+                    days = int(remaining_secs // 86400)
+                    hours = int((remaining_secs % 86400) // 3600)
+                    mins = int((remaining_secs % 3600) // 60)
+                    if days > 0:
+                        result["remaining"] = f"{days}d {hours}h"
+                    elif hours > 0:
+                        result["remaining"] = f"{hours}h {mins}m"
+                    else:
+                        result["remaining"] = f"{mins}m"
+                else:
+                    result["remaining"] = "EXPIRED"
+            except Exception:
+                result["remaining"] = result["expires"]
+
+        # ── Also check for explicit "expired" / "no time" in output ──
+        if any(kw in out.lower() for kw in ("expired", "no time", "out of time", "no valid")):
+            result["valid"] = False
+            if not result["remaining"]:
+                result["remaining"] = "EXPIRED"
+
+        # ── Check for "Active" / "Valid" keywords ──
+        if any(kw in out.lower() for kw in ("active", "valid", "time left")):
+            result["valid"] = True
+
+        if not result["remaining"]:
+            result["remaining"] = "Unknown — check raw output"
+
+        return result
+
     # ── Internal ──────────────────────────────────────────
 
     async def _run(self, cmd: str, timeout: float = VPN_CMD_TIMEOUT) -> tuple:
