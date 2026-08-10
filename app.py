@@ -36,6 +36,15 @@ PROXY_FORCE = (
 
 from server import DiscordAutomation
 
+try:
+    from mullvad import MullvadVPN
+    _mullvad = MullvadVPN(log=lambda msg, level="info": print(f"[mullvad] {msg}", flush=True))
+    _mullvad_available = True
+except ImportError:
+    _mullvad = None
+    _mullvad_available = False
+    print("[app] mullvad.py not found - Mullvad VPN disabled", flush=True)
+
 # ── Global state (Flask thread + asyncio thread) ──
 
 _loop: Optional[asyncio.AbstractEventLoop] = None
@@ -152,11 +161,22 @@ async def _run_worker(wid: str, cfg: dict, proxy=None) -> None:
     bot = None
     consecutive_tunnel_fails = 0  # fast-fail after consecutive dead connections
 
+    # ── Mullvad VPN: login + initial connect ──
+    if _mullvad_available and _mullvad is not None:
+        if not _mullvad.connected:
+            await _mullvad.login()
+
     for attempt in range(max_tries):
         if not _running:
             state["status"] = "stopped"
             if bot: await bot.close()
             return
+
+        # ── Mullvad VPN: rotate to new country for a fresh IP ──
+        if _mullvad_available and _mullvad is not None and _mullvad.connected:
+            new_ip = await _mullvad.rotate()
+            if new_ip:
+                _log(f"[{wid}] [Mullvad] New IP: {new_ip}")
 
         # ── Pick a session for this attempt (never TOR in force mode) ──
         if proxy is None:
