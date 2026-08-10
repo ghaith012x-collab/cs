@@ -45,7 +45,7 @@ def _random_password(length: int = 18) -> str:
 
 
 class TempMail:
-    """Async temp-mail client: CyberTemp → duckmail.sbs → mail.tm fallback.
+    """Async temp-mail client: duckmail.sbs → glasswhitehub.com.
 
     Never crashes the caller — every failure is caught, logged and surfaced
     as an empty string / None so the automation can react gracefully.
@@ -263,7 +263,7 @@ class TempMail:
     def _clean_link(url: str) -> str:
         return url.replace("&amp;", "&").rstrip(".,);\"'<>")
 
-    # ── HTTP helper (duckmail / mail.tm) ────────────────────
+    # ── HTTP helper (duckmail.sbs) ──────────────────────────
 
     async def _request(self, base: str, method: str, path: str,
                        body: Optional[dict] = None,

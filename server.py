@@ -547,7 +547,7 @@ class DiscordAutomation:
             await self.initialize()
 
         # No hardcoded email - use the configured email, or fall back to a
-        # fresh duckmail.sbs address (mail.tm fallback) when none is provided.
+        # fresh duckmail.sbs address (@glasswhitehub.com) when none is provided.
         if not self._email:
             self._log("[Mail] No email configured - creating duckmail.sbs inbox...")
             try:
