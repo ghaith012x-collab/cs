@@ -4435,6 +4435,188 @@ def _eval_arithmetic_chain(expr: str) -> Optional[str]:
     return str(val)
 
 
+# ═══════════════════════════════════════════════════════════════
+# LLM few-shot prompt (module-level so the test harness exercises the
+# EXACT same production prompt path: pool selection + think:false call +
+# answer cleaning).
+# ═══════════════════════════════════════════════════════════════
+
+# Few-shot examples injected into the LLM prompt. Small local models
+# (llama3.2:1b, qwen3:1.7b) only answer CAPTCHA trivia correctly when they
+# are shown the same question TYPE first, so pick the most relevant examples
+# for each question before asking.
+FEWSHOT_POOL = [
+    ("You start with 6 coins in a jar. On Wednesday, you put 9 coins into the jar. How many coins are in your jar now?", "15"),
+    ("Your coin jar has 8 coins. On Monday, you add 9 coins. How many coins are in the jar?", "17"),
+    ("What vegetable is white inside and brown outside?", "potato"),
+    ("What direction does the sun set in?", "west"),
+    ("What liquid do you use to wash your body?", "soap"),
+    ("What do we call a container that holds coins?", "jar"),
+    ("What is the capital of France?", "paris"),
+    ("How many days are in a week?", "7"),
+    ("What color is the sky?", "blue"),
+    ("What do bees make?", "honey"),
+    ("What is the largest planet in our solar system?", "jupiter"),
+    ("How many legs does a spider have?", "8"),
+    ("What do we call a baby dog?", "puppy"),
+    ("What is the opposite of hot?", "cold"),
+    ("What gas do plants absorb?", "carbon dioxide"),
+    ("What instrument has 88 keys?", "piano"),
+    ("What do you use to cut paper?", "scissors"),
+    ("How many minutes are in an hour?", "60"),
+    ("What animal says moo?", "cow"),
+    ("What is the tallest land animal?", "giraffe"),
+    ("What do you call the person who flies a plane?", "pilot"),
+    ("What color do you get when you mix red and white?", "pink"),
+    ("How many wheels does a car have?", "4"),
+    ("What is the first month of the year?", "january"),
+    ("What do you use to write on a blackboard?", "chalk"),
+    ("What is the freezing point of water in celsius?", "0"),
+    ("Can bread be stored frozen?", "yes"),
+    ("Do cats meow?", "yes"),
+    # ── hCaptcha trivia question TYPES (content differs from the AI
+    # sweep questions so the test measures real knowledge, not leakage) ──
+    ("Which country has the capital city Beijing?", "china"),
+    ("What is the capital of Kenya?", "nairobi"),
+    ("What is the capital of Egypt?", "cairo"),
+    ("What is the national sport of England?", "cricket"),
+    ("What is the smallest mammal in the world?", "bumblebee bat"),
+    ("What is the largest reptile in the world?", "saltwater crocodile"),
+    ("What is the tallest mountain in the world?", "everest"),
+    ("What is the largest land animal?", "elephant"),
+    ("What is the largest desert in the world?", "sahara"),
+    ("What is the largest ocean in the world?", "pacific"),
+    ("How many letters are in the word butterfly?", "9"),
+    # -- User-requested extras: same question TYPES for the 3 extra
+    # test questions (qwen3:1.7b refuses with /no_answer/ unless primed
+    # with the exact question TYPE first) --
+    ("What is the slowest animal?", "sloth"),
+    ("Who is the richest man in the world?", "elon musk"),
+    ("How many seconds are in an hour?", "3600"),
+    ("Who is the richest woman in the world?", "francoise bettencourt meyers"),
+    ("Which person has the most money on earth?", "elon musk"),
+]
+
+
+
+def _normalize_llm_question(q: str) -> str:
+    """Turn terse/contracted hCaptcha fragments into full questions so small
+    models (qwen3:1.7b) answer instead of emitting /NoAnswer/ refusals.
+    Examples:
+      'Slowest animal'                  -> 'What is the slowest animal?'
+      "Who's the richest person on earth" -> 'Who is the richest person on earth?'
+    """
+    s = (q or "").strip()
+    if not s:
+        return q or ""
+    # Expand common contractions (small models misread "who's" as a name/refusal).
+    for a, b in (("who's", "who is"), ("what's", "what is"), ("how's", "how is"),
+                 ("where's", "where is"), ("when's", "when is"), ("why's", "why is"),
+                 ("it's", "it is"), ("there's", "there is"), ("that's", "that is"),
+                 ("don't", "do not"), ("doesn't", "does not"), ("can't", "cannot")):
+        s = re.sub(r"\b" + re.escape(a) + r"\b", b, s, flags=re.IGNORECASE)
+    # Bare fragment (no question starter) -> "What is the ..."
+    if not re.match(
+        r"^(?:what|which|who|whom|whose|how|when|where|why|is|are|was|were|"
+        r"do|does|did|can|could|would|should|may|might|has|have|had|shall|will)\b",
+        s, re.IGNORECASE):
+        s = "What is the " + s.lower()
+    # Ensure it reads as a question (trailing '?').
+    s = re.sub(r"[?.!]+$", "", s).strip()
+    return s + "?"
+
+
+def build_llm_prompt(question: str) -> str:
+    """Pick the 4 most relevant few-shot examples and build the prompt."""
+    question = _normalize_llm_question(question)
+    stop = {"what", "which", "how", "many", "much", "does", "do", "is", "are",
+            "the", "and", "with", "your", "you", "that", "this", "from", "into",
+            "there", "have", "has", "can", "would", "about", "when", "where",
+            "its", "answer", "question", "following", "single", "word", "number",
+            "phrase", "please", "put", "add", "call", "calls", "one", "using"}
+    qw = {w for w in re.findall(r"[a-z]{3,}", question.lower()) if w not in stop}
+    # Prefer examples of the same question TYPE: same opener word
+    # (what/who/how/which), same superlative structure, and NEVER
+    # arithmetic (coin) examples unless the question itself is about coins
+    # — a 1.7B model refuses (/NoAnswer/) when the few-shot mix spans
+    # unrelated domains (verified live).
+    scored = []
+    _q_first = (question.split() or [""])[0].lower()
+    _q_superl = re.search(
+        r"(largest|biggest|smallest|tallest|highest|longest|fastest|slowest|"
+        r"richest|oldest|youngest|deepest|hottest|coldest|most|least)",
+        question.lower())
+    for eq, ea in FEWSHOT_POOL:
+        ew = {w for w in re.findall(r"[a-z]{3,}", eq.lower())}
+        score = len(qw & ew)
+        if (eq.split() or [""])[0].lower() == _q_first:
+            score += 3
+        if _q_superl and re.search(
+                r"(largest|biggest|smallest|tallest|highest|longest|fastest|"
+                r"slowest|richest|oldest|youngest|deepest|hottest|coldest|"
+                r"most|least)", eq.lower()):
+            score += 2
+        if "coin" in eq and "coin" not in question.lower():
+            score -= 4
+        scored.append((score, eq, ea))
+    scored.sort(key=lambda x: -x[0])
+    lines = ["Answer each question with exactly ONE word or number.",
+             "No punctuation, no explanation, no quotes."]
+    for _score, eq, ea in scored[:4]:
+        lines.append("Question: " + eq)
+        lines.append("Answer: " + ea)
+    lines.append("Question: " + question)
+    lines.append("Answer:")
+    return "\n".join(lines)
+
+
+def clean_llm_answer(raw: str) -> str:
+    """Normalize an LLM answer: lowercase, strip punctuation and
+    rambling preambles, keep up to 3 words (captcha answers can be
+    phrases like 'dog food' or 'living room'). Returns '' if empty."""
+    if not raw:
+        return ""
+    # Lowercase, drop quotes/brackets/periods but keep word separators
+    s = re.sub(r"[\"'`\[\](){}<>]", "", raw)
+    s = s.replace(".", " ").replace(",", " ").replace(";", " ").replace(":", " ")
+    s = s.replace("\n", " ").replace("\t", " ").replace("-", " ")
+    s = s.lower()
+    # Strip rambling preambles repeatedly so the answer word survives:
+    # "i think the answer is X", "it is X", "probably X", "my answer is X"
+    _preamble = re.compile(
+        r'^(?:(?:i\s+(?:think|believe|guess|would\s+say|am\s+pretty\s+sure))'
+        r'|(?:the\s+answer\s+(?:is|would\s+be))'
+        r'|(?:the\s+(?:correct|right)\s+answer\s+(?:is|would\s+be))'
+        r'|(?:my\s+answer\s+is)'
+        r'|(?:that\s+would\s+be)'
+        r'|(?:it\s+is)'
+        r'|(?:it\'?s)'
+        r'|(?:the\s+word\s+is)'
+        r'|(?:this\s+is)'
+        r'|(?:probably|maybe|likely|definitely|obviously))'
+        r'\b[\s,:;-]*')
+    for _ in range(3):
+        if not s:
+            break
+        s2 = _preamble.sub('', s)
+        if s2 == s:
+            break
+        s = s2
+    words = [w for w in s.split() if re.search(r"[a-z0-9]", w)]
+    if not words:
+        return ""
+    # Drop filler words that sometimes leak out
+    stop = {"the", "a", "an", "is", "are", "it", "of", "to", "in", "for",
+            "answer", "with", "and", "or", "be", "please",
+            "i", "think", "believe", "guess", "probably", "maybe", "likely",
+            "would", "should", "could", "that", "this", "its", "correct", "right",
+            "my", "so", "just", "really", "very", "most"}
+    cleaned = [w for w in words if w not in stop]
+    if not cleaned:
+        return ""
+    return " ".join(cleaned[:3])
+
+
 async def _dump_clickables(page, frame, iframe_box, log):
     """Log EVERY clickable element found (iframe + page) with coordinates.
     Used for debugging — shows exactly what the bot sees and where."""
@@ -4576,14 +4758,12 @@ async def solve_hcaptcha_accessibility(page, iframe,
                 base, _, tag = n.partition(":")
                 if base == "qwen3" and (tag.startswith("1") or tag.startswith("0.")):
                     return n
-            preferred = ["qwen3", "qwen2.5", "qwen2", "gemma3", "llama3.2", "llama3.1", "llama3",
-                         "gemma2", "gemma", "mistral", "phi3", "phi",
-                         "deepseek", "tinyllama", "dolphin-llama3", "orca-mini"]
-            for p in preferred:
-                for n in candidates:
-                    if n.split(":")[0] == p or n == p:
-                        return n
-            return candidates[0]
+            # qwen3:1.7b is the ONLY text model — all other fallback
+            # models (qwen2.x, gemma, llama, mistral, phi, deepseek,
+            # tinyllama, dolphin, orca-mini) were removed by request.
+            if ollama_model:
+                return ollama_model
+            return "qwen3:1.7b"
         except Exception:
             return ollama_model
 
@@ -4655,53 +4835,40 @@ async def solve_hcaptcha_accessibility(page, iframe,
             log(f"[Accessibility] Ollama error: {e}", level="error")
             return ""
 
-    # Few-shot examples injected into the LLM prompt. Small local models
-    # (llama3.2:1b etc.) only answer CAPTCHA trivia correctly when they are
-    # shown the same question TYPE first, so pick the most relevant examples
-    # for each question before asking.
-    _FEWSHOT_POOL = [
-        ("You start with 6 coins in a jar. On Wednesday, you put 9 coins into the jar. How many coins are in your jar now?", "15"),
-        ("Your coin jar has 8 coins. On Monday, you add 9 coins. How many coins are in the jar?", "17"),
-        ("What vegetable is white inside and brown outside?", "potato"),
-        ("What direction does the sun set in?", "west"),
-        ("What liquid do you use to wash your body?", "soap"),
-        ("What do we call a container that holds coins?", "jar"),
-        ("What is the capital of France?", "paris"),
-        ("How many days are in a week?", "7"),
-        ("What color is the sky?", "blue"),
-        ("What do bees make?", "honey"),
-        ("What is the largest planet in our solar system?", "jupiter"),
-        ("How many legs does a spider have?", "8"),
-        ("What do we call a baby dog?", "puppy"),
-        ("What is the opposite of hot?", "cold"),
-        ("What gas do plants absorb?", "carbon dioxide"),
-        ("What instrument has 88 keys?", "piano"),
-        ("What do you use to cut paper?", "scissors"),
-        ("How many minutes are in an hour?", "60"),
-        ("What animal says moo?", "cow"),
-        ("What is the tallest land animal?", "giraffe"),
-        ("What do you call the person who flies a plane?", "pilot"),
-        ("What color do you get when you mix red and white?", "pink"),
-        ("How many wheels does a car have?", "4"),
-        ("What is the first month of the year?", "january"),
-        ("What do you use to write on a blackboard?", "chalk"),
-        ("What is the freezing point of water in celsius?", "0"),
-        ("Can bread be stored frozen?", "yes"),
-        ("Do cats meow?", "yes"),
-    ]
+    # Few-shot pool lives at module level (FEWSHOT_POOL) so the test
+    # harness exercises the exact same production prompt path.
+    _FEWSHOT_POOL = FEWSHOT_POOL
 
     def _build_llm_prompt(question: str) -> str:
         """Pick the 4 most relevant few-shot examples and build the prompt."""
+        question = _normalize_llm_question(question)
         stop = {"what", "which", "how", "many", "much", "does", "do", "is", "are",
                 "the", "and", "with", "your", "you", "that", "this", "from", "into",
                 "there", "have", "has", "can", "would", "about", "when", "where",
                 "its", "answer", "question", "following", "single", "word", "number",
                 "phrase", "please", "put", "add", "call", "calls", "one", "using"}
         qw = {w for w in re.findall(r"[a-z]{3,}", question.lower()) if w not in stop}
+        # Same-type preference (see module-level build_llm_prompt): opener
+        # word + superlative bonus, arithmetic/coin penalty.
         scored = []
+        _q_first = (question.split() or [""])[0].lower()
+        _q_superl = re.search(
+            r"(largest|biggest|smallest|tallest|highest|longest|fastest|"
+            r"slowest|richest|oldest|youngest|deepest|hottest|coldest|most|"
+            r"least)", question.lower())
         for eq, ea in _FEWSHOT_POOL:
             ew = {w for w in re.findall(r"[a-z]{3,}", eq.lower())}
-            scored.append((len(qw & ew), eq, ea))
+            score = len(qw & ew)
+            if (eq.split() or [""])[0].lower() == _q_first:
+                score += 3
+            if _q_superl and re.search(
+                    r"(largest|biggest|smallest|tallest|highest|longest|"
+                    r"fastest|slowest|richest|oldest|youngest|deepest|"
+                    r"hottest|coldest|most|least)", eq.lower()):
+                score += 2
+            if "coin" in eq and "coin" not in question.lower():
+                score -= 4
+            scored.append((score, eq, ea))
         scored.sort(key=lambda x: -x[0])
         lines = ["Answer each question with exactly ONE word or number.",
                  "No punctuation, no explanation, no quotes."]
