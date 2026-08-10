@@ -32,9 +32,14 @@ PROXY_SOURCES = [
     "https://api.proxyscrape.com/v4/free-proxy-list/get?request=displayproxies&protocol=http&timeout=15000&limit=500",
     "https://cdn.jsdelivr.net/gh/proxifly/free-proxy-list@main/proxies/protocols/http/data.txt",
     "https://cdn.jsdelivr.net/gh/proxifly/free-proxy-list@main/proxies/protocols/socks4/data.txt",
+    "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt",
+    "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt",
     "http://pubproxy.com/api/proxy?format=txt&type=http&limit=20",
 ]
-LOCAL_PROXY_FILES = []  # extra proxy files (besides vaultproxies.txt)
+# Extra local proxy files fed into the pool. scrape_free_proxies.py writes
+# free_proxies.txt (validated working free proxies) — the pool picks those
+# up on every refresh alongside the live free-proxy sources above.
+LOCAL_PROXY_FILES = ["free_proxies.txt"]
 
 # Residential proxy sessions file (gitignored). Format: one user:pass@host:port
 # per line. Sessions from vaultproxies.com expire after their TTL — swap in
@@ -167,41 +172,6 @@ def vault_proxies() -> List[Dict[str, str]]:
     return list(out.values())
 
 
-# ── Mullvad gateway proxy ────────────────────────────────────
-# Run Mullvad on an external VPS with /dev/net/tun + root, expose it as a
-# SOCKS5 proxy, then point the Railway container at it via MULLVAD_GATEWAY:
-#   socks5://[user:pass@]host:port
-# All bot browser traffic flows through the VPS's Mullvad tunnel. The VPS
-# also runs a tiny rotate API (MULLVAD_GATEWAY_CONTROL on the app side) so
-# the bot can request a fresh Mullvad server/IP before each attempt.
-_MULLVAD_GATEWAY_RE = re.compile(
-    r"^(socks5|http)://(?:([^:@/]+):([^@/]+)@)?([^:/]+):(\d+)$"
-)
-
-
-def mullvad_gateway() -> Optional[Dict[str, str]]:
-    """Build the Mullvad gateway proxy dict from MULLVAD_GATEWAY env.
-    Returns None when unset or malformed. Marked vault=True so the pool
-    never runs slow online validation against our own gateway."""
-    raw = (os.environ.get("MULLVAD_GATEWAY") or "").strip()
-    if not raw:
-        return None
-    m = _MULLVAD_GATEWAY_RE.match(raw)
-    if not m:
-        return None
-    proto, user, pw, host, port = m.groups()
-    return {
-        "key": raw,
-        "proto": proto,
-        "host": host,
-        "port": port,
-        "username": user or "",
-        "password": pw or "",
-        "vault": True,
-        "mullvad": True,
-    }
-
-
 def configured() -> bool:
     """True when residential proxy sessions are available (vaultproxies.txt
     file or VAULTPROXY_* env vars). Used by app.py to decide whether the
@@ -282,7 +252,6 @@ class ProxyPool:
         self.last_refresh = 0.0
         self.fetched_count = 0
         self.valid_count = 0
-        self.gateway_proxy: Optional[Dict[str, str]] = None
 
     @property
     def count(self) -> int:
@@ -298,19 +267,6 @@ class ProxyPool:
         }
 
     async def refresh(self) -> None:
-        gw = mullvad_gateway()
-        self.gateway_proxy = gw  # exposed so app.py can auto-rotate before each attempt
-        if gw:
-            # Gateway mode: ONLY the Mullvad gateway is used — the bot
-            # rotates via the gateway control API instead of a proxy pool.
-            self.fetched_count = 1
-            self.valid_count = 1
-            self._proxies = [gw]
-            self._used_at = {}
-            self._failed = set()
-            self.last_refresh = time.time()
-            return
-        self.gateway_proxy = None
         vault = vault_proxies()
         fetched = await fetch_free_proxies(max_proxies=500)
         self.fetched_count = len(fetched) + len(vault)
@@ -340,9 +296,7 @@ class ProxyPool:
     def release(self, proxy: Optional[Dict[str, str]], ok: bool = True) -> None:
         if proxy is None:
             return
-        # The Mullvad gateway is the ONLY proxy in gateway mode - it must stay
-        # available even after failed attempts (rotation happens on the VPS).
-        if not ok and not proxy.get("mullvad"):
+        if not ok:
             self._failed.add(proxy.get("key"))
 
 

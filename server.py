@@ -248,11 +248,6 @@ class DiscordAutomation:
             p = self.proxy
             server = f"{p.get('proto', 'http')}://{p.get('host')}:{p.get('port')}"
             self._log(f"Proxy: {server} (auth={'yes' if p.get('username') else 'no'})")
-        elif self.proxy is None and os.environ.get("MULLVAD_LOGIN", "").strip():
-            # Mullvad VPN mode: VPN routes ALL traffic at system level.
-            # No proxy or TOR needed — the browser goes direct and the
-            # VPN tunnel handles IP rotation transparently.
-            self._log("[VPN] Mullvad direct mode — traffic routed through VPN tunnel, no proxy needed")
         elif _tor_check():
             self._tor_enabled = True
             self._log("[TOR] Using TOR SOCKS5 proxy...")
