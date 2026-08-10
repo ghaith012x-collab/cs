@@ -210,7 +210,7 @@ async def _run_worker(wid: str, cfg: dict, proxy=None) -> None:
 
             # ── Clean up temp-mail session between attempts to prevent
             # aiohttp connector leaks (each failed attempt creates a new
-            # duckmail inbox that must be closed).
+            # cybertemp inbox that must be closed).
             if bot._mail is not None:
                 try:
                     await bot._mail.close()
@@ -592,7 +592,7 @@ h3{font-size:12px;color:var(--dim);text-transform:uppercase;letter-spacing:1px;m
   </div>
   <h3>Live Cams</h3>
   <div class="cams" id="cams"></div>
-  <div class="footer">Eyes GEN &middot; each browser: fresh proxy + duckmail inbox + full token capture</div>
+  <div class="footer">Eyes GEN &middot; each browser: fresh proxy + cybertemp inbox (@vibify.cc) + full token capture</div>
 </div>
 
 <div id="tabTokens" class="tab">

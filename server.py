@@ -19,7 +19,7 @@ from captcha_solver import (
     solve_funcaptcha_pixels,
     solve_hcaptcha_accessibility,
 )
-from duckmail import TempMail
+from cybertemp import TempMail
 
 
 # ── TOR Control ───────────────────────────────────────────
@@ -551,11 +551,12 @@ class DiscordAutomation:
             await self.initialize()
 
         # No hardcoded email - use the configured email, or fall back to a
-        # fresh duckmail.sbs address (@glasswhitehub.com) when none is provided.
+        # fresh cybertemp.xyz address (@vibify.cc) when none is provided.
         if not self._email:
-            self._log("[Mail] No email configured - creating duckmail.sbs inbox...")
+            self._log("[Mail] No email configured - creating cybertemp.xyz inbox (@vibify.cc)...")
             try:
-                self._mail = TempMail(log=self._log)
+                self._mail = TempMail(log=self._log, proxy=self.proxy,
+                                      headless=self.headless)
                 self._email = await self._mail.create_inbox()
             except Exception as e:
                 self._log(f"[Mail] inbox creation error: {e}", level="error")
@@ -583,7 +584,7 @@ class DiscordAutomation:
                 success = await self._solve_hcaptcha_if_present()
                 if success:
                     self._log("[OK] CAPTCHA SOLVED! Registration submitted.")
-                    # Auto-verify: complete Discord email verification via duckmail.sbs
+                    # Auto-verify: complete Discord email verification via cybertemp.xyz
                     await self._verify_account_email()
                     # Login + grab the FULL token from localStorage
                     self._token = await self._extract_token()
