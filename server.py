@@ -364,7 +364,8 @@ class DiscordAutomation:
             (not page_title and "error" in (page_url or "").lower())
         )
         if dead_proxy:
-            self._log(f"[Nav] TOR CIRCUIT DEAD (url={page_url[:60]}) - rotating to fresh TOR circuit", level="warn")
+            proxy_label = "PROXY SESSION" if self.proxy else "TOR CIRCUIT"
+            self._log(f"[Nav] {proxy_label} DEAD (url={page_url[:60]}) - rotating to fresh circuit", level="warn")
             return False
 
         # ── Quick body text check (403/Forbidden/Cloudflare) ──
@@ -484,7 +485,8 @@ class DiscordAutomation:
                         and not (state.get("textPreview") or "").strip()):
                     blank_streak += 1
                     if blank_streak >= 20:
-                        self._log("[Nav] BLANK RENDER for 20s (SPA mounted, no content) - TOR exit likely dead/rate-limited - rotating circuit", level="warn")
+                        proxy_label = "proxy session" if self.proxy else "TOR exit"
+                        self._log(f"[Nav] BLANK RENDER for 20s (SPA mounted, no content) - {proxy_label} likely dead/rate-limited - rotating circuit", level="warn")
                         return False
                 else:
                     blank_streak = 0
@@ -526,7 +528,8 @@ class DiscordAutomation:
         except Exception:
             pass
 
-        self._log("[Nav] Form did not render within 30s - rotating to fresh TOR circuit", level="warn")
+        proxy_label = "fresh proxy session" if self.proxy else "fresh TOR circuit"
+        self._log(f"[Nav] Form did not render within 30s - rotating to {proxy_label}", level="warn")
         return False
 
     async def capture_screenshot(self) -> str:

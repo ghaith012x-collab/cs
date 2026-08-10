@@ -150,6 +150,7 @@ async def _run_worker(wid: str, cfg: dict, proxy=None) -> None:
     max_tries = 30 if PROXY_FORCE else 12
 
     bot = None
+    consecutive_tunnel_fails = 0  # fast-fail after consecutive dead connections
 
     for attempt in range(max_tries):
         if not _running:
@@ -204,6 +205,17 @@ async def _run_worker(wid: str, cfg: dict, proxy=None) -> None:
             cam_task = asyncio.create_task(_worker_capture_loop(wid, cfg, stagger * int(cfg.get("camera_interval", 3))))
             ok = await bot.start_discord_signup()
             cam_task.cancel()
+
+            # ── Clean up temp-mail session between attempts to prevent
+            # aiohttp connector leaks (each failed attempt creates a new
+            # duckmail inbox that must be closed).
+            if bot._mail is not None:
+                try:
+                    await bot._mail.close()
+                except Exception:
+                    pass
+                bot._mail = None
+
             acc = bot.get_account()
             state["email"] = acc["email"]
             state["username"] = acc["username"]
@@ -225,6 +237,17 @@ async def _run_worker(wid: str, cfg: dict, proxy=None) -> None:
                 _log(f"[{wid}] Signup ok (no token yet)")
                 if bot: await bot.close()
                 return
+
+            # ── Track consecutive tunnel failures ──
+            err_tag = state.get("proxy", "").lower()
+            if not ok and any(k in err_tag for k in ("tor", "proxy")):
+                consecutive_tunnel_fails += 1
+                if consecutive_tunnel_fails >= 4:
+                    _log(f"[{wid}] {consecutive_tunnel_fails} consecutive tunnel failures — aborting (all sessions appear dead)", level="error")
+                    break
+            else:
+                consecutive_tunnel_fails = 0
+
             _log(f"[{wid}] Failed (attempt {attempt+1}/{max_tries}, {label})", level="warn")
         except Exception as e:
             state["status"] = "error"
