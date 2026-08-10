@@ -1126,12 +1126,14 @@ class DiscordAutomation:
             await human_type(self._page, 'input[name="email"]', self._email)
             await asyncio.sleep(random.uniform(0.5, 1.2))
 
-            # Generate username
+            # Generate username with random digits suffix (more human-like)
             consonants = 'bcdfghjklmnpqrstvwxyz'
             vowels = 'aeiou'
             username = ''
             for _ in range(random.randint(8, 12)):
                 username += random.choice(vowels if random.random() < 0.35 else consonants)
+            # Add 3-4 random digits so Discord doesn't flag as bot-pattern
+            username += str(random.randint(100, 9999))
             self._username = username
             display_name = self._username[:15]
 

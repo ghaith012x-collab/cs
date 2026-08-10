@@ -1,24 +1,16 @@
 """
-duckmail.py — fast temp-mail REST client.
+duckmail.py — fast temp-mail REST client using duckmail.sbs.
 
-Provider priority (tried in order):
-  1. cybertemp.xyz        — GET /getDomains → pick domain → GET /getMail?email=
-  2. duckmail.sbs         — POST /accounts → POST /token → GET /messages  
-  3. mail.tm              — same Hydra envelope as duckmail (fallback)
-
-CyberTemp is simpler (no account creation needed — just poll /getMail) but
-requires a paid API key (CYBERTEMP_API_KEY env var). When the key is missing
-or CyberTemp is unreachable, duckmail.sbs takes over automatically.
+Provider: duckmail.sbs → glasswhitehub.com domain (Hydra API).
 
 Discord signup flow:
-  1. create_inbox()                  -> random addr@glasswhitehub.com (or CyberTemp domain)
+  1. create_inbox()                  -> random addr@glasswhitehub.com
   2. (Discord registration happens)
   3. wait_for_verification_link()    -> polls inbox, extracts the verify URL
 """
 
 import asyncio
 import json
-import os
 import random
 import re
 import string
@@ -27,9 +19,7 @@ from typing import Callable, Optional
 
 import aiohttp
 
-CYBERTEMP_BASE = "https://api.cybertemp.xyz"
 DUCKMAIL_BASE = "https://api.duckmail.sbs"
-MAILTM_BASE = "https://api.mail.tm"
 # duckmail.sbs delivers to @glasswhitehub.com (user-requested domain)
 DUCKMAIL_DOMAIN = "glasswhitehub.com"
 
@@ -64,11 +54,10 @@ class TempMail:
     def __init__(self, log: Optional[Callable] = None):
         self._log = log or (lambda msg, level="info": None)
         self._session: Optional[aiohttp.ClientSession] = None
-        self._provider = ""        # 'cybertemp' | 'duckmail' | 'mailtm'
+        self._provider = ""        # 'duckmail'
         self._address = ""
         self._password = ""
-        self._token = ""           # JWT for duckmail/mailtm; empty for cybertemp
-        self._cybertemp_key = (os.environ.get("CYBERTEMP_API_KEY") or "").strip()
+        self._token = ""           # JWT for duckmail
 
     # ── Public API ────────────────────────────────────────
 
@@ -81,31 +70,10 @@ class TempMail:
         return self._provider or "none"
 
     async def create_inbox(self, timeout: float = 40.0) -> str:
-        """Create a fresh mailbox. Returns the address, or '' on failure.
-
-        Tries CyberTemp first (fastest, no account creation), then
-        duckmail.sbs (glasswhitehub.com), then mail.tm.
-        """
-        # ── 1. CyberTemp (primary — no account creation needed) ──
-        if self._cybertemp_key:
-            if await self._create_cybertemp(timeout):
-                return self._address
-            self._log("[Mail] CyberTemp unavailable — falling back to duckmail.sbs",
-                      level="warn")
-        else:
-            self._log("[Mail] No CYBERTEMP_API_KEY — skipping CyberTemp, "
-                      "trying duckmail.sbs directly", level="info")
-
-        # ── 2. duckmail.sbs (glasswhitehub.com) ──
+        """Create a fresh mailbox at @glasswhitehub.com via duckmail.sbs."""
         if await self._create_on(DUCKMAIL_BASE, "duckmail", timeout):
             return self._address
-        self._log("[Mail] duckmail.sbs unavailable — falling back to mail.tm",
-                  level="warn")
-
-        # ── 3. mail.tm (last resort) ──
-        if await self._create_on(MAILTM_BASE, "mailtm", timeout):
-            return self._address
-        self._log("[Mail] All temp-mail providers failed", level="error")
+        self._log("[Mail] duckmail.sbs unavailable", level="error")
         return ""
 
     async def wait_for_verification_link(
@@ -114,7 +82,7 @@ class TempMail:
     ) -> Optional[str]:
         """Poll the inbox until a matching message arrives, then return its
         Discord verification URL (or None on timeout)."""
-        if not self._token and self._provider != "cybertemp":
+        if not self._token:
             self._log("[Mail] No inbox token — cannot poll", level="warn")
             return None
         deadline = time.time() + timeout
@@ -135,7 +103,7 @@ class TempMail:
             except Exception as e:
                 self._log(f"[Mail] poll error: {e}", level="warn")
                 # token may have expired — try to refresh once
-                if self._token and self._provider and self._provider != "cybertemp":
+                if self._token and self._provider:
                     await self._login()
             await asyncio.sleep(poll)
         self._log(f"[Mail] No {keyword} verification email within {int(timeout)}s",
@@ -150,102 +118,13 @@ class TempMail:
                 pass
             self._session = None
 
-    # ── CyberTemp provider ───────────────────────────────
-
-    async def _create_cybertemp(self, timeout: float) -> bool:
-        """Create a CyberTemp inbox: pick a domain, generate address, done.
-
-        No account registration needed — the inbox is implicitly created
-        on the first GET /getMail call."""
-        deadline = time.time() + timeout
-        domain = await self._pick_cybertemp_domain()
-        if not domain:
-            self._log("[Mail] CyberTemp: no domains available", level="warn")
-            return False
-
-        while time.time() < deadline:
-            rand = "".join(_EMAIL_RANDOM.choices(
-                string.ascii_lowercase + string.digits,
-                k=_EMAIL_RANDOM.randint(10, 14)))
-            address = f"dm{rand}@{domain}"
-            # Test that the inbox is reachable (first poll returns empty array)
-            try:
-                msgs = await self._list_cybertemp_messages(address)
-                if isinstance(msgs, list):
-                    self._provider = "cybertemp"
-                    self._address = address
-                    self._password = ""
-                    self._token = ""
-                    self._log(f"[Mail] [OK] Inbox ready: {address} (cybertemp)")
-                    return True
-            except Exception:
-                pass
-            await asyncio.sleep(0.3)
-        return False
-
-    async def _pick_cybertemp_domain(self) -> str:
-        try:
-            status, data = await self._request_cybertemp(
-                "GET", "/getDomains", auth=True)
-            if 200 <= status < 300:
-                if isinstance(data, list) and data:
-                    return str(data[0])
-                if isinstance(data, dict):
-                    domains = (data.get("domains") or data.get("data") or [])
-                    if isinstance(domains, list) and domains:
-                        first = domains[0]
-                        return first if isinstance(first, str) else str(first.get("domain", first))
-        except Exception:
-            pass
-        return "cybertemp.xyz"  # fallback
-
-    async def _list_cybertemp_messages(self, address: str = "") -> list:
-        addr = address or self._address
-        status, data = await self._request_cybertemp(
-            "GET", f"/getMail?email={addr}", auth=True)
-        if status != 200:
-            return []
-        if isinstance(data, list):
-            return data
-        # Some versions wrap in {"messages": [...]}
-        msgs = data.get("messages") or data.get("data") or []
-        return msgs if isinstance(msgs, list) else []
-
-    async def _request_cybertemp(self, method: str, path: str,
-                                  auth: bool = True) -> tuple:
-        """HTTP request to api.cybertemp.xyz with API key auth."""
-        if self._session is None:
-            self._session = aiohttp.ClientSession()
-        headers = {"Accept": "application/json"}
-        if auth and self._cybertemp_key:
-            headers["X-API-Key"] = self._cybertemp_key
-        try:
-            async with self._session.request(
-                method, f"{CYBERTEMP_BASE}{path}", headers=headers,
-                timeout=aiohttp.ClientTimeout(total=25),
-            ) as resp:
-                text = await resp.text()
-                try:
-                    data = json.loads(text) if text else {}
-                except Exception:
-                    data = {}
-                return resp.status, data
-        except Exception as e:
-            self._log(f"[Mail] CyberTemp HTTP {method} {path} error: {e}",
-                      level="warn")
-            return 0, {}
-
-    # ── duckmail.sbs / mail.tm providers (Hydra API) ─────
+    # ── duckmail.sbs provider (Hydra API) ─────────────────
 
     async def _create_on(self, base: str, provider: str,
                          timeout: float) -> bool:
-        """Try to create + authorize a mailbox on one provider (Hydra API)."""
+        """Create + authorize a mailbox on duckmail.sbs (Hydra API)."""
         deadline = time.time() + timeout
         domain = DUCKMAIL_DOMAIN
-        if provider == "mailtm":
-            domain = await self._pick_mailtm_domain()
-            if not domain:
-                return False
 
         tries = 0
         while time.time() < deadline:
@@ -276,24 +155,10 @@ class TempMail:
             await asyncio.sleep(0.6)
         return False
 
-    async def _pick_mailtm_domain(self) -> str:
-        try:
-            status, data = await self._request(
-                MAILTM_BASE, "GET", "/domains", auth=False)
-            if 200 <= status < 300:
-                domains = data.get("hydra:member", []) if isinstance(data, dict) else data
-                if isinstance(domains, list) and domains:
-                    domain = domains[0].get("domain") if isinstance(domains[0], dict) else str(domains[0])
-                    if domain:
-                        return domain
-        except Exception:
-            pass
-        return DUCKMAIL_DOMAIN
-
     async def _login(self) -> bool:
-        if not self._provider or self._provider == "cybertemp":
-            return True  # CyberTemp uses API key, not JWT
-        base = DUCKMAIL_BASE if self._provider == "duckmail" else MAILTM_BASE
+        if not self._provider:
+            return False
+        base = DUCKMAIL_BASE
         status, data = await self._request(
             base, "POST", "/token",
             body={"address": self._address, "password": self._password},
@@ -311,10 +176,7 @@ class TempMail:
     async def _list_messages(self) -> list:
         if not self._provider:
             return []
-        # Route to correct provider
-        if self._provider == "cybertemp":
-            return await self._list_cybertemp_messages()
-        base = DUCKMAIL_BASE if self._provider == "duckmail" else MAILTM_BASE
+        base = DUCKMAIL_BASE
         status, data = await self._request(
             base, "GET", "/messages?itemsPerPage=30")
         if status != 200:
@@ -327,11 +189,7 @@ class TempMail:
     async def _fetch_message(self, msg_id: str) -> dict:
         if not self._provider:
             return {}
-        if self._provider == "cybertemp":
-            # CyberTemp messages already include full body in list — no
-            # separate fetch needed. Return empty dict gracefully.
-            return {}
-        base = DUCKMAIL_BASE if self._provider == "duckmail" else MAILTM_BASE
+        base = DUCKMAIL_BASE
         status, data = await self._request(base, "GET", f"/messages/{msg_id}")
         return data if isinstance(data, dict) else {}
 
@@ -366,17 +224,11 @@ class TempMail:
                 v = body.get(k)
                 if isinstance(v, str):
                     parts.append(v)
-        # CyberTemp uses "html" at top level too
-        html = msg.get("html")
-        if isinstance(html, str):
-            parts.append(html)
         frm = msg.get("from")
         if isinstance(frm, dict):
             parts.append(str(frm.get("address", "")))
-        # CyberTemp "from" can be a plain string
-        if isinstance(frm, str):
-            parts.append(frm)
-        for to in msg.get("to", []) or []:
+
+        for to in (msg.get("to") or []):
             if isinstance(to, dict):
                 parts.append(str(to.get("address", "")))
             elif isinstance(to, str):
