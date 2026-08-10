@@ -21,7 +21,19 @@ from typing import Dict, List, Optional
 import aiohttp
 
 # ── Public free-proxy sources (raw text) ──
-PROXY_SOURCES = []  # no free proxy fetching — vault residential sessions + TOR
+# These are FREE and rotate automatically. Quality is low (most will fail
+# validation, and Discord/Cloudflare blocks known datacenter IPs), but they
+# cost nothing and the pool validates every proxy before use.
+#
+# ProxyScrape v4 — most reliable free source, returns raw ip:port per line.
+# Proxifly — GitHub-hosted txt files updated every 5 min (CDN, no rate limit).
+# PubProxy — REST API with format=txt for raw output.
+PROXY_SOURCES = [
+    "https://api.proxyscrape.com/v4/free-proxy-list/get?request=displayproxies&protocol=http&timeout=15000&limit=500",
+    "https://cdn.jsdelivr.net/gh/proxifly/free-proxy-list@main/proxies/protocols/http/data.txt",
+    "https://cdn.jsdelivr.net/gh/proxifly/free-proxy-list@main/proxies/protocols/socks4/data.txt",
+    "http://pubproxy.com/api/proxy?format=txt&type=http&limit=20",
+]
 LOCAL_PROXY_FILES = []  # extra proxy files (besides vaultproxies.txt)
 
 # Residential proxy sessions file (gitignored). Format: one user:pass@host:port
