@@ -1,10 +1,11 @@
 """
-db.py — Postgres persistence for Eyes GEN.
+db.py — Postgres persistence for EY3.
 
 Uses DATABASE_URL (env).  Auto-migrates on startup (CREATE TABLE IF NOT EXISTS).
 Stores every generated account: email, username, password, FULL token, proxy
-used and validation status.  Also validates tokens against the Discord API so
-the dashboard can show a live "valid tokens" count.
+used, Discord user id, avatar, bio, humanization flag and validation status.
+Also validates tokens against the Discord API so the dashboard can show a
+live "valid tokens" count.
 """
 import asyncio
 import os
@@ -46,6 +47,19 @@ async def init_db() -> bool:
                 CREATE INDEX IF NOT EXISTS idx_accounts_status
                 ON accounts (status);
             """)
+            # EY3 additions (safe on existing databases)
+            for col, ddl in (
+                ("user_id", "TEXT DEFAULT ''"),
+                ("avatar", "TEXT DEFAULT ''"),
+                ("bio", "TEXT DEFAULT ''"),
+                ("humanized", "BOOLEAN DEFAULT FALSE"),
+            ):
+                try:
+                    await conn.execute(
+                        f"ALTER TABLE accounts ADD COLUMN IF NOT EXISTS {col} {ddl}"
+                    )
+                except Exception:
+                    pass
         _db_ready = True
         print("[DB] Connected - accounts table ready", flush=True)
         return True
@@ -60,7 +74,9 @@ def db_ok() -> bool:
 
 
 async def save_account(email: str, username: str, password: str,
-                       token: str, proxy: str = "", worker_id: str = "") -> bool:
+                       token: str, proxy: str = "", worker_id: str = "",
+                       user_id: str = "", avatar: str = "", bio: str = "",
+                       humanized: bool = False) -> bool:
     """Persist a generated account. Never raises."""
     if not db_ok():
         return False
@@ -69,10 +85,12 @@ async def save_account(email: str, username: str, password: str,
             await conn.execute(
                 """
                 INSERT INTO accounts (email, username, password, token,
-                                      status, proxy, worker_id)
-                VALUES ($1, $2, $3, $4, 'pending', $5, $6)
+                                      status, proxy, worker_id, user_id,
+                                      avatar, bio, humanized)
+                VALUES ($1, $2, $3, $4, 'pending', $5, $6, $7, $8, $9, $10)
                 """,
                 email, username, password, token, proxy, worker_id,
+                user_id, avatar, bio, humanized,
             )
         return True
     except Exception as e:
@@ -86,8 +104,8 @@ async def list_accounts(limit: int = 200) -> List[dict]:
     try:
         async with _pool.acquire() as conn:
             rows = await conn.fetch(
-                """SELECT email, username, password, token, status, proxy,
-                          worker_id, created_at
+                """SELECT id, email, username, password, token, status, proxy,
+                          worker_id, created_at, user_id, avatar, bio, humanized
                    FROM accounts ORDER BY id DESC LIMIT $1""",
                 limit,
             )
@@ -108,6 +126,20 @@ async def update_account_status(token: str, status: str) -> None:
             )
     except Exception:
         pass
+
+
+async def delete_accounts(ids: List[int]) -> int:
+    """Delete accounts by primary key id. Returns the number requested."""
+    if not db_ok() or not ids:
+        return 0
+    try:
+        async with _pool.acquire() as conn:
+            await conn.execute(
+                "DELETE FROM accounts WHERE id = ANY($1::int[])", ids)
+        return len(ids)
+    except Exception as e:
+        print(f"[DB] delete_accounts error: {e}", flush=True)
+        return 0
 
 
 async def validate_token(token: str) -> bool:
@@ -136,10 +168,8 @@ async def validate_all_tokens(accounts: List[dict]) -> int:
             return False
         async with sem:
             ok = await validate_token(acc["token"])
-            if ok:
-                return True
-            await update_account_status(acc["token"], "invalid")
-            return False
+            await update_account_status(acc["token"], "valid" if ok else "invalid")
+            return ok
 
     results = await asyncio.gather(
         *[_check(a) for a in accounts], return_exceptions=True

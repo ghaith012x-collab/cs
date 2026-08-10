@@ -77,6 +77,19 @@ USER_AGENTS = [
 
 PAST_CAPTCHA_KEYWORDS = ['/channels', '/verify', '/welcome', '/login', '@me', 'discord.com/app']
 
+_BIO_POOL = [
+    "just vibing",
+    "professional sleeper",
+    "i like turtles",
+    "certified yapper",
+    "caffeine powered",
+    "music > everything",
+    "gamer for life",
+    "casually existing",
+    "be nice or leave",
+    "no thoughts, only vibes",
+]
+
 import stealth
 from stealth import (
     apply_cdp_stealth,
@@ -181,9 +194,10 @@ def generate_fingerprint(worker_id: str, session_seed: str = "") -> dict:
 
 class DiscordAutomation:
     def __init__(self, headless: bool = False, email: str = "",
-                 proxy=None, worker_id: str = "B1"):
+                 proxy=None, worker_id: str = "B1", domain: str = "vibify.cc"):
         self.headless = headless
         self.worker_id = worker_id
+        self._domain = (domain or "vibify.cc").strip().lower() or "vibify.cc"
         # proxy: dict {proto, host, port, username, password, key} or None
         self.proxy = proxy
         self._playwright = None
@@ -200,6 +214,10 @@ class DiscordAutomation:
         self._token = ""
         self._solver = NoCaptchaAI(log=self._log)
         self._mail: Optional[TempMail] = None
+        self._user_id = ""
+        self._avatar_data = ""
+        self._bio = ""
+        self._humanized = False
 
     def _log(self, message: str, level: str = "info") -> None:
         tagged = f"[{self.worker_id}] {message}"
@@ -553,10 +571,10 @@ class DiscordAutomation:
         # No hardcoded email - use the configured email, or fall back to a
         # fresh cybertemp.xyz address (@vibify.cc) when none is provided.
         if not self._email:
-            self._log("[Mail] No email configured - creating cybertemp.xyz inbox (@vibify.cc)...")
+            self._log("[Mail] No email configured - creating cybertemp.xyz inbox (@%s)..." % self._domain)
             try:
                 self._mail = TempMail(log=self._log, proxy=self.proxy,
-                                      headless=self.headless)
+                                      headless=self.headless, domain=self._domain)
                 self._email = await self._mail.create_inbox()
             except Exception as e:
                 self._log(f"[Mail] inbox creation error: {e}", level="error")
@@ -574,6 +592,7 @@ class DiscordAutomation:
             if not await self._goto_register():
                 self._log("[FAIL] Could not navigate to Discord /register - aborting", level="error")
                 return False
+            self._log("[Nav] Discord site rendered")
             await asyncio.sleep(3)
             await self.capture_screenshot()
 
@@ -590,6 +609,9 @@ class DiscordAutomation:
                     self._token = await self._extract_token()
                     if self._token:
                         self._log("[Token] [OK] Full token captured")
+                        self._log(f"[Account] @{self._username or self._email.split('@')[0]} is in Discord and confirmed")
+                        self._log(f"[Account] Email={self._email} | User={self._username} | Pass={self._password} | Date={time.strftime('%Y-%m-%d %H:%M')}")
+                        await self._humanize_account()
                     else:
                         self._log("[Token] No token yet (account may still be pending)", level="warn")
                 else:
@@ -1575,6 +1597,11 @@ class DiscordAutomation:
             "token": self._token,
             "proxy": self.proxy,
             "worker_id": self.worker_id,
+            "user_id": self._user_id,
+            "avatar": self._avatar_data,
+            "bio": self._bio,
+            "humanized": self._humanized,
+            "domain": self._domain,
         }
 
     async def close(self) -> None:

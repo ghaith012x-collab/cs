@@ -73,7 +73,7 @@ def _build_fingerprint() -> dict:
                               .encode()).hexdigest(), 16)
     ua = _UA_POOL[seed % len(_UA_POOL)]
     profile = _LOCALE_PROFILES[seed % len(_LOCALE_PROFILES)]
-    gpu = pick_gpu(ua_platform(ua), seed)
+    gpu = pick_gpu(ua_platform(ua)["ch_platform"], seed)
     return {
         "font": "Arial",
         "canvas_noise": 0,
@@ -101,12 +101,14 @@ class TempMail:
     """
 
     def __init__(self, log: Optional[Callable] = None,
-                 proxy: Optional[dict] = None, headless: bool = True):
+                 proxy: Optional[dict] = None, headless: bool = True,
+                 domain: str = CYBERTEMP_DOMAIN):
         self._log = log or (lambda msg, level="info": None)
         # proxy: dict {proto, host, port, username, password} — same shape the
         # worker passes to build_context_options (rides the same residential IP).
         self._proxy = proxy
         self.headless = headless
+        self._domain = (domain or CYBERTEMP_DOMAIN).strip().lower() or CYBERTEMP_DOMAIN
         self._playwright = None
         self._browser = None
         self._context = None
@@ -133,7 +135,7 @@ class TempMail:
             await self._goto_site()
             local = "".join(_EMAIL_RANDOM.choices(
                 string.ascii_lowercase + string.digits, k=12))
-            addr = f"{local}@{CYBERTEMP_DOMAIN}"
+            addr = f"{local}@{self._domain}"
             real = await self._set_address(addr, timeout=timeout)
             if real:
                 self._address = real
@@ -295,9 +297,13 @@ class TempMail:
         #    full address (the site accepts a complete address too).
         domain_ok = False
         try:
+            root = self._domain.split(".")[0]
             res = await asyncio.wait_for(self._page.evaluate(
-                """async () => {
-                    const pick = (t) => t.toLowerCase().includes('vibify');
+                """async (wanted, root) => {
+                    const pick = (t) => {
+                        const s = t.toLowerCase();
+                        return s.includes(wanted) || s === root || s.includes('.' + root);
+                    };
                     const known = /(andrewcluh|vibify|boostwave|[a-z0-9-]+\\.(cc|top|xyz|com))/i;
                     const els = Array.from(document.querySelectorAll('div,span,button,li,[role="button"],option'));
                     let clicked = false;
@@ -314,12 +320,12 @@ class TempMail:
                         if (pick(t) && el.offsetParent !== null) { el.click(); return 'selected'; }
                     }
                     return 'option_not_found';
-                }"""), timeout=10.0)
+                }""", self._domain, root), timeout=10.0)
             domain_ok = res == "selected"
         except Exception:
             domain_ok = False
         if domain_ok:
-            self._log("[Mail] vibify.cc selected in domain dropdown")
+            self._log(f"[Mail] {self._domain} selected in domain dropdown")
 
         local = addr.split("@")[0]
         fill_value = local if domain_ok else addr
@@ -347,8 +353,8 @@ class TempMail:
             real = ""
         if not real:
             real = addr
-        elif "vibify" not in real:
-            self._log(f"[Mail] Composed address is {real} (not @vibify.cc) "
+        elif self._domain not in real:
+            self._log(f"[Mail] Composed address is {real} (not @{self._domain}) "
                       f"— continuing with it", level="warn")
         return real
 
