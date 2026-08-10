@@ -730,8 +730,9 @@ class DiscordAutomation:
     async def _solve_hcaptcha_if_present(self) -> bool:
         """Detect and solve the hCaptcha challenge.
 
-        Drag puzzles are solved in-browser with real mouse movement. Checkbox
-        widgets are solved via the NoCaptchaAI token API (sitekey + pageurl).
+        Smart detection: polls the DOM every second with real JS introspection.
+        Knows the difference between widget-loading, challenge-loading, and
+        challenge-ready states. Waits up to 60s for the challenge to fully render.
         """
         try:
             self._log("[Captcha] Checking for hCaptcha...")
@@ -740,56 +741,102 @@ class DiscordAutomation:
                 self._log(f"[Captcha] Already past captcha - at {self._page.url[:50]}")
                 return True
 
-            # ── Wait for the captcha widget to load: poll the iframe so a
-            # fast-loading widget doesn't cost a fixed 8s (hard cap 8s) ──
-            self._log("[Captcha] Waiting for hCaptcha widget to load (poll, max 8s)...")
-            for _wi in range(16):
-                try:
-                    if await self._page.query_selector('iframe[src*="hcaptcha.com"]'):
-                        break
-                except Exception:
-                    pass
-                if await self._past_captcha():
-                    break
-                await asyncio.sleep(0.5)
-
-            # Check if already past captcha after waiting
-            if await self._past_captcha():
-                self._log(f"[Captcha] Page moved past captcha - at {self._page.url[:50]}")
-                return True
-
-            # Find the captcha iframe
+            # ── Phase 1: Wait for ANY hCaptcha iframe to appear (widget or challenge) ──
+            # The widget iframe (newassets.hcaptcha.com) loads first, then the
+            # challenge iframe loads inside it. We poll every 1s for up to 60s.
+            self._log("[Captcha] Waiting for hCaptcha to load (polling DOM every 1s, max 60s)...")
+            deadline = time.time() + 60.0
+            last_state = "waiting"
             iframe = None
-            for attempt in range(6):
-                try:
-                    iframe_el = await asyncio.wait_for(
-                        self._page.query_selector('iframe[src*="hcaptcha.com"]'),
-                        timeout=2.0
-                    )
-                except:
-                    iframe_el = None
-                if iframe_el:
-                    self._log(f"[Captcha] hCaptcha iframe found (attempt {attempt+1})")
-                    iframe = iframe_el
-                    break
+
+            while time.time() < deadline:
                 if await self._past_captcha():
-                    self._log(f"[Captcha] Page navigated to {self._page.url[:50]} - no captcha needed")
+                    self._log(f"[Captcha] Already past captcha — at {self._page.url[:50]}")
                     return True
-                # Fast-fail: if Discord is rate-limiting this TOR exit node it
-                # replies with text like "rate limited" instead of a captcha.
+
+                # Use JS to introspect the real hCaptcha state on the page
                 try:
-                    rl = await asyncio.wait_for(
-                        self._page.evaluate("() => document.body ? document.body.innerText.substring(0, 400) : ''"),
-                        timeout=1.5)
-                    rl_l = (rl or "").lower()
-                    if any(k in rl_l for k in ("rate limit", "ratelimited", "too many requests",
-                                               "slowdown", "try again later", "you are being rate", "429")):
-                        self._log("[Captcha] RATE LIMITED after submit - rotating TOR circuit", level="warn")
-                        return False
+                    state = await self._page.evaluate("""() => {
+                        // Check for hCaptcha widget iframe (the container)
+                        const widgetFrame = document.querySelector('iframe[src*="newassets.hcaptcha.com"]');
+                        // Check for hCaptcha challenge iframe (the actual puzzle)
+                        const challengeFrame = document.querySelector('iframe[src*="hcaptcha-challenge"], iframe[title*="hCaptcha challenge"]');
+                        // Check for anchor/hidden iframe (checkbox mode)
+                        const anchorFrame = document.querySelector('iframe[src*="hcaptcha.com/1/api"]');
+                        // Check for the captcha container div
+                        const captchaDiv = document.querySelector('[data-hcaptcha-widget-id], .h-captcha');
+
+                        return {
+                            hasWidget: !!widgetFrame,
+                            hasChallenge: !!challengeFrame,
+                            hasAnchor: !!anchorFrame,
+                            hasContainer: !!captchaDiv,
+                            widgetSrc: widgetFrame ? widgetFrame.src.substring(0, 80) : '',
+                            challengeSrc: challengeFrame ? (challengeFrame.src || challengeFrame.title || 'present').substring(0, 60) : '',
+                            widgetVisible: widgetFrame ? (widgetFrame.offsetParent !== null) : false,
+                            challengeVisible: challengeFrame ? (challengeFrame.offsetParent !== null) : false,
+                            frameCount: document.querySelectorAll('iframe').length,
+                            bodyText: (document.body ? document.body.innerText.substring(0, 200) : '').toLowerCase(),
+                        };
+                    }""", timeout=3000)
+                except Exception as e:
+                    state = {"hasWidget": False, "hasChallenge": False, "error": str(e)[:60]}
+
+                # ── Fast-fail: rate limiting ──
+                body = state.get("bodyText", "")
+                if any(k in body for k in ("rate limit", "ratelimited", "too many requests",
+                                           "slowdown", "try again later", "you are being rate")):
+                    self._log("[Captcha] RATE LIMITED — rotating circuit", level="warn")
+                    return False
+
+                # ── State machine ──
+                new_state = "waiting"
+                if state.get("hasChallenge") and state.get("challengeVisible"):
+                    new_state = "challenge-ready"
+                elif state.get("hasChallenge"):
+                    new_state = "challenge-loading"
+                elif state.get("hasWidget"):
+                    new_state = "widget-loaded"
+                elif state.get("hasContainer") or state.get("hasAnchor"):
+                    new_state = "widget-loading"
+
+                if new_state != last_state:
+                    self._log(f"[Captcha] State: {last_state} → {new_state}")
+                    last_state = new_state
+                else:
+                    elapsed = int(time.time() - (deadline - 60.0))
+                    detail = state.get("challengeSrc") or state.get("widgetSrc") or f"iframe_count={state.get('frameCount',0)}"
+                    self._log(f"[Captcha] [{elapsed}s] state={new_state} | {detail}")
+
+                # ── Challenge is fully loaded → grab the iframe and solve ──
+                if new_state == "challenge-ready":
+                    try:
+                        iframe = await self._page.query_selector(
+                            'iframe[title*="hCaptcha challenge"], iframe[src*="hcaptcha-challenge"]'
+                        )
+                    except Exception:
+                        iframe = None
+                    if iframe:
+                        self._log("[Captcha] [READY] Challenge iframe fully loaded — solving now")
+                        break
+
+                # ── If widget is visible but no challenge yet, keep waiting ──
+                if new_state in ("widget-loaded", "widget-loading"):
+                    await asyncio.sleep(1.0)
+                    continue
+
+                # ── If nothing is visible yet, keep polling ──
+                await asyncio.sleep(1.0)
+
+            # ── Fallback: if we timed out but have ANY hCaptcha iframe, try it ──
+            if not iframe:
+                try:
+                    iframe = await self._page.query_selector('iframe[src*="hcaptcha.com"]')
+                    if iframe:
+                        self._log("[Captcha] Using fallback iframe (challenge may not be fully loaded)",
+                                  level="warn")
                 except Exception:
                     pass
-                self._log(f"[Captcha] No hCaptcha iframe yet (attempt {attempt+1}/6)")
-                await asyncio.sleep(2.0)
 
             if not iframe:
                 # No hCaptcha iframe - check for FunCAPTCHA (Arkose) instead
@@ -806,7 +853,6 @@ class DiscordAutomation:
                         self._log("[Captcha] FunCAPTCHA detected - pixel tile solver...")
                         return await self._solve_funcaptcha()
                     self._log(f"[Captcha] No captcha indicators on page: {self._page.url[:40]}", level="warn")
-                    # DON'T claim solved - let the caller retry or report failure
                     return False
                 except Exception as e:
                     self._log(f"[Captcha] Captcha check error: {e}", level="warn")
