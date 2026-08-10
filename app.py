@@ -574,7 +574,7 @@ h3{font-size:12px;color:var(--dim);text-transform:uppercase;letter-spacing:1px;m
 </style></head><body>
 
 <h1><span class="dot"></span>EYES GEN</h1>
-<div class="sub">Multi-browser Discord token generator &middot; free proxies &middot; auto-save</div>
+<div class="sub">Multi-browser Discord token generator &middot; residential proxies &middot; auto-save</div>
 
 <div class="stats">
   <div class="stat"><div class="num acc" id="stRunning">0</div><div class="lbl">Running</div></div>

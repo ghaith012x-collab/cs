@@ -342,8 +342,12 @@ class DiscordAutomation:
 
         self._log(f"[Nav] Navigating to {url} (timeout={timeout_ms}ms)...")
         try:
-            await self._page.goto(url, wait_until="load", timeout=timeout_ms)
-            self._log("[Nav] Page loaded successfully")
+            # domcontentloaded (not "load"): "load" waits for EVERY subresource
+            # including the hCaptcha widget iframe and all its JS, which through
+            # slow proxies hangs for tens of seconds. The form-poll loop below
+            # already waits for the Discord SPA to boot, so we lose nothing.
+            await self._page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+            self._log("[Nav] Page DOM ready (not waiting for hCaptcha subresources)")
         except Exception as e:
             err = str(e)[:120]
             self._log(f"[Nav] Page.goto error: {err}", level="warn")
@@ -744,8 +748,9 @@ class DiscordAutomation:
             # ── Phase 1: Wait for ANY hCaptcha iframe to appear (widget or challenge) ──
             # The widget iframe (newassets.hcaptcha.com) loads first, then the
             # challenge iframe loads inside it. We poll every 1s for up to 60s.
-            self._log("[Captcha] Waiting for hCaptcha to load (polling DOM every 1s, max 60s)...")
-            deadline = time.time() + 60.0
+            self._log("[Captcha] Waiting for hCaptcha to load (polling DOM every 0.5s, max 45s)...")
+            _poll_start = time.time()
+            deadline = time.time() + 45.0
             last_state = "waiting"
             iframe = None
 
@@ -804,7 +809,7 @@ class DiscordAutomation:
                     self._log(f"[Captcha] State: {last_state} → {new_state}")
                     last_state = new_state
                 else:
-                    elapsed = int(time.time() - (deadline - 60.0))
+                    elapsed = int(time.time() - _poll_start)
                     detail = state.get("challengeSrc") or state.get("widgetSrc") or f"iframe_count={state.get('frameCount',0)}"
                     self._log(f"[Captcha] [{elapsed}s] state={new_state} | {detail}")
 
@@ -822,11 +827,11 @@ class DiscordAutomation:
 
                 # ── If widget is visible but no challenge yet, keep waiting ──
                 if new_state in ("widget-loaded", "widget-loading"):
-                    await asyncio.sleep(1.0)
+                    await asyncio.sleep(0.5)
                     continue
 
                 # ── If nothing is visible yet, keep polling ──
-                await asyncio.sleep(1.0)
+                await asyncio.sleep(0.5)
 
             # ── Fallback: if we timed out but have ANY hCaptcha iframe, try it ──
             if not iframe:
@@ -882,8 +887,8 @@ class DiscordAutomation:
                 except Exception:
                     pass
                 idle_checks = 0
-                for check_i in range(10):
-                    await asyncio.sleep(3)
+                for check_i in range(6):
+                    await asyncio.sleep(1.5)
                     if await self._past_captcha():
                         self._log("[Captcha] Page past captcha — clicking Create Account")
                         await self._click_form_submit()
@@ -904,7 +909,7 @@ class DiscordAutomation:
                             new_src = ""
                         if new_src in solved_srcs:
                             # Same challenge element still closing — not new.
-                            self._log(f"[Captcha] Same challenge still present ({check_i+1}/10)")
+                            self._log(f"[Captcha] Same challenge still present ({check_i+1}/6)")
                             continue
                         solved_srcs.add(new_src)
                         self._log("[Captcha] NEW captcha detected — clicking 3-dots + accessibility again")
@@ -919,10 +924,10 @@ class DiscordAutomation:
                     if idle_checks >= 2:
                         self._log("[Captcha] No new challenge — captcha fully done!")
                         break
-                    self._log(f"[Captcha] No challenge yet ({check_i+1}/10)...")
+                    self._log(f"[Captcha] No challenge yet ({check_i+1}/6)...")
                 # Captcha chain finished — proceed to Create Account
                 await self._click_form_submit()
-                await asyncio.sleep(3)
+                await asyncio.sleep(1.5)
                 return True
             else:
                 self._log("[Captcha] [FAIL] Accessibility challenge did not solve",

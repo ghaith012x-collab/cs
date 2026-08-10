@@ -1,45 +1,20 @@
 """
-proxies.py — free proxy fetcher, validator and rotating pool.
+proxies.py — rotating pool of PAID residential proxy sessions (vaultproxies.com).
 
-Supports four formats:
-  ip:port
-  proto://ip:port
-  user:pass@host:port        (authenticated gateway - e.g. nullproxies.com)
+Sessions come from vaultproxies.txt (user:pass@host:port per line) or the
+VAULTPROXY_* env vars. Format support:
+  user:pass@host:port        (authenticated proxy - vaultproxies.com)
+  proto://user:pass@host:port
   host:port:user:pass        (BrightData ISP sticky-IP format)
 
-Every proxy may carry optional auth.  The pool hands out proxy dicts so the
-browser worker can pass username/password to Playwright separately.
+The pool hands out proxy dicts so the browser worker can pass
+username/password to Playwright separately.
 """
-import asyncio
 import os
-import random
 import re
 import time
 from pathlib import Path
 from typing import Dict, List, Optional
-
-import aiohttp
-
-# ── Public free-proxy sources (raw text) ──
-# These are FREE and rotate automatically. Quality is low (most will fail
-# validation, and Discord/Cloudflare blocks known datacenter IPs), but they
-# cost nothing and the pool validates every proxy before use.
-#
-# ProxyScrape v4 — most reliable free source, returns raw ip:port per line.
-# Proxifly — GitHub-hosted txt files updated every 5 min (CDN, no rate limit).
-# PubProxy — REST API with format=txt for raw output.
-PROXY_SOURCES = [
-    "https://api.proxyscrape.com/v4/free-proxy-list/get?request=displayproxies&protocol=http&timeout=15000&limit=500",
-    "https://cdn.jsdelivr.net/gh/proxifly/free-proxy-list@main/proxies/protocols/http/data.txt",
-    "https://cdn.jsdelivr.net/gh/proxifly/free-proxy-list@main/proxies/protocols/socks4/data.txt",
-    "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt",
-    "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt",
-    "http://pubproxy.com/api/proxy?format=txt&type=http&limit=20",
-]
-# Extra local proxy files fed into the pool. scrape_free_proxies.py writes
-# free_proxies.txt (validated working free proxies) — the pool picks those
-# up on every refresh alongside the live free-proxy sources above.
-LOCAL_PROXY_FILES = ["free_proxies.txt"]
 
 # Residential proxy sessions file (gitignored). Format: one user:pass@host:port
 # per line. Sessions from vaultproxies.com expire after their TTL — swap in
@@ -54,9 +29,6 @@ _BD_RE = re.compile(r"^([^:]+):(\d+):([^:]+):([^:]+)$")
 _IPPORT_RE = re.compile(r"^([\d.]+):(\d+)$")
 _HOSTPORT_RE = re.compile(r"^([a-zA-Z0-9.-]+):(\d+)$")
 _PROTO_RE = re.compile(r"^(https?|socks4|socks5)://([^:]+):(\d+)$")
-
-CHECK_URL = "https://api.ipify.org"
-CHECK_TIMEOUT = 6.0
 
 
 def normalize(proto: str, host: str, port: str,
@@ -108,30 +80,6 @@ def parse_proxy_list(text: str) -> Dict[str, Dict[str, str]]:
     return out
 
 
-async def _fetch_one(url: str, session: aiohttp.ClientSession, timeout: float) -> Dict[str, Dict[str, str]]:
-    try:
-        async with session.get(url, timeout=aiohttp.ClientTimeout(total=timeout)) as r:
-            if r.status == 200:
-                text = await r.text()
-                return parse_proxy_list(text)
-    except Exception:
-        pass
-    return {}
-
-
-def _load_local_files() -> Dict[str, Dict[str, str]]:
-    """Load proxy files committed in the repo (e.g. user-uploaded lists)."""
-    out: Dict[str, Dict[str, str]] = {}
-    for name in LOCAL_PROXY_FILES:
-        path = Path(__file__).resolve().parent / name
-        try:
-            if path.exists():
-                out.update(parse_proxy_list(path.read_text(errors="ignore")))
-        except Exception:
-            pass
-    return out
-
-
 def _vault_proxy_urls() -> List[str]:
     """Residential proxy session URLs (user:pass@host:port).
     Priority: VAULTPROXY_URLS env -> composed from VAULTPROXY_HOST/PORT/
@@ -179,69 +127,6 @@ def configured() -> bool:
     return bool(_vault_proxy_urls())
 
 
-async def fetch_free_proxies(max_proxies: int = 500) -> List[Dict[str, str]]:
-    """Fetch proxies from all sources + local files, return unique proxy dicts."""
-    try:
-        async with aiohttp.ClientSession(
-            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
-        ) as session:
-            results = await asyncio.gather(
-                *[_fetch_one(url, session, 8.0) for url in PROXY_SOURCES],
-                return_exceptions=True,
-            )
-    except Exception:
-        results = []
-
-    seen: Dict[str, Dict[str, str]] = _load_local_files()
-    for res in results:
-        if isinstance(res, dict):
-            seen.update(res)
-    proxies = list(seen.values())
-    random.shuffle(proxies)
-    return proxies[:max_proxies]
-
-
-def proxy_url(p: Dict[str, str]) -> str:
-    """Build a full proxy URL for aiohttp."""
-    auth = f"{p['username']}:{p['password']}@" if p.get("username") else ""
-    return f"{p['proto']}://{auth}{p['host']}:{p['port']}"
-
-
-async def _check_one(p: Dict[str, str], session: aiohttp.ClientSession) -> Optional[Dict[str, str]]:
-    try:
-        async with session.get(
-            CHECK_URL,
-            proxy=proxy_url(p),
-            timeout=aiohttp.ClientTimeout(total=CHECK_TIMEOUT),
-        ) as r:
-            if r.status == 200:
-                return p
-    except Exception:
-        pass
-    return None
-
-
-async def validate_proxies(proxies: List[Dict[str, str]], max_workers: int = 60) -> List[Dict[str, str]]:
-    if not proxies:
-        return []
-    try:
-        async with aiohttp.ClientSession() as session:
-            sem = asyncio.Semaphore(max_workers)
-
-            async def _checked(p):
-                async with sem:
-                    return await _check_one(p, session)
-
-            results = await asyncio.gather(
-                *[_checked(p) for p in proxies], return_exceptions=True
-            )
-    except Exception:
-        return []
-    working = [r for r in results if isinstance(r, dict)]
-    random.shuffle(working)
-    return working
-
-
 class ProxyPool:
     """Rotating pool of working proxies (with optional auth)."""
 
@@ -267,15 +152,13 @@ class ProxyPool:
         }
 
     async def refresh(self) -> None:
+        # Paid-only: the pool is fed solely by vaultproxies.com residential
+        # sessions. Sessions are freshly issued (TTL ~10min) so slow online
+        # validation is skipped; workers rotate on failure via pool.release().
         vault = vault_proxies()
-        fetched = await fetch_free_proxies(max_proxies=500)
-        self.fetched_count = len(fetched) + len(vault)
-        # Vault sessions are freshly issued (TTL ~10min) — skip slow ipify
-        # validation for them; validate only the free/local-file ones.
-        to_validate = [p for p in fetched if not p.get("vault")]
-        working = await validate_proxies(to_validate, max_workers=80)
-        self.valid_count = len(working) + len(vault)
-        self._proxies = vault + working
+        self.fetched_count = len(vault)
+        self.valid_count = len(vault)
+        self._proxies = vault
         self._used_at = {}
         self._failed = set()
         self.last_refresh = time.time()
