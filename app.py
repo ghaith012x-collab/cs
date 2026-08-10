@@ -578,17 +578,18 @@ def main() -> None:
 # EYES GEN DASHBOARD — mobile-first
 # ═══════════════════════════════════════════════════════════
 
-DASHBOARD_HTML = """<!doctype html><html><head>
+DASHBOARD_HTML = r"""<!doctype html><html><head>
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="theme-color" content="#0a0a0b">
-<title>EY3 — token forge</title>
+<meta charset="utf-8">
+<title>EY3 - Token Forge</title>
 <style>
 @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Space+Grotesk:wght@400;500;700&display=swap');
 *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
 :root{
   --bg:#0a0a0b;--panel:#131316;--panel2:#1a1a1e;--line:#26262b;--line2:#34343a;
   --txt:#e7e7ea;--dim:#8a8a92;--dim2:#5c5c64;
-  --ok:#34d399;--bad:#f87171;--warn:#fbbf24;--acc:#cfcfd6;
+  --ok:#34d399;--bad:#f87171;--warn:#fbbf24;
 }
 html{background:var(--bg)}
 body{font-family:'Space Grotesk',-apple-system,'Segoe UI',Roboto,sans-serif;
@@ -606,7 +607,6 @@ h1 .tag{font-size:11px;font-weight:500;letter-spacing:2px;color:var(--dim2);
   box-shadow:0 0 10px currentColor}
 .dot.on{background:var(--ok);color:var(--ok)}
 .dot.err{background:var(--bad);color:var(--bad)}
-.dot.wrk{background:var(--warn);color:var(--warn)}
 nav{display:flex;gap:6px;margin-bottom:18px;position:sticky;top:0;z-index:40;
   background:rgba(10,10,11,.92);backdrop-filter:blur(10px);padding:10px 0;border-bottom:1px solid var(--line)}
 nav button{font-family:'JetBrains Mono',monospace;font-size:12px;font-weight:700;letter-spacing:2px;
@@ -622,7 +622,7 @@ nav button:not(.on):hover{border-color:var(--line2);color:var(--txt)}
 .stat{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:14px 12px;text-align:center}
 .stat .num{font-family:'JetBrains Mono',monospace;font-size:26px;font-weight:700}
 .stat .lbl{font-size:10px;letter-spacing:1.5px;text-transform:uppercase;color:var(--dim);margin-top:4px}
-.num.g{color:var(--ok)}.num.r{color:var(--bad)}.num.w{color:var(--warn)}.num.a{color:var(--txt)}
+.num.g{color:var(--ok)}.num.r{color:var(--bad)}.num.a{color:var(--txt)}
 button{font-family:'JetBrains Mono',monospace;font-size:12px;font-weight:700;letter-spacing:1.5px;
   padding:11px 18px;border-radius:10px;border:1px solid var(--line2);background:var(--panel2);
   color:var(--txt);cursor:pointer;transition:all .15s}
@@ -638,7 +638,6 @@ button:disabled{opacity:.45;cursor:not-allowed}
 .b-valid{background:#0f2e24;color:var(--ok)}
 .b-invalid{background:#3a1212;color:var(--bad)}
 .b-dim{background:#1e1e22;color:var(--dim)}
-/* ── domains ── */
 .dom{display:flex;gap:8px;align-items:center;margin-bottom:8px}
 .dom input{flex:1;font-family:'JetBrains Mono',monospace;font-size:13px;background:var(--panel2);
   border:1px solid var(--line);border-radius:9px;color:var(--txt);padding:10px 12px;outline:none}
@@ -650,7 +649,6 @@ button:disabled{opacity:.45;cursor:not-allowed}
 .sw{width:44px;height:24px;border-radius:99px;background:var(--line2);position:relative;cursor:pointer;transition:.2s}
 .sw::after{content:'';position:absolute;top:3px;left:3px;width:18px;height:18px;border-radius:50%;background:#fff;transition:.2s}
 .sw.on{background:var(--dim)}.sw.on::after{left:23px}
-/* ── terminal ── */
 .term{background:#050506;border:1px solid var(--line);border-radius:14px;overflow:hidden;
   font-family:'JetBrains Mono',monospace;box-shadow:0 18px 50px rgba(0,0,0,.5)}
 .term-head{display:flex;align-items:center;gap:8px;padding:10px 14px;background:var(--panel2);
@@ -665,8 +663,6 @@ button:disabled{opacity:.45;cursor:not-allowed}
 .tl.ok .tm{color:#6ee7b7}
 .tl.warn .tm{color:var(--warn)}
 .tl.error .tm{color:var(--bad)}
-.tl .lead{color:var(--dim2)}
-/* ── manage rows ── */
 .acc{display:flex;align-items:center;gap:12px;background:var(--panel2);border:1px solid var(--line);
   border-radius:12px;padding:11px 12px;margin-bottom:8px}
 .av{width:42px;height:42px;border-radius:50%;object-fit:cover;background:#222;flex:none;
@@ -684,7 +680,6 @@ button:disabled{opacity:.45;cursor:not-allowed}
 .acc .acts{display:flex;gap:6px;flex:none}
 .acc .acts button{font-size:9.5px;padding:7px 9px;letter-spacing:1px}
 .empty{color:var(--dim2);text-align:center;padding:34px 0;font-size:13px;font-family:'JetBrains Mono',monospace}
-/* ── modals ── */
 .overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.78);z-index:90;
   justify-content:center;align-items:center;padding:16px}
 .overlay.on{display:flex}
@@ -719,7 +714,7 @@ input:focus{border-color:var(--dim)}
 </style></head><body>
 
 <h1>EY3<span class="tag">TOKEN FORGE</span></h1>
-<div class="sub"><span class="dot" id="dDot"></span>&nbsp; <span id="stLine">idle</span> &middot; multi-browser discord gen &middot; cybertemp @vibify.cc</div>
+<div class="sub"><span class="dot" id="dDot"></span> <span id="stLine">idle</span> - discord token gen - cybertemp @vibify.cc</div>
 
 <nav>
   <button id="nvMain" class="on" onclick="showTab('Main')">MAIN</button>
@@ -727,7 +722,6 @@ input:focus{border-color:var(--dim)}
   <button id="nvMan" onclick="showTab('Manage')">MANAGE</button>
 </nav>
 
-<!-- ═══════════ MAIN ═══════════ -->
 <div id="tabMain" class="tab on">
   <div class="stats">
     <div class="stat"><div class="num a" id="stTotal">0</div><div class="lbl">Generated</div></div>
@@ -743,59 +737,55 @@ input:focus{border-color:var(--dim)}
       </span>
       <span class="badge b-dim" id="stPending2">0 pending</span>
     </div>
-    <h3 style="margin-top:14px">Mail domains <span style="color:var(--dim2);text-transform:none">(used for temp inboxes)</span></h3>
+    <h3 style="margin-top:14px">Mail domains (used for temp inboxes)</h3>
     <div id="domList"></div>
     <div class="btnrow" style="margin-top:12px">
-      <button onclick="addDomain()">+ Add domain</button>
+      <button onclick="addDomain()">Add domain</button>
       <button class="primary" onclick="saveDomains()">Save domains</button>
     </div>
-    <div class="hint">vibify.cc is the default and auto-set — Discord-capable domain on cybertemp.xyz. Each signup picks a random domain from the list.</div>
+    <div class="hint">vibify.cc is the default and auto-set - Discord-capable domain on cybertemp.xyz. Each signup picks a random domain from the list.</div>
   </div>
 </div>
 
-<!-- ═══════════ TERMINAL ═══════════ -->
 <div id="tabTerm" class="tab">
   <div class="btnrow">
-    <button class="ok grow" id="btnStart" onclick="start()">▶ START</button>
-    <button class="danger grow" onclick="stop()">■ STOP</button>
-    <button onclick="openView()">👁 VIEW</button>
+    <button class="ok grow" id="btnStart" onclick="start()">START</button>
+    <button class="danger grow" onclick="stop()">STOP</button>
+    <button onclick="openView()">VIEW</button>
   </div>
   <div class="term">
     <div class="term-head">
       <span class="cd" id="cd1"></span><span class="cd" id="cd2"></span><span class="cd" id="cd3"></span>
-      <span class="t">EY3 · WORKER B1</span><span class="badge b-dim" id="termState">idle</span>
+      <span class="t">EY3 - WORKER B1</span><span class="badge b-dim" id="termState">idle</span>
     </div>
-    <div class="term-body" id="termBody"><div class="empty">No activity yet — hit START.</div></div>
+    <div class="term-body" id="termBody"><div class="empty">No activity yet - hit START.</div></div>
   </div>
 </div>
 
-<!-- ═══════════ MANAGE ═══════════ -->
 <div id="tabManage" class="tab">
   <div class="btnrow">
-    <button class="primary" id="btnMode" onclick="toggleMode()">CREDS ▸ TOKENS</button>
-    <button onclick="doValidate()">✓ VALIDATE</button>
-    <button class="ok" onclick="openExport()">⇩ EXPORT</button>
-    <span class="badge b-dim" style="align-self:center">N = <span id="manCount">0</span></span>
+    <button class="primary" id="btnMode" onclick="toggleMode()">SHOW TOKENS</button>
+    <button onclick="doValidate()">VALIDATE</button>
+    <button class="ok" onclick="openExport()">EXPORT</button>
+    <span class="badge b-dim" style="align-self:center">Total: <span id="manCount">0</span></span>
   </div>
-  <div id="accList"><div class="empty">No accounts yet — run the generator first.</div></div>
+  <div id="accList"><div class="empty">No accounts yet - run the generator first.</div></div>
 </div>
 
-<!-- ── VIEW modal ── -->
 <div class="overlay" id="viewOverlay" onclick="if(event.target===this)closeView()">
   <div class="modal">
-    <div class="modal-head"><h2>EY3 · LIVE BROWSER</h2>
-      <button class="modal-close" onclick="closeView()">&times;</button></div>
+    <div class="modal-head"><h2>LIVE BROWSER</h2>
+      <button class="modal-close" onclick="closeView()">X</button></div>
     <div class="modal-body">
-      <div id="viewWrap"><div class="vph">connecting…</div></div>
+      <div id="viewWrap"><div class="vph">connecting...</div></div>
     </div>
   </div>
 </div>
 
-<!-- ── EXPORT modal ── -->
 <div class="overlay" id="expOverlay" onclick="if(event.target===this)closeExp()">
   <div class="modal">
-    <div class="modal-head"><h2>⇩ EXPORT</h2>
-      <button class="modal-close" onclick="closeExp()">&times;</button></div>
+    <div class="modal-head"><h2>EXPORT TOKENS</h2>
+      <button class="modal-close" onclick="closeExp()">X</button></div>
     <div class="modal-body">
       <label>How many tokens you need?</label>
       <input type="number" id="expCount" value="5" min="1" max="100">
@@ -806,243 +796,273 @@ input:focus{border-color:var(--dim)}
       <div class="btnrow">
         <button class="primary" onclick="exportGen()">Generate</button>
         <button onclick="exportCopyAll()">Copy all</button>
-        <button class="danger" onclick="exportConfirm()">Confirm &amp; delete</button>
+        <button class="danger" onclick="exportConfirm()">Confirm and delete</button>
       </div>
       <div class="exp" id="expList"></div>
-      <div class="hint">Confirm &amp; delete copies the tokens to your clipboard, then removes them from Manage permanently.</div>
+      <div class="hint">Confirm and delete copies the tokens to your clipboard, then removes them from Manage permanently.</div>
     </div>
   </div>
 </div>
 
 <div class="toast" id="toast"></div>
-<div class="footer">EY3 v2 · grey iron build · main / terminal / manage</div>
+<div class="footer">EY3 - grey iron build</div>
 
 <script>
-let ACCOUNTS=[], MODE='accounts', EXPORT=[], VIEWINT=null, HEADLESS=true;
-const $=id=>document.getElementById(id);
-const esc=s=>String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
-function toast(m){const t=$('toast');t.textContent=m;t.classList.add('on');clearTimeout(toast._t);toast._t=setTimeout(()=>t.classList.remove('on'),2200);}
-async function api(p,o){return fetch(p,o);}
+var ACCOUNTS=[], MODE='accounts', EXPORT=[], VIEWINT=null, HEADLESS=true, VALIDATED_ONCE=false;
+var NL2 = String.fromCharCode(10,10);
+function $(id){return document.getElementById(id);}
+function esc(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
+function toast(m){var t=$('toast');t.textContent=m;t.classList.add('on');clearTimeout(toast._t);toast._t=setTimeout(function(){t.classList.remove('on');},2200);}
+function api(p,o){return fetch(p,o);}
 
 function showTab(n){
-  ['Main','Term','Manage'].forEach(t=>{$('tab'+t).classList.toggle('on',t===n);
-    $('nv'+t).classList.toggle('on',t===n);});
-  if(n==='Manage') refreshTokens(true);
+  var tabs=['Main','Term','Manage'];
+  for(var i=0;i<tabs.length;i++){
+    $('tab'+tabs[i]).classList.toggle('on',tabs[i]===n);
+    $('nv'+tabs[i]).classList.toggle('on',tabs[i]===n);
+  }
+  if(n==='Manage') refreshTokens();
   if(n==='Term') refreshLogs();
 }
 
-/* ── status ── */
-async function refreshStatus(){
-  try{
-    const r=await api('/status');const x=await r.json();
-    const st=x.running?'on':(x.workers||[]).some(w=>w.status==='error')?'err':'';
-    const d=$('dDot');d.className='dot'+(st?' '+st:'');
-    const running=(x.workers||[]).filter(w=>w.status==='running'||w.status==='starting').length;
-    $('stLine').textContent = x.running ? ('running · '+running+'/'+(x.workers||[]).length+' browsers · '+Math.floor(x.uptime/60)+'m') : 'idle';
-  }catch(e){}
+function refreshStatus(){
+  api('/status').then(function(r){return r.json();}).then(function(x){
+    var st = x.running ? 'on' : ((x.workers||[]).some(function(w){return w.status==='error';}) ? 'err' : '');
+    var d=$('dDot');d.className='dot'+(st?' '+st:'');
+    var running=(x.workers||[]).filter(function(w){return w.status==='running'||w.status==='starting';}).length;
+    $('stLine').textContent = x.running ? ('running - '+running+'/'+(x.workers||[]).length+' browsers - '+Math.floor(x.uptime/60)+'m') : 'idle';
+  }).catch(function(){});
 }
 
-/* ── terminal ── */
-const FILTERS=[
-  /fingerprint/i,/discord site rendered/i,/is in discord and confirmed/i,
-  /\[account\] email=/i,/inbox ready/i,/verification link found/i,
-  /challenge iframe fully loaded/i,/\[accessibility\] \[ok\]/i,/solved:/i,
-  /humanized/i,/\[captcha\] \[ready\]/i,/\[captcha\] state:/i,/discord\]/i
-];
-async function refreshLogs(){
-  try{
-    const r=await api('/worker/B1/logs');const x=await r.json();
+var FILTERS=['Fingerprint','Discord site rendered','is in Discord and confirmed','[Account] Email=',
+  'Inbox ready','Verification link found','Challenge iframe fully loaded','[Accessibility] [OK]',
+  'solved:','Humanized','[Captcha] [READY]'];
+var OKWORDS=['[ok]','confirmed','solved','ready','rendered','humanized','verification link found'];
+function refreshLogs(){
+  api('/worker/B1/logs').then(function(r){return r.json();}).then(function(x){
     $('termState').textContent = x.status||'idle';
-    const lines=(x.logs||[]).filter(l=>FILTERS.some(f=>f.test(l.message||''))).slice(-120);
-    if(!lines.length)return;
-    let html='';
-    lines.forEach(l=>{
-      const m=(l.message||'').replace(/^\[B1\]\s*/,'');
-      let cls='info'; const lv=(l.level||'').toLowerCase();
+    var lines=(x.logs||[]).filter(function(l){
+      var m=l.message||'';
+      for(var i=0;i<FILTERS.length;i++){ if(m.indexOf(FILTERS[i])!==-1) return true; }
+      return false;
+    }).slice(-120);
+    if(!lines.length) return;
+    var html='';
+    for(var i=0;i<lines.length;i++){
+      var l=lines[i];
+      var m=l.message||'';
+      if(m.indexOf('[B1]')===0)m=m.substring(4);
+      var cls='info', lv=(l.level||'').toLowerCase();
       if(lv==='error')cls='error'; else if(lv==='warn')cls='warn';
-      if(/\[ok\]|confirmed|solved|ready|rendered|humanized|verification link found/i.test(m))cls='ok';
-      const lead=m.startsWith('[Account]')||m.startsWith('[Nav]')||m.startsWith('[Mail]')||m.startsWith('[Captcha]')||m.startsWith('[Accessibility]')||m.startsWith('[Token]')?'›':'';
-      html+='<div class="tl '+cls+'"><span class="tt">'+(l.time||'')+'</span><span class="lead">'+lead+'</span><span class="tm">'+esc(m)+'</span></div>';
-    });
-    const tb=$('termBody');
-    const atBottom=tb.scrollHeight-tb.scrollTop-tb.clientHeight<80;
+      else{
+        var low=m.toLowerCase();
+        for(var k=0;k<OKWORDS.length;k++){ if(low.indexOf(OKWORDS[k])!==-1){cls='ok';break;} }
+      }
+      html+='<div class="tl '+cls+'"><span class="tt">'+(l.time||'')+'</span><span class="tm">'+esc(m)+'</span></div>';
+    }
+    var tb=$('termBody');
+    var atBottom = tb.scrollHeight - tb.scrollTop - tb.clientHeight < 80;
     tb.innerHTML=html;
-    if(atBottom)tb.scrollTop=tb.scrollHeight;
-  }catch(e){}
+    if(atBottom) tb.scrollTop=tb.scrollHeight;
+  }).catch(function(){});
 }
 
-async function start(){
-  const b=$('btnStart');b.disabled=true;b.textContent='… LAUNCHING';
-  try{const r=await api('/start',{method:'POST'});const x=await r.json();
-    toast(x.msg||'Started');}catch(e){toast('Start error: '+e.message);}
-  b.disabled=false;b.textContent='▶ START';
+function start(){
+  var b=$('btnStart');b.disabled=true;b.textContent='LAUNCHING...';
+  api('/start',{method:'POST'}).then(function(r){return r.json();}).then(function(x){
+    toast(x.msg||'Started');
+  }).catch(function(e){toast('Start error: '+e.message);})
+    .finally(function(){b.disabled=false;b.textContent='START';});
 }
-async function stop(){
-  try{const r=await api('/stop',{method:'POST'});toast(await r.text());}catch(e){toast('Stop error: '+e.message);}
+function stop(){
+  api('/stop',{method:'POST'}).then(function(r){return r.text();}).then(function(t){toast(t);})
+    .catch(function(e){toast('Stop error: '+e.message);});
 }
 
-/* ── view (live browser) ── */
-async function openView(){
+function openView(){
   $('viewOverlay').classList.add('on');
-  $('viewWrap').innerHTML='<div class="vph">connecting…</div>';
-  const snap=async()=>{
-    try{
-      const r=await api('/latest?worker=B1&t='+Date.now());
-      if(r.ok){const b=await r.blob();const u=URL.createObjectURL(b);
+  $('viewWrap').innerHTML='<div class="vph">connecting...</div>';
+  var snap=function(){
+    api('/latest?worker=B1&t='+Date.now()).then(function(r){
+      if(!r.ok){ $('viewWrap').innerHTML='<div class="vph">no feed yet - browser not started</div>'; return; }
+      return r.blob().then(function(b){
+        var u=URL.createObjectURL(b);
         $('viewWrap').innerHTML='<img id="viewImg" src="'+u+'">';
-        setTimeout(()=>URL.revokeObjectURL(u),3000);}
-      else{$('viewWrap').innerHTML='<div class="vph">no feed yet — browser not started</div>';}
-    }catch(e){}
+        setTimeout(function(){URL.revokeObjectURL(u);},3000);
+      });
+    }).catch(function(){});
   };
-  await snap();VIEWINT=setInterval(snap,2000);
+  snap();
+  VIEWINT=setInterval(snap,2000);
 }
-function closeView(){clearInterval(VIEWINT);VIEWINT=null;$('viewOverlay').classList.remove('on');}
+function closeView(){if(VIEWINT)clearInterval(VIEWINT);VIEWINT=null;$('viewOverlay').classList.remove('on');}
 
-/* ── manage ── */
-function toggleMode(){MODE = MODE==='accounts'?'creds':'accounts';
-  $('btnMode').textContent = MODE==='accounts'?'CREDS ▸ TOKENS':'ACCOUNTS ▸ VIEW';
-  render();}
-function badge(st){return '<span class="badge b-'+(st==='valid'?'valid':st==='invalid'?'invalid':'pending')+'">'+(st||'pending')+'</span>';}
+function toggleMode(){
+  MODE = MODE==='accounts' ? 'creds' : 'accounts';
+  $('btnMode').textContent = MODE==='accounts' ? 'SHOW TOKENS' : 'SHOW ACCOUNTS';
+  render();
+}
+function badge(st){
+  var c = st==='valid' ? 'valid' : (st==='invalid' ? 'invalid' : 'pending');
+  return '<span class="badge b-'+c+'">'+(st||'pending')+'</span>';
+}
 function render(){
-  const el=$('accList');
-  if(!ACCOUNTS.length){el.innerHTML='<div class="empty">No accounts yet — run the generator first.</div>';return;}
-  let html='';
+  var el=$('accList');
+  if(!ACCOUNTS.length){el.innerHTML='<div class="empty">No accounts yet - run the generator first.</div>';return;}
+  var html='';
   if(MODE==='accounts'){
-    ACCOUNTS.forEach(a=>{
-      const user=a.username||a.email?.split('@')[0]||'?';
-      const av=a.avatar?'<img class="av" src="'+esc(a.avatar)+'">':
-        '<div class="av ph">'+esc((user||'?')[0].toUpperCase())+'</div>';
+    for(var i=0;i<ACCOUNTS.length;i++){
+      var a=ACCOUNTS[i];
+      var user=a.username||'?';
+      var av = a.avatar ? '<img class="av" src="'+esc(a.avatar)+'">'
+        : '<div class="av ph">'+esc((user||'?').charAt(0).toUpperCase())+'</div>';
       html+='<div class="acc">'+av+
-        '<div class="meta"><div class="u">@'+esc(user)+'<span class="id">'+(a.user_id?'ID '+esc(a.user_id):'')+'</span></div>'+
+        '<div class="meta"><div class="u">@'+esc(user)+(a.user_id?'<span class="id">ID '+esc(a.user_id)+'</span>':'')+'</div>'+
         '<div class="e">'+esc(a.email||'')+'</div>'+
-        '<div class="b">'+(a.bio?'bio: '+esc(a.bio):'')+(a.humanized?' · humanized':'')+'</div></div>'+
+        '<div class="b">'+((a.bio?'bio: '+esc(a.bio):'')+(a.humanized?' - humanized':''))+'</div></div>'+
         badge(a.status)+
-        '<div class="acts"><button onclick="copyText(\''+esc(a.username||'')+'\',this)">USER</button>'+
-        '<button onclick="copyText(\''+esc(a.user_id||'')+'\',this)">ID</button></div></div>';
-    });
+        '<div class="acts">'+
+        '<button data-copy="'+esc(user)+'" data-label="USER" onclick="copyBtn(this)">USER</button>'+
+        '<button data-copy="'+esc(a.user_id||'')+'" data-label="ID" onclick="copyBtn(this)">ID</button></div></div>';
+    }
   }else{
-    ACCOUNTS.forEach(a=>{
-      const tok=a.token||'';
+    for(var j=0;j<ACCOUNTS.length;j++){
+      var b=ACCOUNTS[j];
+      var tok=b.token||'';
       html+='<div class="acc"><div class="meta" style="flex:1;min-width:0">'+
-        '<div class="u">@'+esc(a.username||'?')+'</div>'+
+        '<div class="u">@'+esc(b.username||'?')+'</div>'+
         '<div class="tok">'+esc(tok)+'</div>'+
-        '<div class="e" style="margin-top:4px">'+esc((a.email||'')+' : '+(a.password||''))+'</div></div>'+
-        badge(a.status)+
-        '<div class="acts"><button onclick="copyText(\''+esc(tok)+'\',this)">TOK</button>'+
-        '<button onclick="copyText(\''+esc((a.email||'')+' : '+(a.password||''))+'\',this)">CREDS</button></div></div>';
-    });
+        '<div class="e" style="margin-top:4px">'+esc((b.email||'')+' : '+(b.password||''))+'</div></div>'+
+        badge(b.status)+
+        '<div class="acts">'+
+        '<button data-copy="'+esc(tok)+'" data-label="TOKEN" onclick="copyBtn(this)">TOKEN</button>'+
+        '<button data-copy="'+esc((b.email||'')+' : '+(b.password||''))+'" data-label="CREDS" onclick="copyBtn(this)">CREDS</button></div></div>';
+    }
   }
   el.innerHTML=html;
 }
-async function refreshTokens(validateIfPending){
-  try{
-    const r=await api('/tokens');const x=await r.json();
+function refreshTokens(){
+  api('/tokens').then(function(r){return r.json();}).then(function(x){
     ACCOUNTS=x.accounts||[];
-    $('stTotal').textContent=x.stats?.total||0;
-    $('stValid').textContent=x.stats?.valid||0;
-    $('stExpired').textContent=x.stats?.expired||0;
-    $('stPending2').textContent=(x.stats?.pending||0)+' pending';
+    $('stTotal').textContent=(x.stats&&x.stats.total)||0;
+    $('stValid').textContent=(x.stats&&x.stats.valid)||0;
+    $('stExpired').textContent=(x.stats&&x.stats.expired)||0;
+    $('stPending2').textContent=((x.stats&&x.stats.pending)||0)+' pending';
     $('manCount').textContent=ACCOUNTS.length;
     render();
-    if(validateIfPending && (x.stats?.pending||0)>0) doValidate();
-  }catch(e){}
+    if(!VALIDATED_ONCE && (x.stats&&x.stats.pending)>0){ VALIDATED_ONCE=true; doValidate(); }
+  }).catch(function(){});
 }
-async function doValidate(){
-  toast('Validating tokens…');$('btnValidate')&&($('btnValidate').disabled=true);
-  try{
-    const r=await api('/validate',{method:'POST'});const x=await r.json();
+function doValidate(){
+  toast('Validating tokens...');
+  api('/validate',{method:'POST'}).then(function(r){return r.json();}).then(function(x){
     ACCOUNTS=x.accounts||ACCOUNTS;
     $('stValid').textContent=x.valid||0;
     $('stExpired').textContent=x.expired||0;
-    render();toast('Validation done — '+x.valid+' valid');
-  }catch(e){toast('Validate error: '+e.message);}
+    render();
+    toast('Validation done - '+x.valid+' valid');
+  }).catch(function(e){toast('Validate error: '+e.message);});
 }
 
-/* ── export ── */
-async function openExport(){EXPORT=[];$('expList').style.display='none';$('expOverlay').classList.add('on');}
+function openExport(){EXPORT=[];$('expList').style.display='none';$('expOverlay').classList.add('on');}
 function closeExp(){$('expOverlay').classList.remove('on');}
-async function exportGen(){
-  const count=parseInt($('expCount').value||'5',10);
-  const mode=document.querySelector('input[name="expMode"]:checked').value;
-  try{
-    const r=await api('/export',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({count:count,mode:mode})});
-    const x=await r.json();
+function exportGen(){
+  var count=parseInt($('expCount').value||'5',10);
+  var modeEl=document.querySelector('input[name="expMode"]:checked');
+  var mode=modeEl?modeEl.value:'tokens';
+  api('/export',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({count:count,mode:mode})}).then(function(r){return r.json();}).then(function(x){
     EXPORT=x.accounts||[];
-    if(!EXPORT.length){$('expList').style.display='block';$('expList').textContent='nothing to export — no tokens in Manage';}
+    if(!EXPORT.length){$('expList').style.display='block';$('expList').textContent='nothing to export - no tokens in Manage';}
     else{
+      var parts=[];
+      for(var i=0;i<EXPORT.length;i++)parts.push(EXPORT[i].text);
       $('expList').style.display='block';
-      $('expList').textContent=EXPORT.map(a=>a.text).join('\n\n');
+      $('expList').textContent=parts.join(NL2);
     }
-  }catch(e){toast('Export error: '+e.message);}
+  }).catch(function(e){toast('Export error: '+e.message);});
 }
-async function exportCopyAll(){
-  const txt=EXPORT.map(a=>a.text).join('\n\n');
+function exportCopyAll(){
+  var parts=[];
+  for(var i=0;i<EXPORT.length;i++)parts.push(EXPORT[i].text);
+  var txt=parts.join(NL2);
   if(!txt)return toast('nothing to copy yet');
-  try{await navigator.clipboard.writeText(txt);toast('Copied '+EXPORT.length+' to clipboard');}
-  catch(e){toast('Copy failed');}
+  if(navigator.clipboard&&navigator.clipboard.writeText){
+    navigator.clipboard.writeText(txt).then(function(){toast('Copied '+EXPORT.length+' to clipboard');});
+  }else{
+    var ta=document.createElement('textarea');ta.value=txt;document.body.appendChild(ta);ta.select();
+    try{document.execCommand('copy');}catch(e){}
+    document.body.removeChild(ta);
+    toast('Copied '+EXPORT.length+' to clipboard');
+  }
 }
-async function exportConfirm(){
+function exportConfirm(){
   if(!EXPORT.length)return toast('Generate first');
-  await exportCopyAll();
-  try{
-    const ids=EXPORT.map(a=>a.id).filter(v=>v!=null);
-    await api('/export/delete',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({ids:ids})});
-    toast('Copied & deleted '+ids.length+' from Manage');
+  exportCopyAll();
+  var ids=[];
+  for(var i=0;i<EXPORT.length;i++){ if(EXPORT[i].id!=null) ids.push(EXPORT[i].id); }
+  api('/export/delete',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({ids:ids})}).then(function(r){return r.json();}).then(function(x){
+    toast('Copied and deleted '+ids.length+' from Manage');
     EXPORT=[];$('expList').style.display='none';closeExp();refreshTokens();
-  }catch(e){toast('Delete error: '+e.message);}
+  }).catch(function(e){toast('Delete error: '+e.message);});
 }
-function copyText(t,btn){
+function copyBtn(btn){
+  var t=btn.getAttribute('data-copy')||'';
   if(!t)return toast('nothing to copy');
   if(navigator.clipboard&&navigator.clipboard.writeText){
-    navigator.clipboard.writeText(t).then(()=>{btn.textContent='COPIED';setTimeout(()=>btn.textContent=btn.dataset.l||'COPY',1200);});
+    navigator.clipboard.writeText(t).then(function(){btn.textContent='COPIED';setTimeout(function(){btn.textContent=btn.getAttribute('data-label')||'COPY';},1200);});
   }else{
-    const ta=document.createElement('textarea');ta.value=t;document.body.appendChild(ta);ta.select();
-    try{document.execCommand('copy');}catch(e){}document.body.removeChild(ta);
-    btn.textContent='COPIED';setTimeout(()=>btn.textContent=btn.dataset.l||'COPY',1200);
+    var ta=document.createElement('textarea');ta.value=t;document.body.appendChild(ta);ta.select();
+    try{document.execCommand('copy');}catch(e){}
+    document.body.removeChild(ta);
+    btn.textContent='COPIED';setTimeout(function(){btn.textContent=btn.getAttribute('data-label')||'COPY';},1200);
   }
 }
 
-/* ── settings ── */
-let DOMAINS=[];
-async function loadConfig(){
-  try{
-    const r=await api('/config');const x=await r.json();
+var DOMAINS=[];
+function loadConfig(){
+  api('/config').then(function(r){return r.json();}).then(function(x){
     DOMAINS=(x.mail_domains&&x.mail_domains.length)?x.mail_domains:['vibify.cc'];
     HEADLESS=x.headless!==false;
     $('swHeadless').classList.toggle('on',HEADLESS);
     renderDomains();
-  }catch(e){DOMAINS=['vibify.cc'];renderDomains();}
+  }).catch(function(){DOMAINS=['vibify.cc'];renderDomains();});
 }
 function renderDomains(){
-  $('domList').innerHTML=DOMAINS.map((d,i)=>
-    '<div class="dom"><input value="'+esc(d)+'" onchange="DOMAINS['+i+']=this.value.trim()">'+
-    '<button class="x" onclick="delDomain('+i+')">&times;</button></div>').join('');
+  var html='';
+  for(var i=0;i<DOMAINS.length;i++){
+    html+='<div class="dom"><input value="'+esc(DOMAINS[i])+'" onchange="DOMAINS['+i+']=this.value.trim()">'+
+      '<button class="x" onclick="delDomain('+i+')">X</button></div>';
+  }
+  $('domList').innerHTML=html;
 }
 function addDomain(){DOMAINS.push('');renderDomains();}
 function delDomain(i){DOMAINS.splice(i,1);renderDomains();}
 function toggleHeadless(){$('swHeadless').classList.toggle('on');}
-async function saveDomains(){
-  DOMAINS=DOMAINS.map(d=>d.trim().toLowerCase()).filter(Boolean);
-  if(!DOMAINS.includes('vibify.cc'))DOMAINS.unshift('vibify.cc');
+function saveDomains(){
+  var cleaned=[];
+  for(var i=0;i<DOMAINS.length;i++){
+    var d=DOMAINS[i].trim().toLowerCase();
+    if(d && cleaned.indexOf(d)===-1) cleaned.push(d);
+  }
+  if(cleaned.indexOf('vibify.cc')===-1) cleaned.unshift('vibify.cc');
+  DOMAINS=cleaned;
   renderDomains();
-  try{
-    const r=await api('/config',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({mail_domains:DOMAINS,headless:$('swHeadless').classList.contains('on')})});
-    const x=await r.json();
-    toast(x.ok?'Domains saved — '+(x.config?.mail_domains||[]).join(', '):'save failed');
-  }catch(e){toast('Save error: '+e.message);}
+  api('/config',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({mail_domains:DOMAINS,headless:$('swHeadless').classList.contains('on')})})
+    .then(function(r){return r.json();}).then(function(x){
+      toast(x.ok?('Domains saved - '+((x.config&&x.config.mail_domains)||[]).join(', ')):'save failed');
+    }).catch(function(e){toast('Save error: '+e.message);});
 }
 
-/* ── init ── */
 loadConfig();
 refreshStatus();
 setInterval(refreshStatus,5000);
 setInterval(refreshLogs,2200);
-setInterval(()=>{if($('tabManage').classList.contains('on'))refreshTokens(false);},12000);
-setInterval(()=>{if($('tabTerm').classList.contains('on'))refreshLogs();},2000);
+setInterval(function(){refreshTokens();},12000);
 refreshLogs();
+refreshTokens();
 </script></body></html>
 """
 
