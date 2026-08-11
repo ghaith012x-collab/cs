@@ -578,7 +578,19 @@ class DiscordAutomation:
     async def capture_screenshot(self) -> str:
         if not self._page:
             return ""
-        screenshot = await self._page.screenshot(full_page=True)
+        # Full-page capture can hang on Discord's SPA through slow proxies;
+        # bound it and fall back to a viewport shot instead of stalling.
+        try:
+            screenshot = await asyncio.wait_for(self._page.screenshot(full_page=True), timeout=20)
+        except asyncio.TimeoutError:
+            try:
+                screenshot = await asyncio.wait_for(self._page.screenshot(full_page=False), timeout=10)
+            except Exception:
+                screenshot = None
+        except Exception:
+            screenshot = None
+        if not screenshot:
+            return ""
         b64 = base64.b64encode(screenshot).decode('utf-8')
         self._screenshots.append(b64)
         if len(self._screenshots) > 100:
@@ -861,6 +873,10 @@ class DiscordAutomation:
             loop_start = time.time()
             widget_since = None  # when any hcaptcha iframe first appeared
             funcaptcha_checked = False
+            # If NO hCaptcha iframe EVER appears (dead session, form never
+            # submitted), do not loop forever: rotate after 120s so the
+            # worker retries on a fresh circuit.
+            no_widget_deadline = loop_start + 120
 
             while True:
                 if await self._past_captcha():
@@ -945,6 +961,11 @@ class DiscordAutomation:
                                 return await self._solve_funcaptcha()
                         except Exception:
                             pass
+
+                # Watchdog: no hcaptcha iframe at all for 120s — rotate instead of hanging.
+                if widget_since is None and time.time() > no_widget_deadline:
+                    self._log("[Captcha] No hCaptcha iframe after 120s - rotating instead of hanging forever", level="warn")
+                    return False
 
                 await asyncio.sleep(1.0)
 
@@ -1434,16 +1455,84 @@ class DiscordAutomation:
                         tos_point = json.loads(tos_result)
                 except Exception:
                     tos_point = None
+
+                async def _tos_state() -> dict:
+                    """Read the REAL checkbox state from the DOM: native
+                    inputs + role checkboxes + React data-state toggles."""
+                    try:
+                        v = await self._page.evaluate("""() => {
+                            let native = 0;
+                            for (const cb of document.querySelectorAll('input[type="checkbox"]')) {
+                                if (cb.checked) native++;
+                            }
+                            const role = document.querySelectorAll(
+                                '[role="checkbox"][aria-checked="true"]').length;
+                            const dataState = document.querySelectorAll(
+                                '[role="checkbox"][data-state="checked"]').length;
+                            return { native: native, role: role, dataState: dataState };
+                        }""")
+                        if not isinstance(v, dict):
+                            v = {}
+                    except Exception:
+                        v = {}
+                    return v
+
                 if tos_point and 'x' in tos_point and 'y' in tos_point:
-                    # REAL trusted mouse click — this is what makes Discord's
-                    # React form actually register the checkbox state.
-                    await self._page.mouse.click(float(tos_point['x']), float(tos_point['y']))
-                    await asyncio.sleep(1.2)
-                    self._log(f"[OK] ToS real mouse click dispatched (kind={tos_point.get('kind')})")
-                    tos_checked = True
+                    # Real mouse click, then VERIFY: a click that misses
+                    # is NOT success and is never logged as one.
+                    await asyncio.sleep(0.5)
+                    state = {}
+                    for _ in range(3):
+                        await self._page.mouse.click(float(tos_point['x']), float(tos_point['y']))
+                        await asyncio.sleep(0.7)
+                        state = await _tos_state()
+                        if state.get('native') or state.get('role') or state.get('dataState'):
+                            tos_checked = True
+                            self._log(f"[OK] ToS checkbox actually checked (kind={tos_point.get('kind')} state={state})")
+                            break
+                    if not tos_checked:
+                        self._log(f"[WARN] ToS mouse click did not register (state={state}) - trying JS element click", level="warn")
+                        try:
+                            js_ok = await self._page.evaluate("""() => {
+                                const tosKeywords = ['terms of service', 'terms of use',
+                                                    'terms & conditions', 'terms and conditions',
+                                                    'i have read', 'read and agree',
+                                                    'agree to', 'by creating'];
+                                const walker = document.createTreeWalker(
+                                    document.body, NodeFilter.SHOW_TEXT, null);
+                                let node;
+                                while (node = walker.nextNode()) {
+                                    const t = node.textContent.trim().toLowerCase();
+                                    if (!tosKeywords.some(k => t.includes(k))) continue;
+                                    let el = node.parentElement;
+                                    for (let i = 0; i < 10 && el; i++) {
+                                        const cb = el.querySelector('input[type="checkbox"], [role="checkbox"]');
+                                        if (cb) {
+                                            cb.scrollIntoView({block: 'center'});
+                                            cb.click();
+                                            return 'clicked';
+                                        }
+                                        el = el.parentElement;
+                                    }
+                                }
+                                return 'not_found';
+                            }""")
+                            await asyncio.sleep(0.8)
+                            state = await _tos_state()
+                            if js_ok == 'clicked' and (state.get('native') or state.get('role') or state.get('dataState')):
+                                tos_checked = True
+                                self._log(f"[OK] ToS checked via JS element click (state={state})")
+                        except Exception as e:
+                            self._log(f"ToS JS click error: {e}", level="warn")
                 elif tos_result and tos_result != 'not_found':
-                    tos_checked = True
-                    self._log(f"[OK] ToS checked via JS: {tos_result}")
+                    # JS-only result (e.g. fallback_checked_N) - verify it stuck.
+                    await asyncio.sleep(0.8)
+                    state = await _tos_state()
+                    if state.get('native') or state.get('role') or state.get('dataState'):
+                        tos_checked = True
+                        self._log(f"[OK] ToS checked via JS: {tos_result} (verified state={state})")
+                    else:
+                        self._log(f"[WARN] ToS JS result {tos_result} did not stick (state={state})", level="warn")
                 else:
                     self._log(f"[WARN] ToS checkbox not found by JS ({tos_result}) - trying Playwright locator...")
                     # Playwright fallback: click any visible checkbox input
@@ -1466,11 +1555,67 @@ class DiscordAutomation:
             if tos_checked:
                 self._log("[OK] ToS checkbox checked")
             else:
-                self._log("[WARN] No ToS checkbox found - the Create Account button may be disabled")
+                self._log("[WARN] ToS checkbox NOT checked - the Create Account button may be disabled", level="warn")
 
-            # Everything is filled + ToS checked — pause 2s (human breather,
-            # lets React re-render the enabled state) before Create Account.
-            self._log("[Form] All fields filled, ToS checked — waiting 2s before Create Account...")
+            # — VERIFY every field is actually filled (kill fake-success) —
+            # Read the REAL input values. Anything the page did not accept
+            # is typed again; the log below reports the verified truth.
+            field_selectors = {
+                "email": 'input[name="email"]',
+                "display name": 'input[name="global_name"]',
+                "username": 'input[name="username"]',
+                "password": 'input[name="password"]',
+            }
+            expected_values = {
+                "email": self._email or "",
+                "display name": (self._username or "")[:15],
+                "username": self._username or "",
+                "password": self._password or "",
+            }
+
+            async def _read_field_values() -> dict:
+                try:
+                    v = await self._page.evaluate("""() => {
+                        const g = (sel) => { const e = document.querySelector(sel); return e ? (e.value || '') : ''; };
+                        return {
+                            email: g('input[name="email"]'),
+                            'display name': g('input[name="global_name"]'),
+                            username: g('input[name="username"]'),
+                            password: g('input[name="password"]')
+                        };
+                    }""")
+                    if not isinstance(v, dict):
+                        v = {}
+                except Exception:
+                    v = {}
+                return v
+
+            values = await _read_field_values()
+            refilled = 0
+            for key, sel in field_selectors.items():
+                got = values.get(key) or ""
+                want = expected_values.get(key) or ""
+                if want and got != want:
+                    self._log(f"[Form] {key} not actually filled ({len(got)}/{len(want)} chars) - refilling", level="warn")
+                    try:
+                        await self._page.locator(sel).click()
+                        await asyncio.sleep(0.2)
+                        await human_type(self._page, sel, want)
+                        refilled += 1
+                    except Exception as e:
+                        self._log(f"[Form] refill {key} error: {e}", level="warn")
+            if refilled:
+                await asyncio.sleep(1.0)
+                values = await _read_field_values()
+
+            filled_ok = all(
+                (values.get(k) or "") == (expected_values.get(k) or "")
+                for k in field_selectors if expected_values.get(k)
+            )
+            if filled_ok and tos_checked:
+                self._log("[Form] All fields filled + ToS checked - waiting 2s before Create Account...")
+            else:
+                self._log(f"[Form] VERIFIED state: fields filled={filled_ok} ToS checked={tos_checked} - proceeding anyway", level="warn")
             await asyncio.sleep(2.0)
 
             # ── VERIFY ToS is actually checked before trying Create Account ──

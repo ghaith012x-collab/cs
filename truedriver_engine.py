@@ -504,31 +504,83 @@ class _CdpSession:
 
 
 class _Keyboard:
+    """Real CDP keyboard input.
+
+    The old implementation dispatched synthetic, untrusted KeyboardEvent /
+    InputEvent objects from JS (document.activeElement.dispatchEvent(...)).
+    React-controlled inputs — Discord's register form — ignore those because
+    the element value never actually changes, so the bot logged 'filled'
+    while every field stayed empty and the form failed native validation
+    with "Please fill out this field".
+
+    These methods send trusted Input.dispatchKeyEvent / Input.insertText
+    over CDP instead: the browser itself generates the key/input events,
+    element.value updates, and React state follows.
+    """
+
     __slots__ = ("_tab",)
+
+    _SPECIAL = {
+        "Enter": td.SpecialKeys.ENTER,
+        "Tab": td.SpecialKeys.TAB,
+        "Space": td.SpecialKeys.SPACE,
+        "Backspace": td.SpecialKeys.BACKSPACE,
+        "Escape": td.SpecialKeys.ESCAPE,
+        "Delete": td.SpecialKeys.DELETE,
+        "ArrowLeft": td.SpecialKeys.ARROW_LEFT,
+        "ArrowUp": td.SpecialKeys.ARROW_UP,
+        "ArrowRight": td.SpecialKeys.ARROW_RIGHT,
+        "ArrowDown": td.SpecialKeys.ARROW_DOWN,
+    }
 
     def __init__(self, tab: td.Tab):
         self._tab = tab
 
+    async def _dispatch(self, payloads) -> None:
+        for payload in payloads:
+            await self._tab.send(td.cdp.input_.dispatch_key_event(**payload))
+
+    async def _insert(self, text: str) -> bool:
+        """Fallback: Input.insertText — still real browser input, so
+        React-controlled fields accept it."""
+        try:
+            await self._tab.send(td.cdp.input_.insert_text(text))
+            return True
+        except Exception:
+            return False
+
     async def press(self, key: str, **kwargs):
-        await self._tab.evaluate(
-            "(()=>{const e=new KeyboardEvent('keydown',{key:%s,bubbles:true});"
-            "document.activeElement.dispatchEvent(e);"
-            "document.activeElement.dispatchEvent(new KeyboardEvent('keyup',{key:%s,bubbles:true}));"
-            "})()" % (repr(key), repr(key))
-        )
+        special = self._SPECIAL.get(key)
+        try:
+            if special is not None:
+                payloads = td.KeyEvents(special).to_cdp_events(
+                    td.KeyPressEvent.DOWN_AND_UP)
+            elif len(key) == 1:
+                payloads = td.KeyEvents.from_text(
+                    key, td.KeyPressEvent.DOWN_AND_UP)
+            else:
+                payloads = []
+            if payloads:
+                await self._dispatch(payloads)
+                return
+        except Exception:
+            pass
+        await self._insert(key)
 
     async def type(self, text: str, delay: float = 0, **kwargs):
         # delay is in MILLISECONDS (Playwright API). human_type() passes
         # int(delay*1000) = ~75ms; treating it as seconds made each char
         # take 75s (a 22-char email = 27 minutes).
         for ch in text:
-            await self._tab.evaluate(
-                "(()=>{const t=document.activeElement;if(!t)return;"
-                "t.dispatchEvent(new KeyboardEvent('keydown',{key:%s,bubbles:true}));"
-                "t.dispatchEvent(new InputEvent('input',{data:%s,bubbles:true}));"
-                "t.dispatchEvent(new KeyboardEvent('keyup',{key:%s,bubbles:true}));"
-                "})()" % (repr(ch), repr(ch), repr(ch))
-            )
+            try:
+                payloads = td.KeyEvents.from_text(
+                    ch, td.KeyPressEvent.DOWN_AND_UP)
+                if payloads:
+                    await self._dispatch(payloads)
+                else:
+                    await self._insert(ch)
+            except Exception:
+                await self._insert(ch)
             if delay:
                 await asyncio.sleep(delay / 1000.0)
 
@@ -667,10 +719,13 @@ class _Page:
                 await self._tab.save_screenshot(path, fmt, full_page)
                 return None
             try:
-                b64 = await self._tab.screenshot_b64(fmt, full_page)
+                b64 = await asyncio.wait_for(self._tab.screenshot_b64(fmt, full_page), timeout=15)
             except Exception:
-                # Full-page capture can fail on SPAs (Discord) — retry viewport
-                b64 = await self._tab.screenshot_b64(fmt, False)
+                # Full-page capture can fail/hang on SPAs (Discord) — retry viewport
+                try:
+                    b64 = await asyncio.wait_for(self._tab.screenshot_b64(fmt, False), timeout=8)
+                except Exception:
+                    return None
             if not b64:
                 return None
             return base64.b64decode(b64)

@@ -204,7 +204,7 @@ async def _worker_capture_loop(wid: str, cfg: dict, stagger: int) -> None:
     await asyncio.sleep(stagger)
     while _running and bot is not None and bot._page is not None:
         try:
-            shot = await bot.capture_screenshot()
+            shot = await asyncio.wait_for(bot.capture_screenshot(), timeout=25)
             if shot:
                 _workers[wid]["last_shot_b64"] = shot
                 _workers[wid]["screenshots"] += 1
@@ -312,6 +312,16 @@ async def _run_worker(wid: str, cfg: dict, proxy=None) -> None:
             cam_task = asyncio.create_task(_worker_capture_loop(wid, cfg, stagger * int(cfg.get("camera_interval", 3))))
             ok = await bot.start_discord_signup()
             cam_task.cancel()
+
+            # ── Capture final screenshot for the LIVE BROWSER view ──
+            try:
+                if bot is not None and bot._page is not None:
+                    shot = await asyncio.wait_for(bot.capture_screenshot(), timeout=25)
+                    if shot:
+                        state["last_shot_b64"] = shot
+                        state["screenshots"] += 1
+            except Exception:
+                pass
 
             # ── Phone verification hit → burn this domain + rotate everything ──
             if not ok and getattr(bot, "phone_verify_detected", False):
@@ -439,6 +449,7 @@ async def _start_all_async(cfg: dict) -> None:
 async def _stop_all_async() -> None:
     global _running
     _running = False
+    _APP_LOGS.clear()
     for wid, state in list(_workers.items()):
         bot = state.get("bot")
         if bot is not None:
@@ -546,6 +557,17 @@ def handle_latest_screenshot():
                             content_type='image/png')
         except Exception:
             pass
+    # Fallback: try the bot's own screenshot store
+    if s:
+        bot = s.get("bot")
+        if bot is not None:
+            try:
+                shot = bot.get_latest_screenshot()
+                if shot:
+                    return Response(base64.b64decode(shot),
+                                    content_type='image/png')
+            except Exception:
+                pass
     return Response(status=404)
 
 
@@ -553,7 +575,7 @@ def handle_latest_screenshot():
 def handle_worker_logs(wid):
     s = _workers.get(wid)
     if not s:
-        return jsonify({"logs": [], "status": "unknown"})
+        return jsonify({"logs": list(_APP_LOGS[-200:]), "status": _running and "starting" or "idle"})
     bot = s.get("bot")
     bot_logs = bot.get_activity_log() if bot else []
     # Merge app-level lines ([Proxy] stats, [B1] Done/Failed, errors) with the
