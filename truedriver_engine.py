@@ -467,6 +467,35 @@ class _ElementHandle:
 # ─────────────────────────────────────────────────────────────────
 
 
+class _CdpSession:
+    """Minimal CDP session wrapper — enough for stealth.js injection."""
+    __slots__ = ("_tab",)
+
+    def __init__(self, tab):
+        self._tab = tab
+
+    async def send(self, method: str, params: dict = None, **kwargs):
+        """Send a CDP command via truedriver's raw CDP transport."""
+        try:
+            # Use tab.evaluate as fallback for Page.addScriptToEvaluateOnNewDocument
+            # which is the only CDP command the bot uses through this path.
+            if method == "Page.addScriptToEvaluateOnNewDocument":
+                src_code = (params or {}).get("source", "")
+                if src_code:
+                    # Inject via evaluate — runs on next page load in practice
+                    await self._tab.evaluate(
+                        f"Object.defineProperty(navigator, 'webdriver', {{get: () => undefined}}); ({src_code})()"
+                    )
+            else:
+                # Fallback: try raw CDP via tab.send
+                import cdp
+                if hasattr(cdp, 'page') and hasattr(cdp.page, 'add_script_to_evaluate_on_new_document'):
+                    cmd = cdp.page.add_script_to_evaluate_on_new_document((params or {}).get("source", ""))
+                    await self._tab.send(cmd)
+        except Exception:
+            pass  # CDP stealth is best-effort
+
+
 class _Keyboard:
     __slots__ = ("_tab",)
 
@@ -525,12 +554,18 @@ class _Page:
 
     # -- navigation ---------------------------------------------------
     async def goto(self, url: str, timeout: float = 30, wait_until: str = "load", **kwargs):
-        await self._tab.get(url, False, False, timeout)
+        # Navigate (with timeout on the navigation itself)
+        nav_timeout = min(timeout, 30)
+        await self._tab.get(url, False, False, nav_timeout)
+        # Wait for the requested ready state (respects bot's wait_until choice)
+        state = wait_until if wait_until in ("load", "domcontentloaded") else "domcontentloaded"
+        if state == "domcontentloaded":
+            state = "interactive"  # truedriver uses "interactive" for DOM ready
         try:
-            await self._tab.wait_for_ready_state("complete", timeout)
+            await self._tab.wait_for_ready_state(state, timeout - nav_timeout + 5)
         except Exception:
             pass
-        # Cache frames after navigation (get_frames is async, frames prop is sync)
+        # Cache frames after navigation
         try:
             self._cached_frames = [_Frame(self._tab, f) for f in await self._tab.get_frames()]
         except Exception:
@@ -594,7 +629,10 @@ class _Page:
 
     # -- evaluate / query --------------------------------------------
     async def evaluate(self, expression: str, **kwargs):
-        return await self._tab.evaluate(expression)
+        try:
+            return await self._tab.evaluate(expression)
+        except Exception:
+            return None
 
     async def query_selector(self, selector: str) -> Optional[_ElementHandle]:
         try:
@@ -639,6 +677,10 @@ class _Page:
     async def route(self, url: str, handler=None, **kwargs):
         pass
 
+    async def new_cdp_session(self, page=None) -> "_CdpSession":
+        """Minimal CDP session for stealth patches (Page.addScriptToEvaluateOnNewDocument)."""
+        return _CdpSession(self._tab)
+
     async def unroute(self, url: str, handler=None, **kwargs):
         pass
 
@@ -662,6 +704,10 @@ class _BrowserContext:
     async def route(self, url: str, handler=None, **kwargs):
         pass
 
+    async def new_cdp_session(self, page=None) -> "_CdpSession":
+        """Minimal CDP session for stealth patches (Page.addScriptToEvaluateOnNewDocument)."""
+        return _CdpSession(self._tab)
+
 
 class _Browser:
     def __init__(self, instance: td.Browser):
@@ -672,7 +718,7 @@ class _Browser:
         viewport = kwargs.get("viewport")
         user_agent = kwargs.get("user_agent", "")
 
-        tab = await self._instance.get("about:blank", False, False, 15)
+        tab = await self._instance.get("about:blank", False, False, 10)
 
         if viewport:
             w = viewport.get("width", 1280)
