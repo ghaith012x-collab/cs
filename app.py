@@ -449,7 +449,19 @@ async def _run_worker(wid: str, cfg: dict, proxy=None) -> None:
                 consecutive_tunnel_fails = 0
                 backoff = 0.3
 
-            _log(f"[{wid}] Failed (attempt {attempt+1}/{max_tries}, {label})", level="warn")
+            # ── Per-attempt failure summary — self-explanatory ──
+            nav_error = getattr(bot, "_nav_error", "") or ""
+            has_email = bool(getattr(bot, "_email", ""))
+            mail_failed = bool(getattr(bot, "_mail_failed", False))
+            if mail_failed:
+                reason = "inbox creation failed — no email available"
+            elif not nav_ok:
+                reason = nav_error or "navigation failed (no reason recorded)"
+            elif not ok:
+                reason = "signup failed (form/captcha/phone)"
+            else:
+                reason = "unknown"
+            _log(f"[{wid}] Attempt {attempt+1}/{max_tries}: {reason} [{label}]", level="warn")
         except Exception as e:
             state["status"] = "error"
             _log(f"[{wid}] error: {e}")

@@ -228,6 +228,10 @@ class DiscordAutomation:
         # worker uses this to retry the same proxy/fingerprint instead of
         # rotating (mail failures are not IP problems).
         self._mail_failed = False
+        # Human-readable reason the last _goto_register() returned False —
+        # surfaced in the worker's per-attempt summary so every failure is
+        # self-explanatory ("TOR circuit blocked: page unresponsive after 9s").
+        self._nav_error: str = ""
         self._fingerprint = generate_fingerprint(worker_id)
 
     def _log(self, message: str, level: str = "info") -> None:
@@ -557,6 +561,7 @@ class DiscordAutomation:
         )
         if dead_proxy:
             proxy_label = "PROXY SESSION" if self.proxy else "TOR CIRCUIT"
+            self._nav_error = f"{proxy_label.lower()} dead (browser error page: {page_url[:60]})"
             self._log(f"[Nav] {proxy_label} DEAD (url={page_url[:60]}) - rotating to fresh circuit", level="warn")
             return False
 
@@ -566,6 +571,7 @@ class DiscordAutomation:
         # here instead of burning the whole form-poll window on it.
         if str(page_title) == "(unknown)" and str(page_url) == "(unknown)":
             proxy_label = "PROXY SESSION" if self.proxy else "TOR CIRCUIT"
+            self._nav_error = f"{proxy_label.lower()} unresponsive — page never loaded (title+url both unknown after {timeout_ms}ms)"
             self._log(f"[Nav] Page unresponsive after {timeout_ms}ms ({proxy_label}) - rotating", level="warn")
             return False
 
@@ -579,6 +585,7 @@ class DiscordAutomation:
                 "attention required", "rate limit", "ratelimited", "rate limited",
                 "too many requests", "slowdown", "try again later", "429",
             )):
+                self._nav_error = f"blocked by Discord/Cloudflare — body text: {body_text[:80]}"
                 self._log(f"[Nav] BLOCKED — body contains: {body_text[:100]}", level="warn")
                 return False
         except Exception:
@@ -593,6 +600,7 @@ class DiscordAutomation:
             rl_text = ""
         if any(kw in rl_text for kw in ("rate limit", "ratelimited", "rate limited",
                                         "too many requests", "slowdown", "429")):
+            self._nav_error = "rate limited (429) by Discord"
             self._log("[Nav] RATE LIMITED (429) - rotating TOR circuit", level="warn")
             return False
 
@@ -606,6 +614,7 @@ class DiscordAutomation:
                            "too many requests", "slowdown", "try again later"]
         title_lower = (page_title or "").lower()
         if any(kw in title_lower for kw in blocked_keywords):
+            self._nav_error = f"blocked — Cloudflare/firewall challenge (title: {str(page_title)[:60]})"
             self._log('[Nav] BLOCKED by Cloudflare/firewall (title: "' + str(page_title)[:60] + '")', level="warn")
             return False
 
@@ -691,6 +700,7 @@ class DiscordAutomation:
                         blank_since = time.time()
                     elif time.time() - blank_since >= 8:
                         proxy_label = "proxy session" if self.proxy else "TOR exit"
+                        self._nav_error = f"{proxy_label} dead/rate-limited — Discord SPA mounted but painted nothing for 8s"
                         self._log(f"[Nav] BLANK RENDER for 8s (SPA mounted, no content) - {proxy_label} likely dead/rate-limited - rotating circuit", level="warn")
                         return False
                 else:
@@ -756,6 +766,7 @@ class DiscordAutomation:
             pass
 
         proxy_label = "fresh proxy session" if self.proxy else "fresh TOR circuit"
+        self._nav_error = f"Discord form never rendered (15s poll exhausted) — rotating to {proxy_label}"
         self._log(f"[Nav] Form did not render within 15s - rotating to {proxy_label}", level="warn")
         return False
 
