@@ -168,14 +168,12 @@ class ProxyPool:
         # validation is skipped; workers rotate on failure via pool.release().
         vault = vault_proxies()
         self.fetched_count = len(vault)
-        # Vault sessions are freshly issued residential sessions — trusted as
-        # valid. Bulk-testing 5000+ through one account rate-limits and marks
-        # good proxies failed (pool collapsed to 1 valid). They self-verify
-        # during real signups: release(ok=False) blacklists the dead ones.
-        for pr in vault:
-            pr["_valid"] = True
-        self.valid_count = len(vault)
+        # Don't pre-mark as _valid — the sweep tests against discord.com
+        # and only marks reachable ones. Workers probe-gate before launching.
+        # The old approach of marking all as _valid was misleading because
+        # HTTP ipify probes had nothing to do with Discord accessibility.
         self._proxies = vault
+        self.valid_count = 0  # recomputed after sweep
         self._used_at = {}
         self._failed = set()
         self.last_refresh = time.time()
@@ -240,25 +238,25 @@ class ProxyPool:
 
     async def sweep(self, window: float = 10.0,
                     concurrency: int = SWEEP_CONCURRENCY,
-                    timeout: float = 4.0,
+                    timeout: float = 3.0,
                     log: Optional[Callable] = None) -> dict:
-        """10s startup sweep: concurrently test every loaded session and mark
-        the ones that respond as KNOWN-GOOD so workers prefer them.
+        """10s startup sweep: concurrently test every loaded session against
+        Discord itself (HTTPS) so 'valid' actually means Discord-reachable.
 
-        Deliberately conservative about failures: a burst probe can trip the
-        gateway's per-account connection cap and false-fail good sessions
-        (observed: 500 concurrent marked 5324/5324 dead while single-shot
-        probes passed moments later). So sweep failures are NEVER blacklisted
-        — they stay available and are re-checked by the worker's single-shot
-        probe before a browser launches. Only real worker/single-shot failures
-        blacklist a session.
+        Testing against ipify.org via HTTP was a lie — residential proxies
+        that pass an HTTP handshake to a lightweight API routinely fail when
+        the Clearcote browser tries HTTPS to discord.com. Now each probe
+        issues a real HTTPS GET to discord.com through the proxy and reads
+        the resolved IP so the UI shows what IP each session routes through.
 
-        Uses a plain-HTTP probe (no TLS handshake) so each check is as fast
-        as possible and immune to TLS-fingerprint filtering.
+        Conservative about failures: burst probes can trip gateway connection
+        caps and false-fail good sessions. Sweep failures are NEVER blacklisted
+        — the worker's single-shot probe remains the trusted gate. Only real
+        worker failures blacklist a session.
 
-        Returns {tested, valid, unproven, untested}.
+        Returns {tested, reachable, unproven, untested}.
         """
-        stats = {"tested": 0, "valid": 0, "unproven": 0, "untested": 0}
+        stats = {"tested": 0, "reachable": 0, "unproven": 0, "untested": 0}
         targets = [p for p in self._proxies if p.get("key") not in self._failed]
         total = len(targets)
         if not targets:
@@ -289,16 +287,30 @@ class ProxyPool:
                 if time.monotonic() >= deadline:
                     return  # window expired — leave the rest untested
                 ok = False
+                resolved_ip = ""
                 try:
-                    async with session.get("http://api.ipify.org",
-                                           proxy=_purl(proxy)) as r:
-                        ok = r.status == 200
+                    async with session.get("https://discord.com",
+                                           proxy=_purl(proxy),
+                                           headers={"User-Agent": "Mozilla/5.0"}) as r:
+                        ok = r.status in (200, 403, 429)  # any real response = proxy works
+                        # Try to get the resolved IP from the response headers
+                        # or from the connection (best-effort)
+                        try:
+                            remote = r.connection.transport.get_extra_info("peername")
+                            if remote:
+                                resolved_ip = str(remote[0])
+                        except Exception:
+                            pass
+                except asyncio.TimeoutError:
+                    ok = False
                 except Exception:
                     ok = False
                 if ok:
                     proxy["_valid"] = True
                     self._failed.discard(proxy.get("key"))
-                    stats["valid"] += 1
+                    stats["reachable"] += 1
+                    if resolved_ip:
+                        proxy["_resolved_ip"] = resolved_ip
                 else:
                     # Unproven — NOT blacklisted (burst probes false-fail).
                     stats["unproven"] += 1
@@ -308,7 +320,7 @@ class ProxyPool:
                     last_log[0] = now
                     if log:
                         log(f"[Proxy] Sweep {stats['tested']}/{total} tested — "
-                            f"{stats['valid']} confirmed valid, "
+                            f"{stats['reachable']} Discord-reachable, "
                             f"{stats['unproven']} unproven")
 
         try:

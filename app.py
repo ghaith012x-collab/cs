@@ -459,18 +459,21 @@ async def _run_worker(wid: str, cfg: dict, proxy=None) -> None:
         state["bot"] = None
 
 async def _proxy_validate_loop() -> None:
-    """Re-test proxies in the background so 'valid' stays honest and dead
-    sessions stop being handed to workers. Runs every 3 minutes."""
+    """Background: re-confirm which proxies can reach Discord, using the
+    worker's single-shot HTTPS probe. Dead sessions get blacklisted so
+    workers never waste a browser launch on them. Runs every 3 minutes."""
     while True:
         try:
             if _proxies_available and proxy_pool is not None and proxy_pool.count:
-                await proxy_pool.validate_all()
-                # Read the real valid_count computed from _valid flags — never
-                # stale (sweep updates it, not just refresh).
-                n = proxy_pool.valid_count
+                # Count truly Discord-reachable sessions (proven by sweep
+                # or worker success), not the "all loaded" default.
+                reachable = sum(
+                    1 for p in proxy_pool._proxies
+                    if p.get("_valid") and p.get("key") not in proxy_pool._failed
+                )
                 bl = len(proxy_pool._failed)
-                _log(f"[Proxy] Live validation: {n} working, {bl} blacklisted "
-                     f"of {proxy_pool.count} loaded")
+                _log(f"[Proxy] Live validation: {reachable} Discord-reachable, "
+                     f"{bl} blacklisted of {proxy_pool.count} loaded")
         except Exception as e:
             _log(f"[Proxy] validation error: {e}", level="warn")
         await asyncio.sleep(180)
@@ -553,26 +556,33 @@ async def _start_all_async(cfg: dict) -> None:
         _log("[Proxy] No proxy sessions — TOR-only fallback (fresh circuit per attempt)")
 
     if n_sessions and _proxies_available and proxy_pool is not None:
-        # ── Startup proxy sweep (~10s) ──
-        # Concurrently confirm which sessions respond BEFORE any worker
-        # touches the pool, so known-good ones are used first. Failures are
-        # deliberately NOT blacklisted here — a burst probe can trip the
-        # gateway's connection cap and false-fail good sessions (seen: 500
-        # concurrent marked all 5324 dead while single-shot probes passed).
-        # The worker's per-attempt probe remains the trusted gate.
-        _log(f"[Proxy] Sweeping {n_sessions} sessions (10s window, concurrent HTTP probes)...")
+        # ── Start workers IMMEDIATELY — they self-probe proxies ──
+        # The sweep below runs concurrently; workers don't wait for it.
+        # Each worker does a fast single-shot probe before launching a
+        # browser, so dead sessions are caught in ~3s not 10s.
+        for i, wid in enumerate(WORKER_IDS):
+            _log(f"[{wid}] Starting worker...")
+            asyncio.create_task(_run_worker(wid, cfg, None))
+
+        # ── Background sweep: test against discord.com (real, not ipify) ──
+        # This runs concurrently with workers. Results only improve
+        # future proxy picks; workers don't wait for it.
+        _log(f"[Proxy] Background sweep of {n_sessions} sessions against discord.com (10s window)...")
         try:
             sw = await proxy_pool.sweep(window=10.0, log=_log)
-            _log(f"[Proxy] Sweep done: {sw['valid']} confirmed valid, "
-                 f"{sw['unproven']} unproven (kept, not blacklisted), "
-                 f"{sw['untested']} untested of {n_sessions} — workers prefer confirmed-valid, probe-gate the rest")
+            _log(f"[Proxy] Sweep done: {sw['reachable']} Discord-reachable, "
+                 f"{sw['unproven']} unproven (available, re-checked on use), "
+                 f"{sw['untested']} untested of {n_sessions} — "
+                 f"workers probe-gate every session before launching a browser")
         except Exception as e:
             _log(f"[Proxy] Sweep error: {e}", level="warn")
         asyncio.create_task(_proxy_validate_loop())
 
-    for i, wid in enumerate(WORKER_IDS):
-        _log(f"[{wid}] Starting worker...")
-        asyncio.create_task(_run_worker(wid, cfg, None))
+    if not n_sessions:
+        # No proxy sessions — start workers directly (TOR fallback)
+        for i, wid in enumerate(WORKER_IDS):
+            _log(f"[{wid}] Starting worker...")
+            asyncio.create_task(_run_worker(wid, cfg, None))
 
 
 async def _stop_all_async() -> None:
