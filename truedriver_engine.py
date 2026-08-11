@@ -298,6 +298,9 @@ class _Locator:
         return _ElementHandle(self._tab, el)
 
     async def evaluate(self, expression: str, **kwargs):
+        s = expression.strip()
+        if s.startswith('() =>') or s.startswith('async () =>') or s.startswith('function('):
+            expression = f'({expression})()'
         el = await self._require(timeout=5)
         async def _do():
             return await el.apply(expression, kwargs.get("return_by_value", True))
@@ -361,6 +364,9 @@ class _Frame:
         return _Locator(self._tab, selector, frame_url=self.url)
 
     async def evaluate(self, expression: str, **kwargs) -> Any:
+        s = expression.strip()
+        if s.startswith('() =>') or s.startswith('async () =>') or s.startswith('function('):
+            expression = f'({expression})()'
         await self._tab.switch_to_frame(self._cdp_frame)
         try:
             return await self._tab.evaluate(expression)
@@ -648,6 +654,12 @@ class _Page:
 
     # -- evaluate / query --------------------------------------------
     async def evaluate(self, expression: str, **kwargs):
+        # truedriver passes expressions directly to CDP Runtime.evaluate
+        # which does NOT auto-invoke function expressions like Playwright.
+        # The bot uses ()=>{...} arrow functions extensively — wrap them.
+        s = expression.strip()
+        if s.startswith('() =>') or s.startswith('async () =>') or s.startswith('function('):
+            expression = f'({expression})()'
         try:
             return await self._tab.evaluate(expression)
         except Exception:
@@ -801,8 +813,8 @@ class _BrowserType:
             headless=headless,
             sandbox=False,
             browser_args=args if args else [],
-            browser_connection_timeout=60,
-            browser_connection_max_tries=3,
+            browser_connection_timeout=25,
+            browser_connection_max_tries=2,
         )
         if proxy_url:
             cfg.proxy = proxy_url
