@@ -4699,8 +4699,8 @@ async def solve_hcaptcha_accessibility(page, iframe,
                                         ollama_model: str = "",
                                         ollama_url: str = "",
                                         log: Optional[Callable] = None,
-                                        max_attempts: int = 6,
-                                        max_questions: int = 10) -> bool:
+                                        max_attempts: int = 3,
+                                        max_questions: int = 6) -> bool:
     """Solve hCaptcha via the Accessibility Challenge using Playwright's
     frame_locator for reliable cross-origin iframe interaction.
 
@@ -4737,7 +4737,7 @@ async def solve_hcaptcha_accessibility(page, iframe,
         try:
             import aiohttp
             async with aiohttp.ClientSession(
-                timeout=aiohttp.ClientTimeout(total=8)
+                timeout=aiohttp.ClientTimeout(total=3)
             ) as session:
                 async with session.get(f"{ollama_url}/api/tags") as resp:
                     if resp.status != 200:
@@ -4795,7 +4795,7 @@ async def solve_hcaptcha_accessibility(page, iframe,
 
         async def _warm_model() -> int:
             async with aiohttp.ClientSession(
-                timeout=aiohttp.ClientTimeout(total=30)
+                timeout=aiohttp.ClientTimeout(total=8)
             ) as s:
                 async with s.post(f"{ollama_url}/api/chat", json=warm_payload) as r:
                     return r.status
@@ -4808,7 +4808,7 @@ async def solve_hcaptcha_accessibility(page, iframe,
 
     # ── Helpers ────────────────────────────────────────────
 
-    async def _ollama_chat(image_b64: str, prompt: str, timeout: float = 45.0) -> str:
+    async def _ollama_chat(image_b64: str, prompt: str, timeout: float = 20.0) -> str:
         """Send image + prompt to Ollama /api/chat (vision models)."""
         try:
             import aiohttp
@@ -4879,7 +4879,7 @@ async def solve_hcaptcha_accessibility(page, iframe,
         lines.append("Answer:")
         return "\n".join(lines)
 
-    async def _ollama_answer_text(question: str, timeout: float = 20.0) -> str:
+    async def _ollama_answer_text(question: str, timeout: float = 12.0) -> str:
         """Ask Ollama (text-only chat) for a single-word answer to a question.
         Uses few-shot examples + a majority vote (2 samples, tiebreak with a
         3rd) so small local models answer correctly instead of guessing.
@@ -4892,7 +4892,7 @@ async def solve_hcaptcha_accessibility(page, iframe,
         # Each vote gets the FULL timeout budget. A single-GPU Ollama
         # serializes parallel requests, so the old timeout/votes budget made
         # EVERY vote time out on slow instances - the logs' "2 x 22s".
-        per_sample = max(12.0, timeout + 5.0)
+        per_sample = max(8.0, timeout + 3.0)
 
         async def _post() -> str:
             import aiohttp
@@ -5003,7 +5003,7 @@ async def solve_hcaptcha_accessibility(page, iframe,
             return ""
         return " ".join(cleaned[:3])
 
-    async def _llm_answer_question(question: str, timeout: float = 40.0) -> str:
+    async def _llm_answer_question(question: str, timeout: float = 12.0) -> str:
         """Layer 3: ask ANY LLM for the answer to an unknown question.
         Tries in order (each with up to 2 retries):
         1. Ollama (OLLAMA_URL env)
@@ -5279,7 +5279,7 @@ async def solve_hcaptcha_accessibility(page, iframe,
         except Exception as e:
             log(f"[Accessibility] way 1 (JS) failed: {str(e)[:80]}", level="warn")
 
-        await asyncio.sleep(1.2)
+        await asyncio.sleep(0.6)
 
         # ── WAY 2: Playwright aria-label / role click ──
         try:
@@ -5304,7 +5304,7 @@ async def solve_hcaptcha_accessibility(page, iframe,
         except Exception as e:
             log(f"[Accessibility] way 2 (aria-label) failed: {str(e)[:80]}", level="warn")
 
-        await asyncio.sleep(1.2)
+        await asyncio.sleep(0.6)
 
         # ── WAY 3: CSS selector + force-click ──
         try:
@@ -5317,7 +5317,7 @@ async def solve_hcaptcha_accessibility(page, iframe,
         except Exception as e:
             log(f"[Accessibility] way 3 (force-click) failed: {str(e)[:80]}", level="warn")
 
-        await asyncio.sleep(1.2)
+        await asyncio.sleep(0.6)
 
         # ── WAY 4: Dispatch event on any matching element ──
         try:
@@ -5421,7 +5421,7 @@ async def solve_hcaptcha_accessibility(page, iframe,
             }""")
             if js_result:
                 log("[Accessibility] Clicked 3-dots via JS (way 1)")
-                for _ in range(10):  # 5 seconds
+                for _ in range(6):  # 3 seconds
                     if await _menu_visible(hcaptcha):
                         menu_opened = True
                         log("[Accessibility] Menu opened (way 1)")
@@ -5439,7 +5439,7 @@ async def solve_hcaptcha_accessibility(page, iframe,
                         await btn.wait_for(state="visible", timeout=3000)
                         await btn.click(timeout=2000)
                         log(f"[Accessibility] Clicked 3-dots via role '{label}' (way 2)")
-                        for _ in range(10):
+                        for _ in range(6):
                             if await _menu_visible(hcaptcha):
                                 menu_opened = True
                                 break
@@ -5458,7 +5458,7 @@ async def solve_hcaptcha_accessibility(page, iframe,
                 await btn.wait_for(state="visible", timeout=3000)
                 await btn.click(force=True, timeout=3000)
                 log("[Accessibility] Force-clicked #menu-info (way 3)")
-                for _ in range(10):
+                for _ in range(6):
                     if await _menu_visible(hcaptcha):
                         menu_opened = True
                         break
@@ -5471,7 +5471,7 @@ async def solve_hcaptcha_accessibility(page, iframe,
             try:
                 await hcaptcha.locator("#menu-info").first.dispatch_event("click")
                 log("[Accessibility] Dispatched click (way 4)")
-                for _ in range(10):
+                for _ in range(6):
                     if await _menu_visible(hcaptcha):
                         menu_opened = True
                         break
@@ -5504,7 +5504,7 @@ async def solve_hcaptcha_accessibility(page, iframe,
             "return null;"
             "}"
         )
-        for _ci in range(20):  # 20 x 0.5s = 10s max
+        for _ci in range(12):  # 12 x 0.5s = 6s max
             try:
                 _r = await _challenge_js(poll_js)
                 if _r and 'input:' in str(_r):
@@ -7539,7 +7539,7 @@ async def solve_hcaptcha_accessibility(page, iframe,
             # Ollama /api/chat as text (no screenshot, no vision model).
             # Hard timeout so a slow model can't stall the captcha.
             log(f"[Accessibility] Q{q} UNKNOWN question (no local match) — calling Layer 3 LLM")
-            ans = await _llm_answer_question(text, timeout=40.0)
+            ans = await _llm_answer_question(text, timeout=12.0)
             if ans:
                 log(f"[Accessibility] Q{q} Layer 3 LLM answered: {ans}")
                 return ans
@@ -7621,8 +7621,8 @@ async def solve_hcaptcha_accessibility(page, iframe,
         """Click Next / Submit on the accessibility challenge.
         Primary: JS injection via _challenge_js (works on nested iframes).
         The 1.5s wait avoids the Skip button which shares coordinates."""
-        log("[Accessibility] Waiting 1.5s before clicking Next (avoid Skip)")
-        await asyncio.sleep(1.5)
+        log("[Accessibility] Waiting 0.6s before clicking Next (avoid Skip)")
+        await asyncio.sleep(0.6)
 
         # ── Primary: JS injection — click the visible action button ──
         js_click = r"""() => {
@@ -7802,7 +7802,7 @@ async def solve_hcaptcha_accessibility(page, iframe,
             if not await _open_accessibility_challenge(hcaptcha):
                 log("[Accessibility] Could not open accessibility challenge",
                     level="warn")
-                await asyncio.sleep(1.5)
+                await asyncio.sleep(0.8)
                 continue
 
             # ── Captcha-chain loop: keep solving until iframe disappears ──
@@ -7822,7 +7822,7 @@ async def solve_hcaptcha_accessibility(page, iframe,
                         log("[Accessibility] Could not re-open accessibility for chain",
                             level="warn")
                         break
-                    await asyncio.sleep(1.5)
+                    await asyncio.sleep(0.8)
 
                 # ── Answer every question in this chain ──
                 # Track recent Q texts & answers to detect infinite loops
@@ -7851,8 +7851,8 @@ async def solve_hcaptcha_accessibility(page, iframe,
                                     level="warn")
                                 break
                     if answer is None:
-                        log(f"[Accessibility] Q{q}: No answer — waiting 1.5s then clicking Skip", level="warn")
-                        await asyncio.sleep(1.5)
+                        log(f"[Accessibility] Q{q}: No answer — waiting 0.6s then clicking Skip", level="warn")
+                        await asyncio.sleep(0.6)
                         try:
                             skip_result = await _challenge_js(
                                 r"""() => {
@@ -7873,7 +7873,7 @@ async def solve_hcaptcha_accessibility(page, iframe,
                                 log(f"[Accessibility] Q{q} skip button not found — moving to next question anyway")
                         except Exception as e:
                             log(f"[Accessibility] Q{q} skip error: {e}")
-                        await asyncio.sleep(1.5)
+                        await asyncio.sleep(0.6)
                         continue
 
                     log(f"[Accessibility] Q{q} solved: {answer}")
@@ -7906,7 +7906,7 @@ async def solve_hcaptcha_accessibility(page, iframe,
                 # The widget iframe (newassets.hcaptcha.com) stays in the DOM
                 # forever, so only look for the CHALLENGE iframe — otherwise
                 # we'd loop forever on the idle widget.
-                await asyncio.sleep(1.0)
+                await asyncio.sleep(0.5)
                 try:
                     _chall = page.locator(
                         'iframe[title="hCaptcha challenge"], '
@@ -7926,7 +7926,7 @@ async def solve_hcaptcha_accessibility(page, iframe,
 
             log(f"[Accessibility] Attempt {attempt} did not solve — retrying",
                 level="warn")
-            await asyncio.sleep(1.0)
+            await asyncio.sleep(0.5)
 
         log("[Accessibility] [FAIL] Could not solve after all attempts", level="error")
         return False

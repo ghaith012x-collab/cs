@@ -982,8 +982,8 @@ class DiscordAutomation:
                 except Exception:
                     pass
                 idle_checks = 0
-                for check_i in range(6):
-                    await asyncio.sleep(1.5)
+                for check_i in range(4):
+                    await asyncio.sleep(1.0)
                     if await self._past_captcha():
                         self._log("[Captcha] Page past captcha — clicking Create Account")
                         await self._click_form_submit()
