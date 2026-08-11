@@ -19,7 +19,8 @@ lxml>=5.0.0
 
 # Existing project deps
 # Stealth engine: truedriver + Thorium (CDP-native)
-truedriver>=0.13.0
+# NOTE: PyPI package version is 0.1.5 (fork of zendriver 0.13.x).
+truedriver>=0.1.5
 Pillow>=10.0.0
 asyncpg>=0.29.0
 flask>=3.0.0
