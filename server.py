@@ -872,6 +872,7 @@ class DiscordAutomation:
             self._log("[Captcha] Waiting for hCaptcha to load (no timeout)...")
             last_state = "waiting"
             iframe = None
+            widget_since = None  # when the widget iframe first became visible
 
             while True:
                 if await self._past_captcha():
@@ -897,7 +898,7 @@ class DiscordAutomation:
                         let tallSrc = '';
                         for (const f of document.querySelectorAll('iframe[src*="hcaptcha"]')) {
                             const r = f.getBoundingClientRect();
-                            if (f.offsetParent !== null && r.height >= 250) {
+                            if (f.offsetParent !== null && r.height >= 200) {
                                 tallSrc = (f.src || f.title || 'present').substring(0, 80);
                                 break;
                             }
@@ -945,6 +946,26 @@ class DiscordAutomation:
                     self._log(f"[Captcha] State: {last_state} → {new_state}")
                     last_state = new_state
 
+                # ── In-loop fallback: widget visible ~6s but the challenge
+                # never matched the strict selectors (drag puzzles often
+                # render in odd iframe URLs). Grab ANY hcaptcha iframe and
+                # let the solver figure it out — beats polling forever.
+                if new_state == "widget-loaded":
+                    if widget_since is None:
+                        widget_since = time.time()
+                    elif time.time() - widget_since > 6.0:
+                        try:
+                            iframe = await self._page.query_selector(
+                                'iframe[src*="hcaptcha.com"]'
+                            )
+                        except Exception:
+                            iframe = None
+                        if iframe:
+                            self._log("[Captcha] Widget visible 6s+ without strict challenge match — using fallback iframe", level="warn")
+                            break
+                else:
+                    widget_since = None
+
                 # ── Challenge is fully loaded → grab the iframe and solve ──
                 if new_state == "challenge-ready":
                     try:
@@ -966,13 +987,18 @@ class DiscordAutomation:
                         self._log("[Captcha] [READY] Challenge rendered (widget) — solving now")
                         break
 
+                # ── Challenge images still loading — give each ~3s to render ──
+                if new_state == "challenge-loading":
+                    await asyncio.sleep(3.0)
+                    continue
+
                 # ── If widget is visible but no challenge yet, keep waiting ──
                 if new_state in ("widget-loaded", "widget-loading"):
-                    await asyncio.sleep(0.5)
+                    await asyncio.sleep(1.0)
                     continue
 
                 # ── If nothing is visible yet, keep polling ──
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(1.0)
 
             # ── Fallback: if we timed out but have ANY hCaptcha iframe, try it ──
             if not iframe:
