@@ -630,14 +630,24 @@ class DiscordAutomation:
 
         # ── Poll for form elements ──
         # Discord uses aria-label on inputs, not name/id — use broad selectors.
-        # 0.5s polls: healthy residential sessions render in 1-3s, so a 20s
-        # window is generous and dead sessions fail fast instead of burning 30s.
-        self._log("[Nav] Waiting for registration form to render...")
+        #
+        # TOR budget is long ON PURPOSE: the Discord shell arrives fast (title +
+        # #app-mount) but React needs ~200 JS bundles that Cloudflare gates
+        # behind its managed challenge (/cdn-cgi/challenge-platform) for flagged
+        # IPs, and every asset costs 1-3s per TOR round trip. Both paths take
+        # 20-40s — well past the old 15s poll. So: give TOR the full budget,
+        # watch for the cf_clearance cookie (challenge passed → form follows),
+        # and only rotate when the budget is exhausted. Residential sessions
+        # keep the fast-fail behavior: a live session boots in 1-3s, so 8s of
+        # blankness there is a genuinely dead node.
+        challenge_budget = 40.0 if not self.proxy else 15.0
+        blank_bail = 8.0 if self.proxy else challenge_budget - 4.0
+        self._log(f"[Nav] Waiting for registration form to render (budget={challenge_budget:.0f}s, blank_bail={blank_bail:.0f}s)...")
         blank_since = None       # when the page first looked blank
         login_clicked = False    # already clicked the Register link once
         last_log = -1.0
         start_ts = time.time()
-        while time.time() - start_ts < 15.0:
+        while time.time() - start_ts < challenge_budget:
             elapsed = time.time() - start_ts
             try:
                 checks = await asyncio.wait_for(self._page.evaluate("""() => {
@@ -666,6 +676,7 @@ class DiscordAutomation:
                         hasAppMount: document.querySelector("#app-mount") !== null,
                         inputCount: allInputs.length,
                         buttonCount: allButtons.length,
+                        cfClearance: document.cookie.indexOf('cf_clearance=') !== -1,
                         textPreview: text.substring(0, 250)
                     });
                 }"""), timeout=2.0)
@@ -677,7 +688,7 @@ class DiscordAutomation:
                 # Log every ~4s with input/button counts for debugging
                 if elapsed >= last_log + 4.0:
                     last_log = elapsed
-                    self._log(f"[Nav] Poll {int(elapsed)}s: email={state.get('email')} ageGate={state.get('ageGate')} login={state.get('isLogin')} inputs={state.get('inputCount')} buttons={state.get('buttonCount')} text={state.get('textPreview','')[:60]}")
+                    self._log(f"[Nav] Poll {int(elapsed)}s: email={state.get('email')} ageGate={state.get('ageGate')} login={state.get('isLogin')} inputs={state.get('inputCount')} buttons={state.get('buttonCount')} cf={state.get('cfClearance')} text={state.get('textPreview','')[:60]}")
 
                 if state.get("email") and state.get("username"):
                     self._log(f"[Nav] SUCCESS! Full form rendered after {int(elapsed)}s")
@@ -698,10 +709,19 @@ class DiscordAutomation:
                         and not (state.get("textPreview") or "").strip()):
                     if blank_since is None:
                         blank_since = time.time()
-                    elif time.time() - blank_since >= 8:
+                        if not self.proxy:
+                            self._log("[Nav] SPA mounted but React not booted — Cloudflare managed challenge / TOR-slow path. "
+                                      f"Watching for cf_clearance + form render (bail after {blank_bail:.0f}s blank)...")
+                    # cf_clearance set = challenge passed — assets unblocked, form should follow.
+                    if state.get("cfClearance"):
+                        if blank_since is not None:
+                            self._log("[Nav] cf_clearance cookie appeared — Cloudflare challenge passed, waiting for React...")
+                        blank_since = None
+                    elif time.time() - blank_since >= blank_bail:
                         proxy_label = "proxy session" if self.proxy else "TOR exit"
-                        self._nav_error = f"{proxy_label} dead/rate-limited — Discord SPA mounted but painted nothing for 8s"
-                        self._log(f"[Nav] BLANK RENDER for 8s (SPA mounted, no content) - {proxy_label} likely dead/rate-limited - rotating circuit", level="warn")
+                        bail_s = int(blank_bail)
+                        self._nav_error = f"{proxy_label} never passed Cloudflare — SPA mounted but painted nothing for {bail_s}s"
+                        self._log(f"[Nav] BLANK RENDER for {bail_s}s (SPA mounted, no content, no cf_clearance) - {proxy_label} blocked/slow - rotating circuit", level="warn")
                         return False
                 else:
                     blank_since = None
@@ -766,8 +786,8 @@ class DiscordAutomation:
             pass
 
         proxy_label = "fresh proxy session" if self.proxy else "fresh TOR circuit"
-        self._nav_error = f"Discord form never rendered (15s poll exhausted) — rotating to {proxy_label}"
-        self._log(f"[Nav] Form did not render within 15s - rotating to {proxy_label}", level="warn")
+        self._nav_error = f"Discord form never rendered ({int(challenge_budget)}s poll exhausted) — rotating to {proxy_label}"
+        self._log(f"[Nav] Form did not render within {int(challenge_budget)}s - rotating to {proxy_label}", level="warn")
         return False
 
     async def capture_screenshot(self) -> str:
