@@ -122,9 +122,9 @@ async def human_type(page, selector: str, text: str):
     except Exception:
         pass
     for i, char in enumerate(text):
-        # Base 50-150ms per char with Gaussian distribution
-        delay = max(20, random.gauss(80, 30)) / 1000.0
-        if random.random() < 0.05:  # 5% chance of pause
+        # Base 90-180ms per char with Gaussian distribution (slower, smoother)
+        delay = max(35, random.gauss(125, 35)) / 1000.0
+        if random.random() < 0.06:  # 6% chance of pause
             delay += random.gauss(800, 200) / 1000.0
         if random.random() < 0.02 and i > 0:  # 2% chance of backspace
             await page.keyboard.press("Backspace")
@@ -1159,7 +1159,7 @@ class DiscordAutomation:
 
             if success and 'selected' in str(success):
                 self._log(f"Selected {label}: {option_text} ({success})")
-                await asyncio.sleep(0.4)
+                await asyncio.sleep(0.8)
                 return True
 
             self._log(f"JS result for {label}: {success}")
@@ -1309,9 +1309,9 @@ class DiscordAutomation:
                 return False
 
             await email_input.click()
-            await asyncio.sleep(random.uniform(0.4, 0.9))
+            await asyncio.sleep(random.uniform(0.7, 1.3))
             await human_type(self._page, 'input[name="email"]', self._email)
-            await asyncio.sleep(random.uniform(0.5, 1.2))
+            await asyncio.sleep(random.uniform(0.9, 1.8))
 
             # Generate username with random digits suffix (more human-like)
             consonants = 'bcdfghjklmnpqrstvwxyz'
@@ -1328,18 +1328,18 @@ class DiscordAutomation:
             try:
                 await self._page.wait_for_selector('input[name="global_name"]', timeout=5000)
                 await self._page.locator('input[name="global_name"]').click()
-                await asyncio.sleep(random.uniform(0.3, 0.7))
+                await asyncio.sleep(random.uniform(0.5, 1.0))
                 await human_type(self._page, 'input[name="global_name"]', display_name)
-                await asyncio.sleep(random.uniform(0.4, 1.0))
+                await asyncio.sleep(random.uniform(0.8, 1.6))
             except:
                 pass
             await self._human_pause()
 
             self._log(f"Username: {self._username}")
             await self._page.locator('input[name="username"]').click()
-            await asyncio.sleep(random.uniform(0.4, 0.9))
+            await asyncio.sleep(random.uniform(0.7, 1.3))
             await human_type(self._page, 'input[name="username"]', self._username)
-            await asyncio.sleep(random.uniform(0.5, 1.2))
+            await asyncio.sleep(random.uniform(0.9, 1.8))
 
             # Generate password
             first = random.choice('ABCDEFGHJKLMNPQRSTUVWXYZ')
@@ -1351,9 +1351,9 @@ class DiscordAutomation:
 
             self._log("Filling password")
             await self._page.locator('input[name="password"]').click()
-            await asyncio.sleep(random.uniform(0.4, 0.9))
+            await asyncio.sleep(random.uniform(0.7, 1.3))
             await human_type(self._page, 'input[name="password"]', self._password)
-            await asyncio.sleep(random.uniform(0.5, 1.2))
+            await asyncio.sleep(random.uniform(0.9, 1.8))
 
             # DOB
             month_val = random.randint(1, 12)
@@ -1364,12 +1364,14 @@ class DiscordAutomation:
             month_name = months[month_val - 1]
             self._log(f"DOB: {month_name} {day_val}, {year_val}")
 
+            self._log("[Form] Filling DOB one field at a time...")
             await self._select_dob("Month", month_name)
             await self._human_pause()
             await self._select_dob("Day", day_val)
             await self._human_pause()
             await self._select_dob("Year", year_val)
             await self._human_pause()
+            await asyncio.sleep(random.uniform(0.4, 0.9))
 
             # ── ToS Checkbox — FIND THE CORRECT ONE (Terms of Service, not newsletter) ──
             self._log("Checking ToS checkbox...")
@@ -1486,8 +1488,10 @@ class DiscordAutomation:
             else:
                 self._log("[WARN] No ToS checkbox found - the Create Account button may be disabled")
 
-            # Wait for React to process the checkbox change
-            await asyncio.sleep(2.0)  # Increased: React needs time to re-render enabled state
+            # Everything is filled + ToS checked — pause 2s (human breather,
+            # lets React re-render the enabled state) before Create Account.
+            self._log("[Form] All fields filled, ToS checked — waiting 2s before Create Account...")
+            await asyncio.sleep(2.0)
 
             # ── VERIFY ToS is actually checked before trying Create Account ──
             try:
@@ -1653,7 +1657,7 @@ class DiscordAutomation:
             return False
 
     async def _human_pause(self) -> None:
-        await asyncio.sleep(random.uniform(0.1, 0.5))
+        await asyncio.sleep(random.uniform(0.5, 1.1))
 
     async def live_camera_loop(self, interval: int = 4) -> None:
         while True:
