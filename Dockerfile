@@ -23,10 +23,6 @@ RUN wget -q -O /tmp/thorium.deb \
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
-# (Keep Playwright Chromium for ENGINE=patchright fallback)
-RUN python -m playwright install chromium
-RUN python -m patchright install chromium || true
-
 # Copy ALL application files
 COPY *.py ./
 COPY *.txt ./
