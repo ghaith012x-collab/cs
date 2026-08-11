@@ -619,45 +619,60 @@ class DiscordAutomation:
         self._log("=" * 40)
 
         try:
-            if not await self._goto_register():
-                self._log("[FAIL] Could not navigate to Discord /register - aborting", level="error")
-                return False
-            self._log("[Nav] Discord site rendered")
-            await asyncio.sleep(1.5)
-            await self.capture_screenshot()
+            # Refresh-retry loop: a loaded drag captcha ("Wait! Are you
+            # human?") can't be solved in-browser, so we refresh the page
+            # for a fresh captcha up to 3 times before giving up and letting
+            # the worker rotate proxy + fingerprint + mail domain.
+            refresh_attempt = 0
+            while True:
+                refresh_attempt += 1
+                if not await self._goto_register():
+                    self._log("[FAIL] Could not navigate to Discord /register - aborting", level="error")
+                    return False
+                self._log("[Nav] Discord site rendered")
+                await asyncio.sleep(1.5)
+                await self.capture_screenshot()
 
-            # Fill the form
-            form_ok = await self._fill_registration_form()
-            if form_ok:
+                # Fill the form
+                form_ok = await self._fill_registration_form()
+                if not form_ok:
+                    self._log("[FAIL] Form filling failed", level="error")
+                    success = False
+                    break
+
                 self._log("[OK] Form filled - now solving captcha...")
-                success = await self._solve_hcaptcha_if_present()
-                if success:
-                    self._log("[OK] CAPTCHA SOLVED! Registration submitted.")
-                    # Discord can demand phone verification right after account
-                    # creation. Detect it BEFORE waiting on email — if present,
-                    # abort this attempt so the worker rotates proxy + fingerprint
-                    # + mail domain and retries (phone-gated accounts are dead).
-                    await asyncio.sleep(5)
-                    if await self._detect_phone_verification():
-                        self.phone_verify_detected = True
-                        self._log("[Phone] [DETECTED] Phone verification required - rotating proxy+fingerprint+domain", level="warn")
-                        return False
-                    # Auto-verify: complete Discord email verification
-                    await self._verify_account_email()
-                    # Login + grab the FULL token from localStorage
-                    self._token = await self._extract_token()
-                    if self._token:
-                        self._log("[Token] [OK] Full token captured")
-                        self._log(f"[Account] @{self._username or self._email.split('@')[0]} is in Discord and confirmed")
-                        self._log(f"[Account] Email={self._email} | User={self._username} | Pass={self._password} | Date={time.strftime('%Y-%m-%d %H:%M')}")
-                        await self._humanize_account()
-                    else:
-                        self._log("[Token] No token yet (account may still be pending)", level="warn")
+                solve_result = await self._solve_hcaptcha_if_present()
+                if solve_result == "refresh" and refresh_attempt < 3:
+                    self._log(f"[Captcha] Refreshing page for fresh captcha ({refresh_attempt}/3)...")
+                    await asyncio.sleep(1.5)
+                    continue
+                success = bool(solve_result)
+                break
+
+            if success:
+                self._log("[OK] CAPTCHA SOLVED! Registration submitted.")
+                # Discord can demand phone verification right after account
+                # creation. Detect it BEFORE waiting on email — if present,
+                # abort this attempt so the worker rotates proxy + fingerprint
+                # + mail domain and retries (phone-gated accounts are dead).
+                await asyncio.sleep(5)
+                if await self._detect_phone_verification():
+                    self.phone_verify_detected = True
+                    self._log("[Phone] [DETECTED] Phone verification required - rotating proxy+fingerprint+domain", level="warn")
+                    return False
+                # Auto-verify: complete Discord email verification
+                await self._verify_account_email()
+                # Login + grab the FULL token from localStorage
+                self._token = await self._extract_token()
+                if self._token:
+                    self._log("[Token] [OK] Full token captured")
+                    self._log(f"[Account] @{self._username or self._email.split('@')[0]} is in Discord and confirmed")
+                    self._log(f"[Account] Email={self._email} | User={self._username} | Pass={self._password} | Date={time.strftime('%Y-%m-%d %H:%M')}")
+                    await self._humanize_account()
                 else:
-                    self._log("[FAIL] Captcha solving failed", level="error")
+                    self._log("[Token] No token yet (account may still be pending)", level="warn")
             else:
-                self._log("[FAIL] Form filling failed", level="error")
-                success = False
+                self._log("[FAIL] Captcha solving failed", level="error")
 
         except Exception as e:
             self._log(f"Error: {e}", level="error")
@@ -868,11 +883,18 @@ class DiscordAutomation:
                         // Check for the captcha container div
                         const captchaDiv = document.querySelector('[data-hcaptcha-widget-id], .h-captcha');
 
+                        // A rendered challenge (drag puzzle etc.) expands the
+                        // widget iframe TALL, unlike the short checkbox widget.
+                        const wRect = widgetFrame ? widgetFrame.getBoundingClientRect() : null;
+                        const challengeTall = !!widgetFrame && widgetFrame.offsetParent !== null
+                                              && wRect.height >= 250;
+
                         return {
                             hasWidget: !!widgetFrame,
                             hasChallenge: !!challengeFrame,
                             hasAnchor: !!anchorFrame,
                             hasContainer: !!captchaDiv,
+                            challengeTall: challengeTall,
                             widgetSrc: widgetFrame ? widgetFrame.src.substring(0, 80) : '',
                             challengeSrc: challengeFrame ? (challengeFrame.src || challengeFrame.title || 'present').substring(0, 60) : '',
                             widgetVisible: widgetFrame ? (widgetFrame.offsetParent !== null) : false,
@@ -893,7 +915,7 @@ class DiscordAutomation:
 
                 # ── State machine ──
                 new_state = "waiting"
-                if state.get("hasChallenge") and state.get("challengeVisible"):
+                if (state.get("hasChallenge") and state.get("challengeVisible")) or state.get("challengeTall"):
                     new_state = "challenge-ready"
                 elif state.get("hasChallenge"):
                     new_state = "challenge-loading"
@@ -916,8 +938,17 @@ class DiscordAutomation:
                         )
                     except Exception:
                         iframe = None
+                    if not iframe:
+                        # Drag challenges render INSIDE the widget iframe (it
+                        # grows tall) — use it directly instead of waiting.
+                        try:
+                            iframe = await self._page.query_selector(
+                                'iframe[src*="newassets.hcaptcha.com"]'
+                            )
+                        except Exception:
+                            iframe = None
                     if iframe:
-                        self._log("[Captcha] [READY] Challenge iframe fully loaded — solving now")
+                        self._log("[Captcha] [READY] Challenge rendered (widget) — solving now")
                         break
 
                 # ── If widget is visible but no challenge yet, keep waiting ──
@@ -958,11 +989,21 @@ class DiscordAutomation:
                     self._log(f"[Captcha] Captcha check error: {e}", level="warn")
                 return False
 
-            # Which challenge is showing? (only used for logging now)
+            # Which challenge is showing?
             mode = await self._detect_challenge_mode(iframe)
             self._log(f"[Captcha] Challenge mode: {mode}")
 
-            # ── ACCESSIBILITY CHALLENGE — THE ONLY SOLVER ──
+            # ── DRAG CHALLENGE ("Wait! Are you human?") → REFRESH + RETRY ──
+            # Drag puzzles can't be solved in-browser reliably — the
+            # accessibility route grinds for minutes. Instead, signal the
+            # caller to refresh the page for a FRESH captcha (often a
+            # checkbox type). Capped at 3 refreshes, then the worker
+            # rotates proxy + fingerprint + mail domain.
+            if mode == "drag":
+                self._log("[Captcha] Drag challenge loaded — refreshing page for a fresh captcha")
+                return "refresh"
+
+            # ── ACCESSIBILITY CHALLENGE (checkbox widget / other types) ──
             # Opens the 3-dots menu and uses the Accessibility Challenge,
             # which gives a text/audio question that's solvable locally
             # (math, word puzzles) with Ollama vision as fallback.
