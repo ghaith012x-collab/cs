@@ -1086,6 +1086,13 @@ class _BrowserType:
             cfg.user_agent = ua
 
         instance = await td.start(cfg)
+        # CRITICAL: store proxy auth so _get_or_create_tab() can wire
+        # CDP Fetch auth on every raw create_target tab. Without this,
+        # the vaultproxies gateway 407-challenges the tab, Chromium
+        # hangs with no credentials, and the page never loads:
+        # title="(unknown)" url="(unknown)".
+        if proxy and proxy.get("username"):
+            instance._proxy_auth = (proxy.get("username"), proxy.get("password", ""))
         return _Browser(instance)
 
     async def launch_persistent_context(self, user_data_dir: str = None, **kwargs) -> _Browser:
