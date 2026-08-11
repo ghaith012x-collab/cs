@@ -843,10 +843,11 @@ class DiscordAutomation:
 
             # ── Phase 1: Wait for ANY hCaptcha iframe to appear (widget or challenge) ──
             # The widget iframe (newassets.hcaptcha.com) loads first, then the
-            # challenge iframe loads inside it. We poll every 1s for up to 60s.
-            self._log("[Captcha] Waiting for hCaptcha to load (polling DOM every 0.5s, max 45s)...")
-            _poll_start = time.time()
-            deadline = time.time() + 45.0
+            # challenge iframe loads inside it. Poll every 0.5s for up to 50s —
+            # if the challenge hasn't rendered by then, rotate instead of
+            # hanging forever on a dead captcha.
+            self._log("[Captcha] Waiting for hCaptcha to load (polling DOM every 0.5s, max 50s)...")
+            deadline = time.time() + 50.0
             last_state = "waiting"
             iframe = None
 
@@ -901,13 +902,11 @@ class DiscordAutomation:
                 elif state.get("hasContainer") or state.get("hasAnchor"):
                     new_state = "widget-loading"
 
+                # Log ONLY state changes — the old per-poll "[Ns] state=..."
+                # counter spammed a line every 0.5s and hid the real status.
                 if new_state != last_state:
                     self._log(f"[Captcha] State: {last_state} → {new_state}")
                     last_state = new_state
-                else:
-                    elapsed = int(time.time() - _poll_start)
-                    detail = state.get("challengeSrc") or state.get("widgetSrc") or f"iframe_count={state.get('frameCount',0)}"
-                    self._log(f"[Captcha] [{elapsed}s] state={new_state} | {detail}")
 
                 # ── Challenge is fully loaded → grab the iframe and solve ──
                 if new_state == "challenge-ready":
