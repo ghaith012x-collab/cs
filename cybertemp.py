@@ -118,6 +118,9 @@ class TempMail:
         self._ua = ""
         self._address = ""
         self._provider = ""
+        # True when we launched the browser ourselves (close() tears it down);
+        # False when attach_browser() handed us the worker's shared browser.
+        self._owns_browser = True
 
     # ── Public API (duckmail-compatible) ────────────────────
 
@@ -129,7 +132,18 @@ class TempMail:
     def provider(self) -> str:
         return self._provider or "none"
 
-    async def create_inbox(self, timeout: float = 45.0) -> str:
+    def attach_browser(self, browser) -> None:
+        """Reuse an already-running browser (the worker's) for the inbox.
+
+        No second launch and no second identity — the inbox rides the same
+        browser, proxy IP and fingerprint as the Discord session. close()
+        only tears down our own context/page, never the shared browser.
+        """
+        self._browser = browser
+        self._owns_browser = False
+        self._log("[Mail] Reusing worker browser for cybertemp.xyz (no second launch)")
+
+    async def create_inbox(self, timeout: float = 25.0) -> str:
         """Open cybertemp in a stealth browser and provision addr@{domain}."""
         try:
             await self._ensure_browser()
@@ -181,16 +195,26 @@ class TempMail:
         return None
 
     async def close(self) -> None:
+        # Always tear down our own page/context; only close the browser and
+        # its Playwright driver when we own them (attached mode shares the
+        # worker's browser and must leave it running).
         for close_fn, obj in (
             (self._close_page, self._page),
             (self._close_ctx, self._context),
-            (self._close_browser, self._browser),
-            (self._close_pw, self._playwright),
         ):
             try:
                 await close_fn(obj)
             except Exception:
                 pass
+        if self._owns_browser:
+            for close_fn, obj in (
+                (self._close_browser, self._browser),
+                (self._close_pw, self._playwright),
+            ):
+                try:
+                    await close_fn(obj)
+                except Exception:
+                    pass
         self._page = self._context = self._browser = self._playwright = None
 
     @staticmethod
@@ -218,14 +242,29 @@ class TempMail:
     async def _ensure_browser(self) -> None:
         if self._page is not None:
             return
-        self._log(f"[Mail] Launching {ENGINE} browser for cybertemp.xyz "
-                  f"(headless={self.headless})...")
-        self._playwright = await async_playwright().start()
-        args = launch_args(headless=self.headless)
-        self._browser = await self._playwright.chromium.launch(
-            headless=self.headless, args=args)
-        self._fingerprint = _build_fingerprint()
-        self._ua = self._fingerprint["ua"]
+        if self._browser is None:
+            # Standalone: launch our own browser (with the proxy pinned at
+            # launch so the inbox rides the same residential IP as the bot).
+            self._log(f"[Mail] Launching {ENGINE} browser for cybertemp.xyz "
+                      f"(headless={self.headless})...")
+            self._playwright = await async_playwright().start()
+            args = launch_args(headless=self.headless)
+            lp = None
+            if self._proxy and isinstance(self._proxy, dict):
+                p = self._proxy
+                lp = {"server": f"{p.get('proto', 'http')}://"
+                                f"{p.get('host')}:{p.get('port')}"}
+                if p.get("username"):
+                    lp["username"] = p["username"]
+                    lp["password"] = p.get("password", "")
+            self._browser = await self._playwright.chromium.launch(
+                headless=self.headless, args=args, proxy=lp)
+            self._owns_browser = True
+            self._fingerprint = _build_fingerprint()
+            self._ua = self._fingerprint["ua"]
+        # Attached mode: reuse the shared browser as-is (identity + proxy
+        # already pinned at browser level); the fingerprint dict stays empty
+        # and build_context_options/build_init_script no-op for clearcote.
         ctx_opts = build_context_options(
             self._fingerprint, self._ua, proxy=self._proxy,
             viewport={"width": 1366, "height": 768},
@@ -240,25 +279,26 @@ class TempMail:
     async def _goto_site(self) -> None:
         try:
             await self._page.goto(CYBERTEMP_URL, wait_until="domcontentloaded",
-                                  timeout=60000)
+                                  timeout=25000)
         except Exception as e:
             self._log(f"[Mail] cybertemp goto: {e}", level="warn")
-        # Wait for the app shell / email form (antibot PoW solves in-page)
-        deadline = time.time() + 30.0
+        # Wait for the app shell / email form (antibot PoW solves in-page).
+        # Fast 0.5s poll so a healthy page costs ~1-2s, not a long sleep.
+        deadline = time.time() + 20.0
         while time.time() < deadline:
             try:
                 ready = await asyncio.wait_for(self._page.evaluate(
-                    "() => !!document.querySelector('input')"), timeout=5.0)
+                    "() => !!document.querySelector('input')"), timeout=4.0)
                 if ready:
                     return
             except Exception:
                 pass
-            await asyncio.sleep(1.5)
+            await asyncio.sleep(0.5)
         raise RuntimeError("cybertemp page did not render an email form")
 
     # ── Address provisioning ───────────────────────────────
 
-    async def _set_address(self, addr: str, timeout: float = 45.0) -> str:
+    async def _set_address(self, addr: str, timeout: float = 25.0) -> str:
         """Enter addr on the site. Returns the REAL composed address read back
         from the page (best effort — falls back to the requested addr)."""
         deadline = time.time() + timeout
@@ -289,7 +329,7 @@ class TempMail:
             except Exception:
                 pass
             if input_idx is None or input_idx < 0:
-                await asyncio.sleep(1.0)
+                await asyncio.sleep(0.4)
         if input_idx is None or input_idx < 0:
             raise RuntimeError("cybertemp email input not found")
 
@@ -315,7 +355,7 @@ class TempMail:
                         }
                     }
                     if (!clicked) return 'no_dropdown';
-                    await new Promise(r => setTimeout(r, 1000));
+                    await new Promise(r => setTimeout(r, 400));
                     for (const el of document.querySelectorAll('div,span,li,button,[role="option"],option')) {
                         const t = (el.textContent || '').trim();
                         if (pick(t) && el.offsetParent !== null) { el.click(); return 'selected'; }
@@ -335,7 +375,7 @@ class TempMail:
             await self._page.keyboard.press("Enter")
         except Exception:
             pass
-        await asyncio.sleep(2.0)
+        await asyncio.sleep(0.8)
 
         # 3) Read back the real composed address (page text > input value)
         real = ""
@@ -380,20 +420,20 @@ class TempMail:
             return []
         # The antibot PoW cookie (cfg_v) lands a few seconds after load —
         # retry while the API reports 401/403. Bounded so we never hang.
-        for attempt in range(25):
+        for attempt in range(40):
             try:
                 res = await asyncio.wait_for(
                     self._page.evaluate(self._FETCH_INBOX_JS, self._address),
-                    timeout=15.0)
+                    timeout=10.0)
             except Exception as e:
                 self._log(f"[Mail] inbox fetch error: {e}", level="warn")
-                await asyncio.sleep(2.0)
+                await asyncio.sleep(0.8)
                 continue
             status = res.get("status", 0)
             if status in (401, 403, 0):
                 if attempt == 0:
                     self._log("[Mail] Antibot PoW not ready — waiting...", level="warn")
-                await asyncio.sleep(2.0)
+                await asyncio.sleep(0.8)
                 continue
             if status != 200:
                 self._log(f"[Mail] Inbox API status {status}", level="warn")

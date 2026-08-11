@@ -943,35 +943,19 @@ class _Browser:
         self.contexts: List[_BrowserContext] = []
 
     async def _get_or_create_tab(self) -> td.Tab:
-        """Return a live page tab, creating one if none exists.
+        """Return a FRESH page tab in this browser.
 
-        truedriver's Browser.get() does ``next(filter(type_ == 'page',
-        self.targets))`` — after the previous tab is closed that raises
-        StopIteration (surfaced as "coroutine raised StopIteration") and
-        every subsequent context rebuild dies. Refresh the target inventory
-        and create a fresh target instead of relying on that path.
+        Every ``new_context()`` gets its own tab, so multiple contexts can
+        live side-by-side in one browser — e.g. the Discord page AND the
+        temp-mail inbox share the worker browser instead of a second launch.
+        truedriver's ``Browser.get()`` reuses the first page target, which
+        would hand two contexts the same tab and let one navigation clobber
+        the other (the old "context rebuild" StopIteration loop came from
+        relying on that path after tabs were closed). Create a fresh target
+        and wait (bounded) for it to appear in the target inventory.
         """
         from truedriver import cdp
 
-        async def _page_tabs():
-            try:
-                await self._instance.update_targets()
-            except Exception:
-                pass
-            return [t for t in self._instance.targets
-                    if getattr(t, "type_", "") == "page"]
-
-        tabs = await _page_tabs()
-        if tabs:
-            tab = tabs[0]
-            try:
-                tab.browser = self._instance
-            except Exception:
-                pass
-            return tab
-
-        # No page target left (previous tab was closed) — create a fresh one
-        # and wait (bounded) for it to appear in the target inventory.
         try:
             target_id = await self._instance.connection.send(
                 cdp.target.create_target(
@@ -983,9 +967,13 @@ class _Browser:
 
         deadline = time.monotonic() + 10
         while time.monotonic() < deadline:
-            tabs = await _page_tabs()
-            for t in tabs:
-                if target_id is None or t.target_id == target_id:
+            try:
+                await self._instance.update_targets()
+            except Exception:
+                pass
+            for t in self._instance.targets:
+                if (getattr(t, "type_", "") == "page"
+                        and (target_id is None or t.target_id == target_id)):
                     try:
                         t.browser = self._instance
                     except Exception:
@@ -1064,13 +1052,18 @@ class _BrowserType:
                 if a.startswith("--user-agent="):
                     ua = a.replace("--user-agent=", "")
 
+        # Fast-poll the CDP endpoint instead of sleeping 25s before the first
+        # connection test (that fixed delay was the "stuck for 25s" every
+        # launch — mail AND Discord). Boot is normally 1-3s; up to 30s of
+        # 0.5s polls covers slow cold starts without costing anything when
+        # the browser comes up fast.
         cfg = td.Config(
             browser_executable_path=exe,
             headless=headless,
             sandbox=False,
             browser_args=browser_args,
-            browser_connection_timeout=25,
-            browser_connection_max_tries=2,
+            browser_connection_timeout=0.5,
+            browser_connection_max_tries=60,
         )
         if proxy_url:
             cfg.proxy = proxy_url

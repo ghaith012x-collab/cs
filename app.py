@@ -422,6 +422,37 @@ async def _proxy_validate_loop() -> None:
         await asyncio.sleep(180)
 
 
+async def _ai_warmup() -> None:
+    """Preload the AI stack in the background so the first captcha is fast:
+    torch captcha brains (drag + grid .pth) and the Ollama text model."""
+    try:
+        from solver import TileClassifier, get_drag_brain
+        _log("[AI] Warming up captcha brains (drag + grid models)...")
+        brain = get_drag_brain()
+        TileClassifier()
+        _log(f"[AI] Captcha brains ready (drag_model={brain.use_model})")
+    except Exception as e:
+        _log(f"[AI] Brain warm-up skipped: {e}", level="warn")
+    try:
+        import aiohttp
+        url = (os.environ.get("OLLAMA_URL") or "http://localhost:11434").rstrip("/")
+        model = (os.environ.get("OLLAMA_TEXT_MODEL") or os.environ.get("OLLAMA_MODEL")
+                 or "qwen3:1.7b")
+        _log(f"[AI] Warming Ollama text model {model}...")
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=60)) as s:
+            async with s.post(f"{url}/api/chat", json={
+                "model": model,
+                "stream": False,
+                "keep_alive": "30m",
+                "think": False,
+                "options": {"num_predict": 1},
+                "messages": [{"role": "user", "content": "hi"}],
+            }) as r:
+                _log(f"[AI] Ollama text model warm (status {r.status})")
+    except Exception as e:
+        _log(f"[AI] Ollama warm-up skipped: {e}", level="warn")
+
+
 async def _start_all_async(cfg: dict) -> None:
     global _running, _start_time
     if _running:
@@ -431,6 +462,10 @@ async def _start_all_async(cfg: dict) -> None:
 
     for wid in WORKER_IDS:
         _workers[wid] = _init_worker(wid)
+
+    # Warm the AI in the background so the first captcha doesn't pay a
+    # cold start (model load + first LLM inference).
+    asyncio.create_task(_ai_warmup())
 
     # ── Proxy pool: load free + residential sessions (retry a few times) ──
     n_sessions = 0

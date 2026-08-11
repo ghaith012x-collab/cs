@@ -304,6 +304,43 @@ class DiscordAutomation:
             **self._clearcote_launch_opts())
         await self._build_context()
 
+    _PROXY_IP_CACHE: dict = {}
+
+    def _resolve_proxy_ip(self, host: str) -> str:
+        """DNS-resolve the proxy host to an IP (best-effort, cached per host).
+        Runs in a worker thread — never blocks the event loop."""
+        if not host:
+            return ""
+        if host in self._PROXY_IP_CACHE:
+            return self._PROXY_IP_CACHE[host]
+        try:
+            ip = socket.gethostbyname(host)
+        except Exception:
+            return ""
+        if ip:
+            self._PROXY_IP_CACHE[host] = ip
+        return ip
+
+    async def _log_proxy_exit_ip(self) -> None:
+        """Best-effort: report the REAL egress IP of the current browser
+        session (residential exit != gateway DNS IP). Bounded, never blocks."""
+        page = self._page
+        if page is None:
+            return
+        try:
+            ip = await asyncio.wait_for(page.evaluate(
+                "async () => { try { "
+                "const r = await fetch('https://api.ipify.org?format=json', "
+                "{cache: 'no-store'}); "
+                "const d = await r.json(); return d.ip || ''; } "
+                "catch (e) { return ''; } }"
+            ), timeout=6)
+        except Exception:
+            return
+        if ip:
+            label = "proxy session" if self.proxy else "TOR circuit"
+            self._log(f"[Proxy] Exit IP ({label}): {ip}")
+
     async def initialize(self) -> None:
         self._playwright = await async_playwright().start()
 
@@ -344,7 +381,9 @@ class DiscordAutomation:
         if self.proxy and isinstance(self.proxy, dict):
             p = self.proxy
             server = f"{p.get('proto', 'http')}://{p.get('host')}:{p.get('port')}"
-            self._log(f"Proxy: {server} (auth={'yes' if p.get('username') else 'no'})")
+            host_ip = await asyncio.to_thread(self._resolve_proxy_ip, p.get("host", ""))
+            ip_part = f" IP={host_ip}," if host_ip else ""
+            self._log(f"Proxy: {server} ({ip_part} auth={'yes' if p.get('username') else 'no'})")
         elif _tor_check():
             self._tor_enabled = True
             self._log("[TOR] Using TOR SOCKS5 proxy...")
@@ -370,6 +409,9 @@ class DiscordAutomation:
 
         # CDP-level webdriver removal — runs BEFORE init scripts, catches early checks
         await apply_cdp_stealth(self._context, self._page)
+
+        # Report the real egress IP of this session (bounded, never blocks).
+        asyncio.create_task(self._log_proxy_exit_ip())
 
     async def switch_proxy(self, new_proxy=None) -> bool:
         """Swap to a new proxy AND a fresh fingerprint. Returns True on success.
@@ -724,13 +766,22 @@ class DiscordAutomation:
         self._mail_failed = False
 
         # No hardcoded email — create a cybertemp.xyz inbox on a
-        # discord-friendly domain (the primary mail provider).
+        # discord-friendly domain (the primary mail provider). Reuse the
+        # already-running worker browser so there is no second launch: the
+        # inbox rides the same proxy IP and fingerprint as the Discord
+        # session. Retry fast (3x, no backoff) when cybertemp hiccups.
         if not self._email:
             self._log(f"[Mail] No email configured - creating cybertemp.xyz inbox (@{self._domain})...")
             try:
                 self._mail = TempMail(log=self._log, proxy=self.proxy,
                                       headless=self.headless, domain=self._domain)
-                self._email = await self._mail.create_inbox()
+                if self._browser is not None:
+                    self._mail.attach_browser(self._browser)
+                for mail_try in range(3):
+                    self._email = await self._mail.create_inbox()
+                    if self._email:
+                        break
+                    self._log(f"[Mail] Inbox creation failed — retrying ({mail_try + 1}/3)...", level="warn")
             except Exception as e:
                 self._log(f"[Mail] cybertemp inbox error: {e}", level="error")
                 self._email = ""
