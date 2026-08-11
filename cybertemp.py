@@ -143,7 +143,7 @@ class TempMail:
         self._owns_browser = False
         self._log("[Mail] Reusing worker browser for cybertemp.xyz (no second launch)")
 
-    async def create_inbox(self, timeout: float = 25.0) -> str:
+    async def create_inbox(self, timeout: float = 15.0) -> str:
         """Open cybertemp in a stealth browser and provision addr@{domain}."""
         try:
             await self._ensure_browser()
@@ -279,26 +279,43 @@ class TempMail:
     async def _goto_site(self) -> None:
         try:
             await self._page.goto(CYBERTEMP_URL, wait_until="domcontentloaded",
-                                  timeout=25000)
+                                  timeout=12000)
         except Exception as e:
             self._log(f"[Mail] cybertemp goto: {e}", level="warn")
         # Wait for the app shell / email form (antibot PoW solves in-page).
-        # Fast 0.5s poll so a healthy page costs ~1-2s, not a long sleep.
-        deadline = time.time() + 20.0
+        # Fast 0.4s poll so a healthy page costs ~1-3s, not a long sleep.
+        deadline = time.time() + 10.0
+        diag_at = time.time() + 3.0
+        diag_done = False
         while time.time() < deadline:
             try:
                 ready = await asyncio.wait_for(self._page.evaluate(
-                    "() => !!document.querySelector('input')"), timeout=4.0)
+                    "() => !!document.querySelector('input')"), timeout=3.0)
                 if ready:
                     return
             except Exception:
                 pass
-            await asyncio.sleep(0.5)
+            # One diagnostic dump after ~3s so a stuck/blocked page tells us
+            # why (antibot challenge? wrong URL? blank shell?).
+            if not diag_done and time.time() >= diag_at:
+                diag_done = True
+                try:
+                    info = await asyncio.wait_for(self._page.evaluate(
+                        "() => ({u: location.href, t: document.title, "
+                        "b: (document.body ? document.body.innerText.substring(0, 120) : '')})"),
+                        timeout=3.0)
+                    if isinstance(info, dict):
+                        self._log(f"[Mail] cybertemp page state: url={str(info.get('u'))[:60]} "
+                                  f"title={str(info.get('t'))[:40]} "
+                                  f"body={str(info.get('b'))[:100]}", level="warn")
+                except Exception:
+                    pass
+            await asyncio.sleep(0.4)
         raise RuntimeError("cybertemp page did not render an email form")
 
     # ── Address provisioning ───────────────────────────────
 
-    async def _set_address(self, addr: str, timeout: float = 25.0) -> str:
+    async def _set_address(self, addr: str, timeout: float = 12.0) -> str:
         """Enter addr on the site. Returns the REAL composed address read back
         from the page (best effort — falls back to the requested addr)."""
         deadline = time.time() + timeout
@@ -424,7 +441,7 @@ class TempMail:
             try:
                 res = await asyncio.wait_for(
                     self._page.evaluate(self._FETCH_INBOX_JS, self._address),
-                    timeout=10.0)
+                    timeout=6.0)
             except Exception as e:
                 self._log(f"[Mail] inbox fetch error: {e}", level="warn")
                 await asyncio.sleep(0.8)

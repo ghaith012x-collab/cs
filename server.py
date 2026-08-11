@@ -514,10 +514,10 @@ class DiscordAutomation:
         circuit is pointless — if Discord blocked that exit node, it won't
         unblock on retry."""
         url = "https://discord.com/register"
-        # 25s cap: a working residential session renders Discord's register in
-        # a few seconds. Burning the old 90s timeout per dead session made the
-        # worker look like it was only generating mail (one new inbox per ~90s).
-        timeout_ms = 25000
+        # 8s cap: a working residential session renders Discord's register in a
+        # few seconds, and the form-poll below waits for the SPA anyway. A dead
+        # session burns 8s instead of 25-30s, so the proxy sweep rotates fast.
+        timeout_ms = 8000
 
         self._log(f"[Nav] Navigating to {url} (timeout={timeout_ms}ms)...")
         try:
@@ -549,6 +549,15 @@ class DiscordAutomation:
         if dead_proxy:
             proxy_label = "PROXY SESSION" if self.proxy else "TOR CIRCUIT"
             self._log(f"[Nav] {proxy_label} DEAD (url={page_url[:60]}) - rotating to fresh circuit", level="warn")
+            return False
+
+        # ── Page never ran JS at all (title + url both unreadable) → dead. ──
+        # Through a live session document.title resolves in ms of DOM; if it is
+        # still unreadable after the goto timeout the session is dead, so bail
+        # here instead of burning the whole form-poll window on it.
+        if str(page_title) == "(unknown)" and str(page_url) == "(unknown)":
+            proxy_label = "PROXY SESSION" if self.proxy else "TOR CIRCUIT"
+            self._log(f"[Nav] Page unresponsive after {timeout_ms}ms ({proxy_label}) - rotating", level="warn")
             return False
 
         # ── Quick body text check (403/Forbidden/Cloudflare) ──
@@ -602,10 +611,16 @@ class DiscordAutomation:
             app_mount = False
 
         # ── Poll for form elements ──
-        # Discord uses aria-label on inputs, not name/id — use broad selectors
+        # Discord uses aria-label on inputs, not name/id — use broad selectors.
+        # 0.5s polls: healthy residential sessions render in 1-3s, so a 20s
+        # window is generous and dead sessions fail fast instead of burning 30s.
         self._log("[Nav] Waiting for registration form to render...")
-        blank_streak = 0
-        for poll_sec in range(1, 31):
+        blank_since = None       # when the page first looked blank
+        login_clicked = False    # already clicked the Register link once
+        last_log = -1.0
+        start_ts = time.time()
+        while time.time() - start_ts < 20.0:
+            elapsed = time.time() - start_ts
             try:
                 checks = await asyncio.wait_for(self._page.evaluate("""() => {
                     const body = document.body;
@@ -641,40 +656,38 @@ class DiscordAutomation:
                 state = None
 
             if state:
-                # Log every 5s with input/button counts for debugging
-                if poll_sec % 5 == 0:
-                    self._log(f"[Nav] Poll {poll_sec}s: email={state.get('email')} ageGate={state.get('ageGate')} login={state.get('isLogin')} inputs={state.get('inputCount')} buttons={state.get('buttonCount')} text={state.get('textPreview','')[:60]}")
+                # Log every ~5s with input/button counts for debugging
+                if elapsed >= last_log + 5.0:
+                    last_log = elapsed
+                    self._log(f"[Nav] Poll {int(elapsed)}s: email={state.get('email')} ageGate={state.get('ageGate')} login={state.get('isLogin')} inputs={state.get('inputCount')} buttons={state.get('buttonCount')} text={state.get('textPreview','')[:60]}")
 
                 if state.get("email") and state.get("username"):
-                    self._log(f"[Nav] SUCCESS! Full form rendered after {poll_sec}s")
+                    self._log(f"[Nav] SUCCESS! Full form rendered after {int(elapsed)}s")
                     return True
                 if state.get("email") and state.get("password"):
-                    self._log(f"[Nav] SUCCESS! Email+password form rendered after {poll_sec}s")
+                    self._log(f"[Nav] SUCCESS! Email+password form rendered after {int(elapsed)}s")
                     return True
                 if state.get("ageGate"):
-                    self._log(f"[Nav] Age gate detected after {poll_sec}s - returning true, form filler handles it")
+                    self._log(f"[Nav] Age gate detected after {int(elapsed)}s - returning true, form filler handles it")
                     return True
 
                 # BLANK RENDER fast-fail — SPA shell mounted but React painted
-                # nothing (0 inputs, 0 buttons, empty text).
-                #
-                # IMPORTANT: through TOR, Discord's React bundle routinely takes
-                # 10-18s to boot (older logs show 15s of inputs=0 then success).
-                # A 3s threshold was killing healthy-but-slow circuits. Only
-                # rotate after 15s of sustained blankness — that's a genuinely
-                # dead/rate-limited node, not a slow boot.
+                # nothing (0 inputs, 0 buttons, empty text). Residential
+                # sessions boot Discord in 1-3s, so 10s of sustained blankness
+                # is a genuinely dead/rate-limited node, not a slow boot.
                 if (state.get("hasAppMount") and not state.get("inputCount")
                         and not state.get("buttonCount")
                         and not (state.get("textPreview") or "").strip()):
-                    blank_streak += 1
-                    if blank_streak >= 20:
+                    if blank_since is None:
+                        blank_since = time.time()
+                    elif time.time() - blank_since >= 10:
                         proxy_label = "proxy session" if self.proxy else "TOR exit"
-                        self._log(f"[Nav] BLANK RENDER for 20s (SPA mounted, no content) - {proxy_label} likely dead/rate-limited - rotating circuit", level="warn")
+                        self._log(f"[Nav] BLANK RENDER for 10s (SPA mounted, no content) - {proxy_label} likely dead/rate-limited - rotating circuit", level="warn")
                         return False
                 else:
-                    blank_streak = 0
+                    blank_since = None
 
-                if state.get("isLogin") and poll_sec >= 10:
+                if state.get("isLogin") and not login_clicked and elapsed >= 3.0:
                     self._log("[Nav] Login page detected \u2014 clicking Register link...")
                     try:
                         clicked_reg = await self._page.evaluate("""() => {
@@ -693,8 +706,9 @@ class DiscordAutomation:
                         clicked_reg = ''
                     if clicked_reg:
                         self._log("[Nav] Clicked Register link \u2014 continuing poll for register form...")
-                        blank_streak = 0
-                        await asyncio.sleep(1.5)
+                        login_clicked = True
+                        blank_since = None
+                        await asyncio.sleep(1.0)
                         continue
                     self._log("[Nav] Login page, no Register link clickable \u2014 rotating circuit", level="warn")
                     break
@@ -707,7 +721,7 @@ class DiscordAutomation:
                     return True
             except Exception:
                 pass
-            await asyncio.sleep(1.0)
+            await asyncio.sleep(0.5)
 
         # ── Form never rendered — dump page state for debugging ──
         try:
@@ -733,7 +747,7 @@ class DiscordAutomation:
             pass
 
         proxy_label = "fresh proxy session" if self.proxy else "fresh TOR circuit"
-        self._log(f"[Nav] Form did not render within 30s - rotating to {proxy_label}", level="warn")
+        self._log(f"[Nav] Form did not render within 20s - rotating to {proxy_label}", level="warn")
         return False
 
     async def capture_screenshot(self) -> str:
@@ -769,37 +783,58 @@ class DiscordAutomation:
         # discord-friendly domain (the primary mail provider). Reuse the
         # already-running worker browser so there is no second launch: the
         # inbox rides the same proxy IP and fingerprint as the Discord
-        # session. Retry fast (3x, no backoff) when cybertemp hiccups.
+        # session. Retry fast (2x, no backoff) when cybertemp hiccups.
+        #
+        # Inbox creation and Discord navigation run in PARALLEL — they live
+        # on different tabs of the same browser — so by the time the register
+        # form renders the email is almost always already provisioned.
         if not self._email:
             self._log(f"[Mail] No email configured - creating cybertemp.xyz inbox (@{self._domain})...")
+            nav_ok = False
             try:
                 self._mail = TempMail(log=self._log, proxy=self.proxy,
                                       headless=self.headless, domain=self._domain)
                 if self._browser is not None:
                     self._mail.attach_browser(self._browser)
-                for mail_try in range(3):
-                    self._email = await self._mail.create_inbox()
-                    if self._email:
-                        break
-                    self._log(f"[Mail] Inbox creation failed — retrying ({mail_try + 1}/3)...", level="warn")
+
+                async def _inbox() -> str:
+                    for mail_try in range(2):
+                        try:
+                            addr = await self._mail.create_inbox()
+                        except Exception as e:
+                            self._log(f"[Mail] cybertemp inbox error: {e}", level="error")
+                            addr = ""
+                        if addr:
+                            return addr
+                        self._log(f"[Mail] Inbox creation failed — retrying ({mail_try + 1}/2)...", level="warn")
+                    return ""
+
+                nav_task = asyncio.create_task(self._goto_register())
+                mail_task = asyncio.create_task(_inbox())
+                nav_ok, self._email = await asyncio.gather(nav_task, mail_task)
             except Exception as e:
                 self._log(f"[Mail] cybertemp inbox error: {e}", level="error")
                 self._email = ""
 
-        if not self._email:
-            self._mail_failed = True
-            self._log("[FAIL] No email available - aborting signup", level="error")
-            return False
+            if not self._email:
+                self._mail_failed = True
+                self._log("[FAIL] No email available - aborting signup", level="error")
+                return False
+            if not nav_ok:
+                self._log("[FAIL] Could not navigate to Discord /register - aborting", level="error")
+                return False
+        else:
+            self._log(f"Using configured email: {self._email}")
+            if not await self._goto_register():
+                self._log("[FAIL] Could not navigate to Discord /register - aborting", level="error")
+                return False
 
+        self._nav_ok = True
         self._log("=" * 40)
         self._log(f"Starting Discord signup with email: {self._email}")
         self._log("=" * 40)
 
         try:
-            if not await self._goto_register():
-                self._log("[FAIL] Could not navigate to Discord /register - aborting", level="error")
-                return False
-            self._nav_ok = True
             self._log("[Nav] Discord site rendered")
             await asyncio.sleep(1.5)
             await self.capture_screenshot()

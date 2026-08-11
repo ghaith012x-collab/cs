@@ -251,7 +251,7 @@ async def _run_worker(wid: str, cfg: dict, proxy=None) -> None:
 
     bot = None
     consecutive_tunnel_fails = 0  # fast-fail after consecutive dead connections
-    backoff = 2  # seconds between attempts; doubles after dead-session failures
+    backoff = 1  # seconds between attempts; doubles after dead-session failures
 
     for attempt in range(max_tries):
         if not _running:
@@ -305,7 +305,7 @@ async def _run_worker(wid: str, cfg: dict, proxy=None) -> None:
                     proxy_pool.release(proxy, ok=False)
                     proxy = None
                 consecutive_tunnel_fails += 1
-                backoff = min(backoff * 2, 30)
+                backoff = min(backoff * 2, 15)
                 if consecutive_tunnel_fails >= 4:
                     _log(f"[{wid}] {consecutive_tunnel_fails} consecutive tunnel failures — aborting (all sessions appear dead)", level="error")
                     break
@@ -383,13 +383,13 @@ async def _run_worker(wid: str, cfg: dict, proxy=None) -> None:
             nav_ok = bool(getattr(bot, "_nav_ok", False))
             if not ok and not nav_ok:
                 consecutive_tunnel_fails += 1
-                backoff = min(backoff * 2, 30)
+                backoff = min(backoff * 2, 15)
                 if consecutive_tunnel_fails >= 4:
                     _log(f"[{wid}] {consecutive_tunnel_fails} consecutive tunnel failures — aborting (all sessions appear dead)", level="error")
                     break
             else:
                 consecutive_tunnel_fails = 0
-                backoff = 2
+                backoff = 1
 
             _log(f"[{wid}] Failed (attempt {attempt+1}/{max_tries}, {label})", level="warn")
         except Exception as e:
@@ -424,13 +424,22 @@ async def _proxy_validate_loop() -> None:
 
 async def _ai_warmup() -> None:
     """Preload the AI stack in the background so the first captcha is fast:
-    torch captcha brains (drag + grid .pth) and the Ollama text model."""
+    torch captcha brains (drag + grid .pth) and the Ollama text model.
+
+    The torch model load is CPU-bound, so it runs in a worker thread — it
+    must never stall the event loop the workers run on (browser launch,
+    mail inbox, navigation all share that loop)."""
     try:
         from solver import TileClassifier, get_drag_brain
         _log("[AI] Warming up captcha brains (drag + grid models)...")
-        brain = get_drag_brain()
-        TileClassifier()
-        _log(f"[AI] Captcha brains ready (drag_model={brain.use_model})")
+
+        def _load_brains() -> str:
+            brain = get_drag_brain()
+            TileClassifier()
+            return str(getattr(brain, "use_model", "?"))
+
+        use_model = await asyncio.to_thread(_load_brains)
+        _log(f"[AI] Captcha brains ready (drag_model={use_model})")
     except Exception as e:
         _log(f"[AI] Brain warm-up skipped: {e}", level="warn")
     try:
@@ -439,16 +448,18 @@ async def _ai_warmup() -> None:
         model = (os.environ.get("OLLAMA_TEXT_MODEL") or os.environ.get("OLLAMA_MODEL")
                  or "qwen3:1.7b")
         _log(f"[AI] Warming Ollama text model {model}...")
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=60)) as s:
+        # Bounded (12s): if Ollama is slow/down this never lingers — the
+        # first real captcha warms the model on demand anyway.
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=12)) as s:
             async with s.post(f"{url}/api/chat", json={
                 "model": model,
                 "stream": False,
-                "keep_alive": "30m",
+                "keep_alive": "10m",
                 "think": False,
                 "options": {"num_predict": 1},
                 "messages": [{"role": "user", "content": "hi"}],
             }) as r:
-                _log(f"[AI] Ollama text model warm (status {r.status})")
+                _log(f"[AI] Ollama text model {model} warm (status {r.status})")
     except Exception as e:
         _log(f"[AI] Ollama warm-up skipped: {e}", level="warn")
 
@@ -1069,8 +1080,14 @@ function refreshStatus(){
     var d=$('dDot');d.className='dot'+(st?' '+st:'');
     var running=(x.workers||[]).filter(function(w){return w.status==='running'||w.status==='starting';}).length;
     $('stLine').textContent = x.running ? ('running - '+running+'/'+(x.workers||[]).length+' browsers - '+Math.floor(x.uptime/60)+'m') : 'idle';
-    var dm=(x.mail_domains&&x.mail_domains.length)?x.mail_domains[0]:'';
-    if(dm&&$('domLine'))$('domLine').textContent='@'+dm;
+    // Show the email actually in use: the configured custom email wins;
+    // otherwise fall back to the auto-generated @domain so the header never
+    // lies about "I set my own email but it shows a cybertemp domain".
+    var dom=$('domLine');
+    if(dom){
+      if(x.custom_email){dom.textContent=x.custom_email;}
+      else if(x.mail_domains&&x.mail_domains.length){dom.textContent='@'+x.mail_domains[0];}
+    }
     var px=x.proxies;
     if(px&&$('pxLine')){
       $('pxLine').textContent='proxies: '+px.available+' loaded | '+px.valid+' valid | '+px.used+' used | '+px.working+' working | '+px.failed+' failed';
@@ -1080,9 +1097,9 @@ function refreshStatus(){
 
 var FILTERS=['[Proxy]','Fingerprint','Discord site rendered','is in Discord and confirmed','[Account] Email=',
   'Inbox ready','Verification link found','Challenge iframe fully loaded','[Accessibility] [OK]',
-  'solved:','Humanized','[Captcha] [READY]','[Captcha]','[FAIL]','[Form]','[Nav] Page:','[Mail] No verification',
+  'solved:','Humanized','[Captcha] [READY]','[Captcha]','[FAIL]','[Form]','[Nav] Page:','[Nav] Navigating','[Nav] Poll','[Mail] No verification',
   'No verification link','No email available','DEAD','BLOCKED','rate limit','Starting worker',
-  '[Phone]','[Fingerprint]'];
+  '[Phone]','[Fingerprint]','Starting Discord signup','Using configured email','cybertemp.xyz','No email configured'];
 var showAll=false;
 var OKWORDS=['[ok]','confirmed','solved','ready','rendered','humanized','verification link found'];
 function refreshLogs(){
