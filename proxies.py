@@ -212,7 +212,9 @@ class ProxyPool:
 
         Used by the worker BEFORE launching a browser so dead sessions are
         blacklisted in ~3s instead of burning an 8s goto + a browser launch.
-        Mirrors validate_all()'s request shape (HTTPS through the proxy).
+        Tests against Discord directly (HTTPS) — NOT ipify.org, which was
+        the original lie (residential proxies pass HTTP ipify effortlessly
+        but fail the moment Clearcote tries discord.com).
         """
         if not proxy or not proxy.get("host") or not proxy.get("port"):
             return False
@@ -229,8 +231,11 @@ class ProxyPool:
             try:
                 async with aiohttp.ClientSession(connector=conn,
                                                  timeout=timeout_obj) as s:
-                    async with s.get("https://api.ipify.org", proxy=purl) as r:
-                        return r.status == 200
+                    async with s.get("https://discord.com", proxy=purl,
+                                     headers={"User-Agent": "Mozilla/5.0"}) as r:
+                        # Any real response (including 403 from Cloudflare)
+                        # means the proxy can reach Discord's edge.
+                        return r.status in (200, 403, 429)
             finally:
                 await conn.close()
         except Exception:
@@ -338,14 +343,8 @@ class ProxyPool:
 
     async def validate_all(self, concurrency: int = 30,
                            timeout: float = 8.0) -> int:
-        """Live-test proxies with a quick HTTPS request through each one, so
-        'valid' is a real measured number instead of an assumption.
-
-        Resets valid_count to the count already proven working, then raises it
-        as new proxies pass. Proxies that fail are added to _failed so take()
-        stops handing them out. Only unvalidated or previously-failed proxies
-        are retested on later passes (working ones are skipped for speed).
-        """
+        """Live-test proxies against Discord (not ipify) so 'valid' counts
+        are real. Tests non-vault proxies; vault sessions use the sweep."""
         import aiohttp
 
         # Always recompute from the current _valid flags so the number is
@@ -380,8 +379,9 @@ class ProxyPool:
             else:
                 purl = "http://{}:{}".format(host, port)
             try:
-                async with session.get("https://api.ipify.org", proxy=purl) as r:
-                    return r.status == 200
+                async with session.get("https://discord.com", proxy=purl,
+                                       headers={"User-Agent": "Mozilla/5.0"}) as r:
+                    return r.status in (200, 403, 429)
             except Exception:
                 return False
 
