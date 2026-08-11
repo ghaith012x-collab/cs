@@ -15,7 +15,7 @@ import os
 import re
 import time
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Callable, Dict, List, Optional
 
 # Residential proxy sessions file (gitignored). Format: one user:pass@host:port
 # per line. Sessions from vaultproxies.com expire after their TTL — swap in
@@ -183,7 +183,12 @@ class ProxyPool:
         if not candidates:
             self._failed = set()
             candidates = list(self._proxies)
-        candidates.sort(key=lambda p: self._used_at.get(p.get("key"), 0))
+        # Proven-valid sessions first, then untested ones — dead ones are
+        # already excluded by the _failed filter above.
+        candidates.sort(key=lambda p: (
+            0 if p.get("_valid") else 1,
+            self._used_at.get(p.get("key"), 0),
+        ))
         proxy = candidates[0]
         self._used_at[proxy.get("key")] = now
         self.used_count += 1
@@ -227,6 +232,76 @@ class ProxyPool:
                 await conn.close()
         except Exception:
             return False
+
+    async def sweep(self, window: float = 10.0, concurrency: int = 500,
+                    timeout: float = 6.0,
+                    log: Optional[Callable] = None) -> dict:
+        """Insanely-fast startup sweep: concurrently test EVERY loaded session
+        (including freshly-issued vault ones) and blacklist the dead ones so
+        only valid sessions are handed to workers.
+
+        Bounded by `window` seconds — whatever wasn't tested by then stays
+        available (it was previously trusted) and the worker's per-attempt
+        probe covers it. Returns {tested, valid, failed, untested}.
+        """
+        stats = {"tested": 0, "valid": 0, "failed": 0, "untested": 0}
+        targets = [p for p in self._proxies if p.get("key") not in self._failed]
+        total = len(targets)
+        if not targets:
+            return stats
+
+        import aiohttp
+        deadline = time.monotonic() + window
+        sem = asyncio.Semaphore(concurrency)
+        conn = aiohttp.TCPConnector(limit=concurrency, limit_per_host=concurrency,
+                                    ssl=False)
+        timeout_obj = aiohttp.ClientTimeout(total=timeout)
+        last_log = [0.0]
+
+        def _purl(p: Dict[str, str]) -> str:
+            if p.get("username"):
+                return "http://{}:{}@{}:{}".format(
+                    p["username"], p["password"], p["host"], p["port"])
+            return "http://{}:{}".format(p["host"], p["port"])
+
+        async def _one(proxy: Dict[str, str]) -> None:
+            async with sem:
+                if time.monotonic() >= deadline:
+                    return  # window expired — leave the rest untested
+                ok = False
+                try:
+                    async with aiohttp.ClientSession(
+                            connector=conn, timeout=timeout_obj) as s:
+                        async with s.get("https://api.ipify.org",
+                                         proxy=_purl(proxy)) as r:
+                            ok = r.status == 200
+                except Exception:
+                    ok = False
+                if ok:
+                    proxy["_valid"] = True
+                    self._failed.discard(proxy.get("key"))
+                    stats["valid"] += 1
+                else:
+                    proxy["_valid"] = False
+                    self._failed.add(proxy.get("key"))
+                    stats["failed"] += 1
+                stats["tested"] += 1
+                now = time.monotonic()
+                if now - last_log[0] >= 2.0:
+                    last_log[0] = now
+                    if log:
+                        log(f"[Proxy] Sweep {stats['tested']}/{total} tested — "
+                            f"{stats['valid']} valid, {stats['failed']} dead")
+
+        try:
+            await asyncio.gather(*[_one(p) for p in targets],
+                                 return_exceptions=True)
+        finally:
+            await conn.close()
+
+        stats["untested"] = total - stats["tested"]
+        self.valid_count = sum(1 for p in self._proxies if p.get("_valid"))
+        return stats
 
     async def validate_all(self, concurrency: int = 30,
                            timeout: float = 8.0) -> int:

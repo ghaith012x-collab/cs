@@ -549,6 +549,19 @@ async def _start_all_async(cfg: dict) -> None:
         _log("[Proxy] No proxy sessions — TOR-only fallback (fresh circuit per attempt)")
 
     if n_sessions and _proxies_available and proxy_pool is not None:
+        # ── Startup proxy sweep (~10s) ──
+        # Insanely-fast concurrent test of every loaded session BEFORE any
+        # worker touches the pool: dead sessions are blacklisted up front so
+        # workers only ever get handed validated ones. Bounded by the window;
+        # anything left untested stays available and the worker's per-attempt
+        # probe still covers it.
+        _log(f"[Proxy] Sweeping {n_sessions} sessions for validity (up to 10s, high concurrency)...")
+        try:
+            sw = await proxy_pool.sweep(window=10.0, log=_log)
+            _log(f"[Proxy] Sweep done: {sw['valid']} valid, {sw['failed']} dead, "
+                 f"{sw['untested']} untested of {n_sessions} loaded — workers will use validated sessions")
+        except Exception as e:
+            _log(f"[Proxy] Sweep error: {e}", level="warn")
         asyncio.create_task(_proxy_validate_loop())
 
     for i, wid in enumerate(WORKER_IDS):
