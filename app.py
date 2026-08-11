@@ -550,16 +550,18 @@ async def _start_all_async(cfg: dict) -> None:
 
     if n_sessions and _proxies_available and proxy_pool is not None:
         # ── Startup proxy sweep (~10s) ──
-        # Insanely-fast concurrent test of every loaded session BEFORE any
-        # worker touches the pool: dead sessions are blacklisted up front so
-        # workers only ever get handed validated ones. Bounded by the window;
-        # anything left untested stays available and the worker's per-attempt
-        # probe still covers it.
-        _log(f"[Proxy] Sweeping {n_sessions} sessions for validity (up to 10s, high concurrency)...")
+        # Concurrently confirm which sessions respond BEFORE any worker
+        # touches the pool, so known-good ones are used first. Failures are
+        # deliberately NOT blacklisted here — a burst probe can trip the
+        # gateway's connection cap and false-fail good sessions (seen: 500
+        # concurrent marked all 5324 dead while single-shot probes passed).
+        # The worker's per-attempt probe remains the trusted gate.
+        _log(f"[Proxy] Sweeping {n_sessions} sessions (10s window, concurrent HTTP probes)...")
         try:
             sw = await proxy_pool.sweep(window=10.0, log=_log)
-            _log(f"[Proxy] Sweep done: {sw['valid']} valid, {sw['failed']} dead, "
-                 f"{sw['untested']} untested of {n_sessions} loaded — workers will use validated sessions")
+            _log(f"[Proxy] Sweep done: {sw['valid']} confirmed valid, "
+                 f"{sw['unproven']} unproven (kept, not blacklisted), "
+                 f"{sw['untested']} untested of {n_sessions} — workers prefer confirmed-valid, probe-gate the rest")
         except Exception as e:
             _log(f"[Proxy] Sweep error: {e}", level="warn")
         asyncio.create_task(_proxy_validate_loop())

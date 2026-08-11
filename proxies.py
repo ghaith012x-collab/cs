@@ -17,6 +17,11 @@ import time
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
+# Startup sweep concurrency. Failures are never blacklisted (burst probes
+# can false-fail good sessions), so a hot burst is safe — it only costs a
+# few wasted requests. Tune with SWEEP_CONCURRENCY.
+SWEEP_CONCURRENCY = int(os.environ.get("SWEEP_CONCURRENCY", "250"))
+
 # Residential proxy sessions file (gitignored). Format: one user:pass@host:port
 # per line. Sessions from vaultproxies.com expire after their TTL — swap in
 # fresh ones (just change the string after "-s-") without touching code.
@@ -233,18 +238,27 @@ class ProxyPool:
         except Exception:
             return False
 
-    async def sweep(self, window: float = 10.0, concurrency: int = 500,
-                    timeout: float = 6.0,
+    async def sweep(self, window: float = 10.0,
+                    concurrency: int = SWEEP_CONCURRENCY,
+                    timeout: float = 4.0,
                     log: Optional[Callable] = None) -> dict:
-        """Insanely-fast startup sweep: concurrently test EVERY loaded session
-        (including freshly-issued vault ones) and blacklist the dead ones so
-        only valid sessions are handed to workers.
+        """10s startup sweep: concurrently test every loaded session and mark
+        the ones that respond as KNOWN-GOOD so workers prefer them.
 
-        Bounded by `window` seconds — whatever wasn't tested by then stays
-        available (it was previously trusted) and the worker's per-attempt
-        probe covers it. Returns {tested, valid, failed, untested}.
+        Deliberately conservative about failures: a burst probe can trip the
+        gateway's per-account connection cap and false-fail good sessions
+        (observed: 500 concurrent marked 5324/5324 dead while single-shot
+        probes passed moments later). So sweep failures are NEVER blacklisted
+        — they stay available and are re-checked by the worker's single-shot
+        probe before a browser launches. Only real worker/single-shot failures
+        blacklist a session.
+
+        Uses a plain-HTTP probe (no TLS handshake) so each check is as fast
+        as possible and immune to TLS-fingerprint filtering.
+
+        Returns {tested, valid, unproven, untested}.
         """
-        stats = {"tested": 0, "valid": 0, "failed": 0, "untested": 0}
+        stats = {"tested": 0, "valid": 0, "unproven": 0, "untested": 0}
         targets = [p for p in self._proxies if p.get("key") not in self._failed]
         total = len(targets)
         if not targets:
@@ -264,17 +278,21 @@ class ProxyPool:
                     p["username"], p["password"], p["host"], p["port"])
             return "http://{}:{}".format(p["host"], p["port"])
 
+        # ONE shared session for all probes. Each probe MUST NOT create its
+        # own ClientSession on this connector — the first session to exit
+        # closes the connector and every other in-flight probe dies with
+        # "Connector is closed" (this false-failed entire pools before).
+        session = aiohttp.ClientSession(connector=conn, timeout=timeout_obj)
+
         async def _one(proxy: Dict[str, str]) -> None:
             async with sem:
                 if time.monotonic() >= deadline:
                     return  # window expired — leave the rest untested
                 ok = False
                 try:
-                    async with aiohttp.ClientSession(
-                            connector=conn, timeout=timeout_obj) as s:
-                        async with s.get("https://api.ipify.org",
-                                         proxy=_purl(proxy)) as r:
-                            ok = r.status == 200
+                    async with session.get("http://api.ipify.org",
+                                           proxy=_purl(proxy)) as r:
+                        ok = r.status == 200
                 except Exception:
                     ok = False
                 if ok:
@@ -282,20 +300,23 @@ class ProxyPool:
                     self._failed.discard(proxy.get("key"))
                     stats["valid"] += 1
                 else:
-                    proxy["_valid"] = False
-                    self._failed.add(proxy.get("key"))
-                    stats["failed"] += 1
+                    # Unproven — NOT blacklisted (burst probes false-fail).
+                    stats["unproven"] += 1
                 stats["tested"] += 1
                 now = time.monotonic()
                 if now - last_log[0] >= 2.0:
                     last_log[0] = now
                     if log:
                         log(f"[Proxy] Sweep {stats['tested']}/{total} tested — "
-                            f"{stats['valid']} valid, {stats['failed']} dead")
+                            f"{stats['valid']} confirmed valid, "
+                            f"{stats['unproven']} unproven")
 
         try:
-            await asyncio.gather(*[_one(p) for p in targets],
-                                 return_exceptions=True)
+            try:
+                await asyncio.gather(*[_one(p) for p in targets],
+                                     return_exceptions=True)
+            finally:
+                await session.close()
         finally:
             await conn.close()
 
@@ -330,6 +351,11 @@ class ProxyPool:
                                     ssl=False)
         timeout_obj = aiohttp.ClientTimeout(total=timeout)
 
+        # ONE shared session for all probes — a per-probe ClientSession would
+        # close the shared connector on its first exit and kill every other
+        # in-flight probe ("Connector is closed" false-fails whole pools).
+        session = aiohttp.ClientSession(connector=conn, timeout=timeout_obj)
+
         async def _one(proxy: Dict[str, str]) -> bool:
             host, port = proxy.get("host"), proxy.get("port")
             if not host or not port:
@@ -340,10 +366,8 @@ class ProxyPool:
             else:
                 purl = "http://{}:{}".format(host, port)
             try:
-                async with aiohttp.ClientSession(
-                        connector=conn, timeout=timeout_obj) as s:
-                    async with s.get("https://api.ipify.org", proxy=purl) as r:
-                        return r.status == 200
+                async with session.get("https://api.ipify.org", proxy=purl) as r:
+                    return r.status == 200
             except Exception:
                 return False
 
@@ -360,8 +384,11 @@ class ProxyPool:
             return ok
 
         try:
-            await asyncio.gather(*[_guard(p) for p in targets],
-                                 return_exceptions=True)
+            try:
+                await asyncio.gather(*[_guard(p) for p in targets],
+                                     return_exceptions=True)
+            finally:
+                await session.close()
         finally:
             await conn.close()
         return self.valid_count
