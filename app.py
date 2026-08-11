@@ -216,7 +216,7 @@ async def _run_worker(wid: str, cfg: dict, proxy=None) -> None:
 
         # ── Launch or reuse browser ──
         if bot is None:
-            _domains = cfg.get("mail_domains") or ["vibify.cc"]
+            _domains = cfg.get("mail_domains") or ["mikerossy.com"]
             bot = DiscordAutomation(
                 headless=cfg.get("headless", True),
                 proxy=proxy,  # dict = sticky session; None = TOR in _build_context
@@ -610,7 +610,7 @@ def handle_config():
             cfg['worker_count'] = int(data['worker_count'])
         if 'mail_domains' in data:
             domains = [str(d).strip().lower() for d in data['mail_domains'] if str(d).strip()]
-            cfg['mail_domains'] = domains or ["vibify.cc"]
+            cfg['mail_domains'] = domains or ["mikerossy.com"]
         save_config(cfg)
         return jsonify({"ok": True, "config": cfg})
     cfg = load_config()
@@ -831,7 +831,7 @@ input:focus{border-color:var(--dim)}
     <div class="btnrow" style="margin-top:12px">
       <button class="primary" onclick="saveDomains()">Save domains</button>
     </div>
-    <div class="hint">mikerossy.com is the default and auto-set - it is always kept in the pool. Each signup picks a random selected domain.</div>
+    <div class="hint">Pick ONE domain to use - choosing one replaces the current domain and saves immediately. mikerossy.com is the default until you pick another.</div>
   </div>
 </div>
 
@@ -1124,7 +1124,6 @@ function loadConfig(){
   api('/config').then(function(r){return r.json();}).then(function(x){
     AVAIL=(x.available_domains&&x.available_domains.length)?x.available_domains:['mikerossy.com'];
     DOMAINS=(x.mail_domains&&x.mail_domains.length)?x.mail_domains.slice():['mikerossy.com'];
-    if(DOMAINS.indexOf('mikerossy.com')===-1) DOMAINS.unshift('mikerossy.com');
     HEADLESS=x.headless!==false;
     $('swHeadless').classList.toggle('on',HEADLESS);
     renderDomains();
@@ -1146,10 +1145,10 @@ function renderDomains(){
 }
 function pickDomain(btn){
   var d=btn.getAttribute('data-d')||'';
-  var i=DOMAINS.indexOf(d);
-  if(d==='mikerossy.com') return toast('mikerossy.com is the locked default - it stays on');
-  if(i===-1){DOMAINS.push(d);btn.classList.add('on');}
-  else{DOMAINS.splice(i,1);btn.classList.remove('on');}
+  if(!d)return;
+  if(DOMAINS.length===1 && DOMAINS[0]===d)return;
+  DOMAINS=[d];
+  saveDomains();
 }
 function addCustomDomain(){
   var v=$('domCustom').value.trim().toLowerCase();
@@ -1165,7 +1164,6 @@ function saveDomains(){
     var d=DOMAINS[i].trim().toLowerCase();
     if(d && cleaned.indexOf(d)===-1) cleaned.push(d);
   }
-  if(cleaned.indexOf('mikerossy.com')===-1) cleaned.unshift('mikerossy.com');
   DOMAINS=cleaned;
   renderDomains();
   api('/config',{method:'POST',headers:{'Content-Type':'application/json'},

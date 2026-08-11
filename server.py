@@ -197,7 +197,7 @@ class DiscordAutomation:
                  proxy=None, worker_id: str = "B1", domain: str = "vibify.cc"):
         self.headless = headless
         self.worker_id = worker_id
-        self._domain = (domain or "vibify.cc").strip().lower() or "vibify.cc"
+        self._domain = (domain or "mikerossy.com").strip().lower() or "mikerossy.com"
         # proxy: dict {proto, host, port, username, password, key} or None
         self.proxy = proxy
         self._playwright = None

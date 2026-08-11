@@ -1,5 +1,6 @@
 """
-cybertemp.py — temp-mail client for cybertemp.xyz, delivering to @vibify.cc.
+cybertemp.py — temp-mail client for cybertemp.xyz, delivering to the configured
+# Discord-friendly domain (default @mikerossy.com).
 
 Why a browser?
   cybertemp.xyz gates its JSON API behind an antibot Proof-of-Work layer
@@ -12,7 +13,7 @@ Why a browser?
   the browser's cookies. No API key, no daily request cap.
 
 Discord signup flow:
-  1. create_inbox()                -> random addr@vibify.cc (Discord-capable)
+  1. create_inbox()                -> random addr@configured-domain (Discord-capable)
   2. (Discord registration happens)
   3. wait_for_verification_link()  -> polls the inbox, extracts the verify URL
 
@@ -94,7 +95,7 @@ def _build_fingerprint() -> dict:
 
 
 class TempMail:
-    """Async temp-mail client: cybertemp.xyz -> @vibify.cc via stealth browser.
+    """Async temp-mail client: cybertemp.xyz -> @configured-domain via stealth browser.
 
     Drop-in replacement for duckmail.TempMail (same public API):
       email, provider, create_inbox(), wait_for_verification_link(), close().
@@ -129,7 +130,7 @@ class TempMail:
         return self._provider or "none"
 
     async def create_inbox(self, timeout: float = 45.0) -> str:
-        """Open cybertemp in a stealth browser and provision addr@vibify.cc."""
+        """Open cybertemp in a stealth browser and provision addr@{domain}."""
         try:
             await self._ensure_browser()
             await self._goto_site()
@@ -292,7 +293,7 @@ class TempMail:
         if input_idx is None or input_idx < 0:
             raise RuntimeError("cybertemp email input not found")
 
-        # 2) Try to switch the domain dropdown to vibify.cc (best effort).
+        # 2) Try to switch the domain dropdown to the configured domain (best effort).
         #    If that works we only type the local part; otherwise type the
         #    full address (the site accepts a complete address too).
         domain_ok = False
