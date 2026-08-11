@@ -21,7 +21,8 @@ except ImportError:
     print("[app] db.py not found - token saving disabled", flush=True)
 
 try:
-    from proxies import pool as proxy_pool, configured as _proxies_configured
+    from proxies import (pool as proxy_pool, configured as _proxies_configured,
+                         proxy_files, proxy_files_signature)
     _proxies_available = True
 except ImportError:
     proxy_pool = None
@@ -30,7 +31,7 @@ except ImportError:
     print("[app] proxies.py not found - direct connections only", flush=True)
 
 # "force use the proxies no matter what" — when residential sessions are
-# configured (vaultproxies.txt in the repo, or VAULTPROXY_* env) the workers
+# configured (proxies.txt in the repo, or VAULTPROXY_* env) the workers
 # NEVER fall back to TOR. Set PROXY_MODE=force to force even without a file.
 PROXY_FORCE = (
     (os.environ.get("PROXY_MODE") or "").strip().lower()
@@ -499,6 +500,39 @@ async def _proxy_validate_loop() -> None:
         await asyncio.sleep(180)
 
 
+async def _proxy_file_watcher(interval: float = 15.0) -> None:
+    """Reload the proxy pool the moment proxies.txt / vaultproxies.txt changes.
+
+    vaultproxies sessions carry a ~10 min TTL, so a list loaded at startup is
+    stale within minutes. This watcher lets the user drop a FRESH session list
+    into proxies.txt and have the bot pick it up without restarting the web
+    server. Only triggers when the file CONTENT actually changes (re-saving
+    the same expired list is a no-op)."""
+    try:
+        sig = proxy_files_signature()
+    except Exception:
+        sig = ""
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            new_sig = proxy_files_signature()
+            if new_sig and new_sig != sig:
+                sig = new_sig
+                if proxy_pool is not None:
+                    await proxy_pool.refresh()
+                    n = proxy_pool.count
+                    src = ", ".join(p.name for p in proxy_files()) or "env"
+                    _log(f"[Proxy] proxies file changed — reloaded {n} sessions from {src}", level="warn")
+                    if n:
+                        try:
+                            sw = await proxy_pool.sweep(window=10.0, log=_log)
+                            _log(f"[Proxy] Re-sweep: {sw['reachable']} Discord-reachable of {n} reloaded")
+                        except Exception:
+                            pass
+        except Exception as e:
+            _log(f"[Proxy] file watcher error: {e}", level="warn")
+
+
 async def _ai_warmup() -> None:
     """Pre-warm the Ollama text model so the first captcha answer is fast.
 
@@ -555,12 +589,18 @@ async def _start_all_async(cfg: dict) -> None:
     except Exception as e:
         _log(f"[Proxy] pool refresh error: {e}", level="warn")
     if n_sessions:
-        _log(f"[Proxy] {n_sessions} proxy sessions loaded — one IP per account (forced mode)" if PROXY_FORCE
-             else f"[Proxy] {n_sessions} proxy sessions loaded — one IP per account")
+        _src = ", ".join(p.name for p in proxy_files()) or "VAULTPROXY_* env"
+        _log((f"[Proxy] {n_sessions} proxy sessions loaded from {_src} — "
+              f"one IP per account (forced mode)") if PROXY_FORCE
+             else f"[Proxy] {n_sessions} proxy sessions loaded from {_src} — one IP per account")
     elif PROXY_FORCE:
         _log("[Proxy] [ERROR] PROXY FORCE MODE but 0 sessions loaded — workers will keep retrying, TOR is DISABLED", level="error")
     else:
         _log("[Proxy] No proxy sessions — TOR-only fallback (fresh circuit per attempt)")
+
+    # Watch for the user dropping a FRESH session list into proxies.txt —
+    # TTL sessions expire ~10 min after issuance, so hot-reload beats restart.
+    asyncio.create_task(_proxy_file_watcher())
 
     if n_sessions and _proxies_available and proxy_pool is not None:
         # ── Start workers IMMEDIATELY — they self-probe proxies ──
@@ -583,12 +623,14 @@ async def _start_all_async(cfg: dict) -> None:
                  f"workers probe-gate every session before launching a browser")
             if sw.get("tested") and not sw.get("reachable"):
                 _log(
-                    "[Proxy] [ERROR] 0 sessions can reach Discord. vaultproxies "
-                    "sessions expire (ttl-600 = 10 min) and cannot be revived — "
-                    "reusing the same session IDs across runs always ends here. "
+                    "[Proxy] [ERROR] 0 of the loaded sessions can reach Discord. "
+                    "vaultproxies sessions expire (ttl-600 = 10 min) and cannot "
+                    "be revived — and re-saving the SAME session IDs under a new "
+                    "filename changes nothing (it's the identical expired list). "
                     "Generate a FRESH session list in the vaultproxies dashboard "
-                    "and replace the session IDs in vaultproxies.txt (the part "
-                    "after '-s-'). Nothing else can fix expired sessions.",
+                    "and save it as proxies.txt — the session IDs (the part after "
+                    "'-s-') must be NEW. The bot auto-reloads proxies.txt when it "
+                    "changes, so save the fresh list and the next sweep picks it up.",
                     level="error",
                 )
         except Exception as e:

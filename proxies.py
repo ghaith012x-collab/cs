@@ -1,8 +1,9 @@
 """
 proxies.py — rotating pool of PAID residential proxy sessions (vaultproxies.com).
 
-Sessions come from vaultproxies.txt (user:pass@host:port per line) or the
-VAULTPROXY_* env vars. Format support:
+Sessions come from proxies.txt / vaultproxies.txt (user:pass@host:port per
+line — either filename works, proxies.txt is preferred) or the VAULTPROXY_*
+env vars. Format support:
   user:pass@host:port        (authenticated proxy - vaultproxies.com)
   proto://user:pass@host:port
   host:port:user:pass        (BrightData ISP sticky-IP format)
@@ -22,10 +23,32 @@ from typing import Callable, Dict, List, Optional
 # few wasted requests. Tune with SWEEP_CONCURRENCY.
 SWEEP_CONCURRENCY = int(os.environ.get("SWEEP_CONCURRENCY", "250"))
 
-# Residential proxy sessions file (gitignored). Format: one user:pass@host:port
-# per line. Sessions from vaultproxies.com expire after their TTL — swap in
-# fresh ones (just change the string after "-s-") without touching code.
-VAULTPROXY_FILE = "vaultproxies.txt"
+# Residential proxy session files (gitignored). Format: one user:pass@host:port
+# per line. Sessions from vaultproxies.com expire after their TTL — swap in a
+# FRESH list (new session IDs after "-s-") without touching code. proxies.txt
+# is the canonical name; the legacy vaultproxies.txt name still works.
+VAULTPROXY_FILES = ["proxies.txt", "vaultproxies.txt"]
+
+# Files actually present at the last load (for startup logging).
+loaded_files: List[str] = []
+
+
+def proxy_files() -> List[Path]:
+    """Existing proxy session files (proxies.txt / vaultproxies.txt)."""
+    root = Path(__file__).resolve().parent
+    return [root / f for f in VAULTPROXY_FILES if (root / f).exists()]
+
+
+def proxy_files_signature() -> str:
+    """Content hash of all proxy files — changes when a fresh list is saved."""
+    import hashlib
+    h = hashlib.md5()
+    for p in proxy_files():
+        try:
+            h.update(p.read_bytes())
+        except Exception:
+            pass
+    return h.hexdigest()
 
 # Auth proxy format: user:pass@host:port
 _AUTH_RE = re.compile(r"^([^:]+):([^@]+)@([^:]+):(\d+)$")
@@ -90,7 +113,8 @@ def _vault_proxy_urls() -> List[str]:
     """Residential proxy session URLs (user:pass@host:port).
     Priority: VAULTPROXY_URLS env -> composed from VAULTPROXY_HOST/PORT/
     USER_PREFIX/PASS/TTL + VAULTPROXY_SESSIONS (comma/newline list — just
-    change the string after -s- when sessions rotate) -> vaultproxies.txt."""
+    change the string after -s- when sessions rotate) -> proxies.txt /
+    vaultproxies.txt files (both read, deduped)."""
     urls: List[str] = []
     env_urls = (os.environ.get("VAULTPROXY_URLS") or "").strip()
     if env_urls:
@@ -105,10 +129,15 @@ def _vault_proxy_urls() -> List[str]:
         for s in re.split(r"[\s,;]+", sessions):
             if s:
                 urls.append(f"{user_prefix}{s}-ttl-{ttl}:{passwd}@{host}:{port}")
-    p = Path(__file__).resolve().parent / VAULTPROXY_FILE
-    if p.exists():
-        urls += [l.strip() for l in p.read_text(errors="ignore").splitlines()
-                 if l.strip() and not l.startswith("#")]
+    global loaded_files
+    loaded_files = []
+    root = Path(__file__).resolve().parent
+    for fname in VAULTPROXY_FILES:
+        p = root / fname
+        if p.exists():
+            loaded_files.append(fname)
+            urls += [l.strip() for l in p.read_text(errors="ignore").splitlines()
+                     if l.strip() and not l.startswith("#")]
     return urls
 
 
@@ -127,8 +156,9 @@ def vault_proxies() -> List[Dict[str, str]]:
 
 
 def configured() -> bool:
-    """True when residential proxy sessions are available (vaultproxies.txt
-    file or VAULTPROXY_* env vars). Used by app.py to decide whether the
+    """True when residential proxy sessions are available (proxies.txt /
+    vaultproxies.txt files or VAULTPROXY_* env vars). Used by app.py to
+    decide whether the
     workers must ALWAYS use proxies (no TOR fallback)."""
     return bool(_vault_proxy_urls())
 
