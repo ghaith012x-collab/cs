@@ -198,6 +198,36 @@ class ProxyPool:
             self.failed_count += 1
             self._failed.add(proxy.get("key"))
 
+    async def probe(self, proxy: Optional[Dict[str, str]],
+                    timeout: float = 3.0) -> bool:
+        """Fast one-shot liveness check for a single session.
+
+        Used by the worker BEFORE launching a browser so dead sessions are
+        blacklisted in ~3s instead of burning an 8s goto + a browser launch.
+        Mirrors validate_all()'s request shape (HTTPS through the proxy).
+        """
+        if not proxy or not proxy.get("host") or not proxy.get("port"):
+            return False
+        host, port = proxy.get("host"), proxy.get("port")
+        if proxy.get("username"):
+            purl = "http://{}:{}@{}:{}".format(
+                proxy["username"], proxy["password"], host, port)
+        else:
+            purl = "http://{}:{}".format(host, port)
+        import aiohttp
+        try:
+            conn = aiohttp.TCPConnector(ssl=False)
+            timeout_obj = aiohttp.ClientTimeout(total=timeout)
+            try:
+                async with aiohttp.ClientSession(connector=conn,
+                                                 timeout=timeout_obj) as s:
+                    async with s.get("https://api.ipify.org", proxy=purl) as r:
+                        return r.status == 200
+            finally:
+                await conn.close()
+        except Exception:
+            return False
+
     async def validate_all(self, concurrency: int = 30,
                            timeout: float = 8.0) -> int:
         """Live-test proxies with a quick HTTPS request through each one, so

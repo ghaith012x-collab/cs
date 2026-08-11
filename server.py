@@ -514,10 +514,10 @@ class DiscordAutomation:
         circuit is pointless — if Discord blocked that exit node, it won't
         unblock on retry."""
         url = "https://discord.com/register"
-        # 8s cap: a working residential session renders Discord's register in a
+        # 6s cap: a working residential session renders Discord's register in a
         # few seconds, and the form-poll below waits for the SPA anyway. A dead
-        # session burns 8s instead of 25-30s, so the proxy sweep rotates fast.
-        timeout_ms = 8000
+        # session burns 6s instead of 8-30s, so the proxy sweep rotates fast.
+        timeout_ms = 6000
 
         self._log(f"[Nav] Navigating to {url} (timeout={timeout_ms}ms)...")
         try:
@@ -619,7 +619,7 @@ class DiscordAutomation:
         login_clicked = False    # already clicked the Register link once
         last_log = -1.0
         start_ts = time.time()
-        while time.time() - start_ts < 20.0:
+        while time.time() - start_ts < 15.0:
             elapsed = time.time() - start_ts
             try:
                 checks = await asyncio.wait_for(self._page.evaluate("""() => {
@@ -656,8 +656,8 @@ class DiscordAutomation:
                 state = None
 
             if state:
-                # Log every ~5s with input/button counts for debugging
-                if elapsed >= last_log + 5.0:
+                # Log every ~4s with input/button counts for debugging
+                if elapsed >= last_log + 4.0:
                     last_log = elapsed
                     self._log(f"[Nav] Poll {int(elapsed)}s: email={state.get('email')} ageGate={state.get('ageGate')} login={state.get('isLogin')} inputs={state.get('inputCount')} buttons={state.get('buttonCount')} text={state.get('textPreview','')[:60]}")
 
@@ -680,9 +680,9 @@ class DiscordAutomation:
                         and not (state.get("textPreview") or "").strip()):
                     if blank_since is None:
                         blank_since = time.time()
-                    elif time.time() - blank_since >= 10:
+                    elif time.time() - blank_since >= 8:
                         proxy_label = "proxy session" if self.proxy else "TOR exit"
-                        self._log(f"[Nav] BLANK RENDER for 10s (SPA mounted, no content) - {proxy_label} likely dead/rate-limited - rotating circuit", level="warn")
+                        self._log(f"[Nav] BLANK RENDER for 8s (SPA mounted, no content) - {proxy_label} likely dead/rate-limited - rotating circuit", level="warn")
                         return False
                 else:
                     blank_since = None
@@ -708,7 +708,7 @@ class DiscordAutomation:
                         self._log("[Nav] Clicked Register link \u2014 continuing poll for register form...")
                         login_clicked = True
                         blank_since = None
-                        await asyncio.sleep(1.0)
+                        await asyncio.sleep(0.5)
                         continue
                     self._log("[Nav] Login page, no Register link clickable \u2014 rotating circuit", level="warn")
                     break
@@ -721,7 +721,7 @@ class DiscordAutomation:
                     return True
             except Exception:
                 pass
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(0.25)
 
         # ── Form never rendered — dump page state for debugging ──
         try:
@@ -747,7 +747,7 @@ class DiscordAutomation:
             pass
 
         proxy_label = "fresh proxy session" if self.proxy else "fresh TOR circuit"
-        self._log(f"[Nav] Form did not render within 20s - rotating to {proxy_label}", level="warn")
+        self._log(f"[Nav] Form did not render within 15s - rotating to {proxy_label}", level="warn")
         return False
 
     async def capture_screenshot(self) -> str:
@@ -836,7 +836,6 @@ class DiscordAutomation:
 
         try:
             self._log("[Nav] Discord site rendered")
-            await asyncio.sleep(1.5)
             await self.capture_screenshot()
 
             # Fill the form
@@ -854,15 +853,30 @@ class DiscordAutomation:
                 # creation. Detect it BEFORE waiting on email — if present,
                 # abort this attempt so the worker rotates proxy + fingerprint
                 # + mail domain and retries (phone-gated accounts are dead).
-                await asyncio.sleep(5)
-                if await self._detect_phone_verification():
+                # Poll every second so a phone gate is caught the moment it
+                # renders instead of after a fixed 5s sleep (cap ~6s so the
+                # happy path to email verification isn't delayed).
+                phone_detected = False
+                for _ in range(6):
+                    if await self._detect_phone_verification():
+                        phone_detected = True
+                        break
+                    await asyncio.sleep(1.0)
+                if phone_detected:
                     self.phone_verify_detected = True
                     self._log("[Phone] [DETECTED] Phone verification required - rotating proxy+fingerprint+domain", level="warn")
                     return False
-                # Auto-verify: complete Discord email verification
+                # Auto-verify: complete Discord email verification. Skipped
+                # when a custom email is in use — the user clicks the link in
+                # their own inbox, so we just tell them.
                 await self._verify_account_email()
-                # Login + grab the FULL token from localStorage
-                self._token = await self._extract_token()
+                # Login + grab the FULL token from localStorage. With a custom
+                # email the user may need to click the verify link first, so
+                # keep watching much longer (60s) and re-submit the login.
+                self._token = await self._extract_token(
+                    attempts=6 if self._email and not self._mail else 4,
+                    poll_rounds=30 if self._email and not self._mail else 10,
+                )
                 if self._token:
                     self._log("[Token] [OK] Full token captured")
                     self._log(f"[Account] @{self._username or self._email.split('@')[0]} is in Discord and confirmed")
@@ -982,7 +996,7 @@ class DiscordAutomation:
         return None
 
     async def _extract_sitekey_with_retry(self, timeout: float = 15.0,
-                                          poll: float = 3.0) -> str:
+                                          poll: float = 1.0) -> str:
         """Extract the hCaptcha sitekey, polling until it is valid.
 
         The captcha iframe mounts before its src carries the sitekey, so
@@ -1160,7 +1174,7 @@ class DiscordAutomation:
                     self._log("[Captcha] No hCaptcha iframe after 120s - rotating instead of hanging forever", level="warn")
                     return False
 
-                await asyncio.sleep(1.0)
+                await asyncio.sleep(0.5)
 
             # ── Fallback: if we timed out but have ANY hCaptcha iframe, try it ──
             if not iframe:
@@ -1480,7 +1494,7 @@ class DiscordAutomation:
                         pass
                     continue
                 self._log(f"[Form] Waiting for page content... ({_+1}/6)")
-                await asyncio.sleep(1.5)
+                await asyncio.sleep(0.6)
 
             # ── Generate credentials ──
             consonants = 'bcdfghjklmnpqrstvwxyz'
@@ -1764,16 +1778,21 @@ class DiscordAutomation:
             return False
 
     async def _human_pause(self) -> None:
-        await asyncio.sleep(random.uniform(0.15, 0.4))
+        await asyncio.sleep(random.uniform(0.08, 0.2))
 
     async def live_camera_loop(self, interval: int = 4) -> None:
         while True:
             await self.capture_screenshot()
             await asyncio.sleep(interval)
 
-    async def _extract_token(self, attempts: int = 4) -> str:
+    async def _extract_token(self, attempts: int = 4,
+                             poll_rounds: int = 10) -> str:
         """Login to Discord with the created account and grab the FULL token
-        from localStorage. Discord stores it under 'token'."""
+        from localStorage. Discord stores it under 'token'.
+
+        poll_rounds x 2s bounds the wait (20s default); pass a larger value
+        (e.g. 30 = 60s) when a custom email needs manual verification before
+        the login unlocks."""
         if not (self._email and self._password):
             return ""
         try:
@@ -1785,7 +1804,7 @@ class DiscordAutomation:
                     break
                 except Exception:
                     await asyncio.sleep(2)
-            await asyncio.sleep(2)
+            await asyncio.sleep(1.5)
             try:
                 email_input = self._page.locator('input[name="email"]').first
                 await email_input.fill(self._email, timeout=8000)
@@ -1796,8 +1815,11 @@ class DiscordAutomation:
             except Exception as e:
                 self._log(f"[Token] Login fill error: {e}", level="warn")
                 return ""
-            # Wait for token to appear (abort early if phone-gated at login)
-            for _ in range(10):
+            # Wait for token to appear (abort early if phone-gated at login).
+            # The React login form can eat the first Enter on a cold load, so
+            # re-submit once after ~8s if the token still hasn't landed.
+            resubmitted = False
+            for round_i in range(poll_rounds):
                 await asyncio.sleep(2.0)
                 try:
                     if await self._detect_phone_verification():
@@ -1814,6 +1836,19 @@ class DiscordAutomation:
                         return token.strip()
                 except Exception:
                     pass
+                if not resubmitted and round_i >= 3:
+                    resubmitted = True
+                    self._log("[Token] No token yet - re-submitting login form", level="warn")
+                    try:
+                        await self._page.evaluate("""() => {
+                            const f = document.querySelector('form');
+                            const btn = document.querySelector('button[type="submit"]');
+                            if (f && f.requestSubmit) { f.requestSubmit(); return 'submitted'; }
+                            if (btn) { btn.click(); return 'clicked'; }
+                            return 'none';
+                        }""")
+                    except Exception:
+                        pass
             return ""
         except Exception as e:
             self._log(f"[Token] extract error: {e}", level="warn")

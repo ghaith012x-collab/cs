@@ -165,7 +165,7 @@ class TempMail:
 
     async def wait_for_verification_link(
         self, keyword: str = "discord",
-        timeout: float = 240.0, poll: float = 4.0,
+        timeout: float = 240.0, poll: float = 1.5,
     ) -> Optional[str]:
         """Poll the inbox until a matching message arrives, then return its
         Discord verification URL (or None on timeout)."""
@@ -279,12 +279,13 @@ class TempMail:
     async def _goto_site(self) -> None:
         try:
             await self._page.goto(CYBERTEMP_URL, wait_until="domcontentloaded",
-                                  timeout=12000)
+                                  timeout=8000)
         except Exception as e:
             self._log(f"[Mail] cybertemp goto: {e}", level="warn")
+        self._log("[Mail] cybertemp page loaded — waiting for antibot PoW / email form...")
         # Wait for the app shell / email form (antibot PoW solves in-page).
-        # Fast 0.4s poll so a healthy page costs ~1-3s, not a long sleep.
-        deadline = time.time() + 10.0
+        # Fast 0.25s poll so a healthy page costs ~1-2s, not a long sleep.
+        deadline = time.time() + 6.0
         diag_at = time.time() + 3.0
         diag_done = False
         while time.time() < deadline:
@@ -310,7 +311,7 @@ class TempMail:
                                   f"body={str(info.get('b'))[:100]}", level="warn")
                 except Exception:
                     pass
-            await asyncio.sleep(0.4)
+            await asyncio.sleep(0.25)
         raise RuntimeError("cybertemp page did not render an email form")
 
     # ── Address provisioning ───────────────────────────────
@@ -320,7 +321,8 @@ class TempMail:
         from the page (best effort — falls back to the requested addr)."""
         deadline = time.time() + timeout
 
-        # 1) Locate the email input (visible, non-hidden, best heuristic)
+        # 1) Locate the email input (visible, non-hidden, best heuristic).
+        #    0.2s polls so a healthy page costs ~0.2-0.6s here.
         input_idx = None
         while time.time() < deadline and input_idx is None:
             try:
@@ -342,57 +344,24 @@ class TempMail:
                             if (s > score) { score = s; best = i; }
                         }
                         return best;
-                    }"""), timeout=5.0)
+                    }"""), timeout=3.0)
             except Exception:
                 pass
             if input_idx is None or input_idx < 0:
-                await asyncio.sleep(0.4)
+                await asyncio.sleep(0.2)
         if input_idx is None or input_idx < 0:
             raise RuntimeError("cybertemp email input not found")
 
-        # 2) Try to switch the domain dropdown to the configured domain (best effort).
-        #    If that works we only type the local part; otherwise type the
-        #    full address (the site accepts a complete address too).
-        domain_ok = False
-        try:
-            root = self._domain.split(".")[0]
-            res = await asyncio.wait_for(self._page.evaluate(
-                """async (wanted, root) => {
-                    const pick = (t) => {
-                        const s = t.toLowerCase();
-                        return s.includes(wanted) || s === root || s.includes('.' + root);
-                    };
-                    const known = /(andrewcluh|vibify|boostwave|[a-z0-9-]+\\.(cc|top|xyz|com))/i;
-                    const els = Array.from(document.querySelectorAll('div,span,button,li,[role="button"],option'));
-                    let clicked = false;
-                    for (const el of els) {
-                        const t = (el.textContent || '').trim();
-                        if (t && t.length <= 24 && known.test(t) && el.offsetParent !== null) {
-                            el.click(); clicked = true; break;
-                        }
-                    }
-                    if (!clicked) return 'no_dropdown';
-                    await new Promise(r => setTimeout(r, 400));
-                    for (const el of document.querySelectorAll('div,span,li,button,[role="option"],option')) {
-                        const t = (el.textContent || '').trim();
-                        if (pick(t) && el.offsetParent !== null) { el.click(); return 'selected'; }
-                    }
-                    return 'option_not_found';
-                }""", self._domain, root), timeout=10.0)
-            domain_ok = res == "selected"
-        except Exception:
-            domain_ok = False
-        if domain_ok:
-            self._log(f"[Mail] {self._domain} selected in domain dropdown")
-
-        local = addr.split("@")[0]
-        fill_value = local if domain_ok else addr
-        await self._page.locator("input").nth(input_idx).fill(fill_value)
+        # 2) Type the FULL address (local@domain) directly — the site accepts
+        #    a complete address. This skips the multi-second domain-dropdown
+        #    dance entirely and is the insanely-fast path to an inbox.
+        self._log(f"[Mail] Typing address @{self._domain} (full-address fast path)...")
+        await self._page.locator("input").nth(input_idx).fill(addr)
         try:
             await self._page.keyboard.press("Enter")
         except Exception:
             pass
-        await asyncio.sleep(0.8)
+        await asyncio.sleep(0.5)
 
         # 3) Read back the real composed address (page text > input value)
         real = ""
@@ -437,20 +406,20 @@ class TempMail:
             return []
         # The antibot PoW cookie (cfg_v) lands a few seconds after load —
         # retry while the API reports 401/403. Bounded so we never hang.
-        for attempt in range(40):
+        for attempt in range(12):
             try:
                 res = await asyncio.wait_for(
                     self._page.evaluate(self._FETCH_INBOX_JS, self._address),
-                    timeout=6.0)
+                    timeout=5.0)
             except Exception as e:
                 self._log(f"[Mail] inbox fetch error: {e}", level="warn")
-                await asyncio.sleep(0.8)
+                await asyncio.sleep(0.5)
                 continue
             status = res.get("status", 0)
             if status in (401, 403, 0):
                 if attempt == 0:
                     self._log("[Mail] Antibot PoW not ready — waiting...", level="warn")
-                await asyncio.sleep(0.8)
+                await asyncio.sleep(0.5)
                 continue
             if status != 200:
                 self._log(f"[Mail] Inbox API status {status}", level="warn")

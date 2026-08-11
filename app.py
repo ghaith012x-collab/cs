@@ -251,13 +251,21 @@ async def _run_worker(wid: str, cfg: dict, proxy=None) -> None:
 
     bot = None
     consecutive_tunnel_fails = 0  # fast-fail after consecutive dead connections
-    backoff = 1  # seconds between attempts; doubles after dead-session failures
+    backoff = 0.3  # seconds between attempts; doubles after dead-session failures
 
     for attempt in range(max_tries):
         if not _running:
             state["status"] = "stopped"
             if bot: await bot.close()
             return
+
+        # Re-read the config on every attempt so a custom email / headless
+        # change made in the dashboard mid-run is picked up on the very next
+        # attempt (a stale cfg would keep using the old email forever).
+        try:
+            cfg = load_config()
+        except Exception:
+            pass
 
         # ── Pick a session for this attempt (never TOR in force mode) ──
         if proxy is None:
@@ -270,6 +278,32 @@ async def _run_worker(wid: str, cfg: dict, proxy=None) -> None:
         state["proxy"] = proxy.get("key", "tor") if proxy else "tor"
 
         label = state["proxy"]
+
+        # ── Fast liveness probe BEFORE launching a browser ──
+        # A dead session costs ~10s+ when we only discover it after the
+        # browser boots and the goto times out. Probing first (3s cap, plain
+        # HTTP round-trip through the session) blacklists dead sessions in
+        # seconds and skips the browser launch entirely for them. Skipped for
+        # the same session being reused (already proven live this round).
+        if (proxy and proxy.get("host")
+                and (bot is None or (bot.proxy or {}).get("key") != proxy.get("key"))
+                and proxy_pool is not None):
+            try:
+                probe_ok = await proxy_pool.probe(proxy)
+            except Exception:
+                probe_ok = False
+            if not probe_ok:
+                _log(f"[{wid}] [Proxy] Probe failed — session dead, blacklisting {proxy.get('key','?')[:44]}...", level="warn")
+                proxy_pool.release(proxy, ok=False)
+                proxy = None
+                consecutive_tunnel_fails += 1
+                backoff = min(backoff * 2, 8)
+                if consecutive_tunnel_fails >= 4:
+                    _log(f"[{wid}] {consecutive_tunnel_fails} consecutive tunnel failures — aborting (all sessions appear dead)", level="error")
+                    break
+                _proxy_stats_line(wid)
+                await asyncio.sleep(backoff)
+                continue
 
         # ── Launch or reuse browser (fresh domain each attempt) ──
         domain = _pick_domain(cfg)
@@ -305,7 +339,7 @@ async def _run_worker(wid: str, cfg: dict, proxy=None) -> None:
                     proxy_pool.release(proxy, ok=False)
                     proxy = None
                 consecutive_tunnel_fails += 1
-                backoff = min(backoff * 2, 15)
+                backoff = min(backoff * 2, 8)
                 if consecutive_tunnel_fails >= 4:
                     _log(f"[{wid}] {consecutive_tunnel_fails} consecutive tunnel failures — aborting (all sessions appear dead)", level="error")
                     break
@@ -371,6 +405,22 @@ async def _run_worker(wid: str, cfg: dict, proxy=None) -> None:
             elif ok:
                 state["status"] = "done"
                 _log(f"[{wid}] Signup ok (no token yet)")
+                # Account was created but the token isn't there yet (usually a
+                # custom email the user must verify manually). Persist it as
+                # pending so it is never lost — the user clicks the verify
+                # link in their own inbox and the account is theirs.
+                if (_db_available and db is not None
+                        and acc.get("email") and acc.get("username")
+                        and acc.get("password")):
+                    await db.save_account(
+                        email=acc["email"], username=acc["username"],
+                        password=acc["password"], token=acc.get("token", ""),
+                        proxy=label, worker_id=wid,
+                        user_id=acc.get("user_id", ""),
+                        avatar=acc.get("avatar", ""), bio=acc.get("bio", ""),
+                        humanized=bool(acc.get("humanized")),
+                    )
+                    _log(f"[{wid}] Pending account saved (email verification required to unlock token)")
                 if bot: await bot.close()
                 return
 
@@ -383,13 +433,13 @@ async def _run_worker(wid: str, cfg: dict, proxy=None) -> None:
             nav_ok = bool(getattr(bot, "_nav_ok", False))
             if not ok and not nav_ok:
                 consecutive_tunnel_fails += 1
-                backoff = min(backoff * 2, 15)
+                backoff = min(backoff * 2, 8)
                 if consecutive_tunnel_fails >= 4:
                     _log(f"[{wid}] {consecutive_tunnel_fails} consecutive tunnel failures — aborting (all sessions appear dead)", level="error")
                     break
             else:
                 consecutive_tunnel_fails = 0
-                backoff = 1
+                backoff = 0.3
 
             _log(f"[{wid}] Failed (attempt {attempt+1}/{max_tries}, {label})", level="warn")
         except Exception as e:
