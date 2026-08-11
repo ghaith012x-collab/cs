@@ -41,7 +41,7 @@ from stealth import (
 )
 
 CYBERTEMP_URL = "https://www.cybertemp.xyz/en/"
-CYBERTEMP_DOMAIN = "mikerossy.com"
+CYBERTEMP_DOMAIN = "andrewslife.tattoo"
 PROVIDER = "cybertemp"
 
 # Discord verification emails link to:

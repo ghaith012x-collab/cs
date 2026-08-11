@@ -20,6 +20,7 @@ from captcha_solver import (
     solve_hcaptcha_accessibility,
 )
 from cybertemp import TempMail
+from draxon import DraxonMail
 
 
 # ── TOR Control ───────────────────────────────────────────
@@ -197,7 +198,7 @@ class DiscordAutomation:
                  proxy=None, worker_id: str = "B1", domain: str = "vibify.cc"):
         self.headless = headless
         self.worker_id = worker_id
-        self._domain = (domain or "mikerossy.com").strip().lower() or "mikerossy.com"
+        self._domain = (domain or "andrewslife.tattoo").strip().lower() or "andrewslife.tattoo"
         # proxy: dict {proto, host, port, username, password, key} or None
         self.proxy = proxy
         self._playwright = None
@@ -218,6 +219,10 @@ class DiscordAutomation:
         self._avatar_data = ""
         self._bio = ""
         self._humanized = False
+        # Set when Discord asks for phone verification after account creation
+        # — the worker then rotates proxy + fingerprint + mail domain and retries.
+        self.phone_verify_detected = False
+        self._fingerprint = generate_fingerprint(worker_id)
 
     def _log(self, message: str, level: str = "info") -> None:
         tagged = f"[{self.worker_id}] {message}"
@@ -289,8 +294,8 @@ class DiscordAutomation:
         await apply_cdp_stealth(self._context, self._page)
 
     async def switch_proxy(self, new_proxy=None) -> bool:
-        """Swap to a new proxy without restarting the browser.
-        Returns True on success."""
+        """Swap to a new proxy AND a fresh fingerprint without restarting the
+        browser. Returns True on success."""
         try:
             if self._page:
                 await self._page.close()
@@ -301,14 +306,27 @@ class DiscordAutomation:
         self._page = None
         self._context = None
         self.proxy = new_proxy
+        # Fresh fingerprint per session — same UA/GPU/font on a new IP is a
+        # fingerprinting red flag and a known trigger for phone verification.
+        self.rotate_fingerprint()
         try:
             await self._build_context()
             label = 'proxy ' + str(new_proxy.get('key','?')[:40]) if new_proxy else 'fresh TOR circuit'
-            self._log(f"[Switch] Context rebuilt with {label}")
+            self._log(f"[Switch] Context rebuilt with {label} + new fingerprint")
             return True
         except Exception as e:
             self._log(f"[Switch] Context rebuild failed: {e}", level="error")
             return False
+
+    def rotate_fingerprint(self) -> None:
+        """Regenerate fingerprint + UA for a brand-new browser identity."""
+        try:
+            self._fingerprint = generate_fingerprint(self.worker_id)
+            self._ua = self._fingerprint.get("ua") or self._ua
+            fp = self._fingerprint
+            self._log(f"[Fingerprint] Rotated: font={fp['font']}, gpu={fp['webgl_renderer'][:36]}..., ua={self._ua[:48]}...")
+        except Exception as e:
+            self._log(f"[Fingerprint] rotation error: {e}", level="warn")
 
     async def _rebuild_context_with_tor(self) -> bool:
         """Close the context and reopen WITH a fresh TOR circuit."""
@@ -570,18 +588,27 @@ class DiscordAutomation:
     async def start_discord_signup(self) -> bool:
         if not self._page:
             await self.initialize()
+        self.phone_verify_detected = False
 
-        # No hardcoded email - use the configured email, or fall back to a
-        # fresh cybertemp.xyz address (@vibify.cc) when none is provided.
+        # No hardcoded email — try DraxonMails first (instant REST inbox on a
+        # discord-friendly domain, no browser launch), fall back to cybertemp.
         if not self._email:
-            self._log("[Mail] No email configured - creating cybertemp.xyz inbox (@%s)..." % self._domain)
+            self._log("[Mail] No email configured - creating DraxonMails inbox (discord-friendly)...")
             try:
-                self._mail = TempMail(log=self._log, proxy=self.proxy,
-                                      headless=self.headless, domain=self._domain)
+                self._mail = DraxonMail(log=self._log)
                 self._email = await self._mail.create_inbox()
             except Exception as e:
-                self._log(f"[Mail] inbox creation error: {e}", level="error")
+                self._log(f"[Mail] Draxon inbox error: {e}", level="error")
                 self._email = ""
+            if not self._email:
+                self._log(f"[Mail] Draxon unavailable - falling back to cybertemp.xyz (@{self._domain})...", level="warn")
+                try:
+                    self._mail = TempMail(log=self._log, proxy=self.proxy,
+                                          headless=self.headless, domain=self._domain)
+                    self._email = await self._mail.create_inbox()
+                except Exception as e:
+                    self._log(f"[Mail] cybertemp inbox error: {e}", level="error")
+                    self._email = ""
 
         if not self._email:
             self._log("[FAIL] No email available - aborting signup", level="error")
@@ -596,7 +623,7 @@ class DiscordAutomation:
                 self._log("[FAIL] Could not navigate to Discord /register - aborting", level="error")
                 return False
             self._log("[Nav] Discord site rendered")
-            await asyncio.sleep(3)
+            await asyncio.sleep(1.5)
             await self.capture_screenshot()
 
             # Fill the form
@@ -606,7 +633,16 @@ class DiscordAutomation:
                 success = await self._solve_hcaptcha_if_present()
                 if success:
                     self._log("[OK] CAPTCHA SOLVED! Registration submitted.")
-                    # Auto-verify: complete Discord email verification via cybertemp.xyz
+                    # Discord can demand phone verification right after account
+                    # creation. Detect it BEFORE waiting on email — if present,
+                    # abort this attempt so the worker rotates proxy + fingerprint
+                    # + mail domain and retries (phone-gated accounts are dead).
+                    await asyncio.sleep(5)
+                    if await self._detect_phone_verification():
+                        self.phone_verify_detected = True
+                        self._log("[Phone] [DETECTED] Phone verification required - rotating proxy+fingerprint+domain", level="warn")
+                        return False
+                    # Auto-verify: complete Discord email verification
                     await self._verify_account_email()
                     # Login + grab the FULL token from localStorage
                     self._token = await self._extract_token()
@@ -632,18 +668,52 @@ class DiscordAutomation:
         await self.capture_screenshot()
         return success
 
+    async def _detect_phone_verification(self) -> bool:
+        """Check the current page for Discord's phone-verification screen.
+
+        Discord shows this right after account creation (or as a login gate)
+        when it suspects automation. Markers: a phone/tel input, or a phone
+        heading/body. Returns True when the account needs a phone number."""
+        try:
+            result = await asyncio.wait_for(self._page.evaluate("""() => {
+                // Phone input (name=phone / type=tel / aria/placeholder)
+                const phoneInput = document.querySelector(
+                    'input[name="phone"], input[type="tel"], ' +
+                    'input[aria-label*="phone" i], input[placeholder*="phone" i], ' +
+                    'input[autocomplete="tel"]');
+                if (phoneInput && phoneInput.offsetParent !== null) {
+                    return 'input';
+                }
+                const text = (document.body ? document.body.innerText : '').toLowerCase();
+                const markers = [
+                    'verify your phone', 'phone verification', 'verify your account',
+                    'add a phone number', 'phone number required',
+                    'we need to verify your account', 'enter your phone number',
+                    'confirm your phone', 'what\'s your phone number',
+                    'verify via phone', 'add your phone number',
+                ];
+                for (const kw of markers) {
+                    if (text.includes(kw)) return 'text:' + kw;
+                }
+                return '';
+            }"""), timeout=4.0)
+            return bool(result)
+        except Exception:
+            return False
+
     async def _verify_account_email(self) -> bool:
-        """Wait for the Discord verification email and open its link (best effort)."""
+        """Wait for the Discord verification email and open its link (best effort).
+        Aborts early if Discord instead demands phone verification."""
         if not self._mail:
             return False
         try:
-            link = await self._mail.wait_for_verification_link(timeout=240)
+            link = await self._mail.wait_for_verification_link(timeout=150)
             if not link:
                 self._log("[Mail] No verification link found yet - account may still be created", level="warn")
                 return False
             self._log(f"[Mail] Opening verification link: {link[:80]}...")
             await self._page.goto(link, wait_until='domcontentloaded', timeout=NAV_TIMEOUT_MS)
-            await asyncio.sleep(5)
+            await asyncio.sleep(2)
             # Discord shows a verification success page (or redirects to login)
             try:
                 page_text = await self._page.evaluate(
@@ -1530,7 +1600,7 @@ class DiscordAutomation:
                 await self.capture_screenshot()
                 return False
 
-            await asyncio.sleep(3)
+            await asyncio.sleep(2)
             await self.capture_screenshot()
 
             return True
@@ -1563,8 +1633,8 @@ class DiscordAutomation:
                                           timeout=NAV_TIMEOUT_MS)
                     break
                 except Exception:
-                    await asyncio.sleep(3)
-            await asyncio.sleep(3)
+                    await asyncio.sleep(2)
+            await asyncio.sleep(2)
             try:
                 email_input = self._page.locator('input[name="email"]').first
                 await email_input.fill(self._email, timeout=8000)
@@ -1575,9 +1645,16 @@ class DiscordAutomation:
             except Exception as e:
                 self._log(f"[Token] Login fill error: {e}", level="warn")
                 return ""
-            # Wait for token to appear
-            for _ in range(12):
-                await asyncio.sleep(2.5)
+            # Wait for token to appear (abort early if phone-gated at login)
+            for _ in range(10):
+                await asyncio.sleep(2.0)
+                try:
+                    if await self._detect_phone_verification():
+                        self.phone_verify_detected = True
+                        self._log("[Phone] [DETECTED] login gated by phone verification", level="warn")
+                        return ""
+                except Exception:
+                    pass
                 try:
                     token = await self._page.evaluate(
                         "() => localStorage.getItem('token') || ''"

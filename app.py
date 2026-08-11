@@ -55,16 +55,17 @@ _config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.
 # Discord-friendly cybertemp.xyz mail domains (from their public /api/domains:
 # discord:true and status:active). Shown as the selectable database in the
 # dashboard domain picker. mikerossy.com is the locked default.
+# Domains that already triggered Discord phone verification are removed here
+# (mikerossy.com, blobers.it.com, vibify.cc, vibeify.cc). The worker also
+# burns a domain at runtime when a signup ends in phone verification, so it is
+# never reused. DraxonMails (discord-friendly) is the primary mail source;
+# this list is the fallback pool for cybertemp.
 CYBERTEMP_DISCORD_DOMAINS = [
     "andrewslife.tattoo",
-    "blobers.it.com",
     "dianeplumber.mom",
-    "mikerossy.com",
     "mikethe.guru",
     "philipsllc.lol",
     "turkinster.us",
-    "vibeify.cc",
-    "vibify.cc",
 ]
 
 DEFAULT_CONFIG = {
@@ -72,7 +73,7 @@ DEFAULT_CONFIG = {
     "web_port": 8080,
     "camera_interval": 3,
     "worker_count": WORKER_COUNT,
-    "mail_domains": ["mikerossy.com"],
+    "mail_domains": ["andrewslife.tattoo"],
 }
 
 
@@ -102,6 +103,60 @@ def save_config(config: dict, path: str = _config_path) -> None:
 # Shared ring buffer so app-level lines (proxy stats, worker outcomes) reach
 # the web terminal, not just stdout.
 _APP_LOGS: list = []
+
+# Domains that got burned at runtime (phone verification on signup). Seeded
+# from config.json and persisted back so burned domains stay burned.
+# Already-tried domains (mikerossy.com, blobers.it.com, vibify.cc, vibeify.cc)
+# are burned up front so a stale config.json can never revive them.
+_BURNED_DOMAINS: set = {
+    "mikerossy.com", "blobers.it.com", "vibify.cc", "vibeify.cc",
+}
+
+
+def _load_burned() -> None:
+    global _BURNED_DOMAINS
+    _BURNED_DOMAINS = {"mikerossy.com", "blobers.it.com", "vibify.cc", "vibeify.cc"}
+    try:
+        cfg = load_config()
+        _BURNED_DOMAINS.update(
+            str(d).strip().lower() for d in (cfg.get("burned_domains") or []))
+    except Exception:
+        pass
+
+
+def _burn_domain(domain: str) -> None:
+    """Permanently remove a domain from the pool after a phone-verification hit."""
+    d = (domain or "").strip().lower()
+    if not d:
+        return
+    _BURNED_DOMAINS.add(d)
+    try:
+        cfg = load_config()
+        burned = [str(x).strip().lower() for x in (cfg.get("burned_domains") or [])]
+        if d not in burned:
+            burned.append(d)
+        cfg["burned_domains"] = burned
+        mail = [str(x).strip().lower() for x in (cfg.get("mail_domains") or [])]
+        if d in mail:
+            mail.remove(d)
+        cfg["mail_domains"] = mail
+        save_config(cfg)
+    except Exception:
+        pass
+
+
+def _pick_domain(cfg: dict) -> str:
+    """Pick a fresh, non-burned domain from the configured list (falls back to
+    the full discord-friendly pool)."""
+    pools = [
+        [str(x).strip().lower() for x in (cfg.get("mail_domains") or []) if str(x).strip()],
+        list(CYBERTEMP_DISCORD_DOMAINS),
+    ]
+    for pool in pools:
+        fresh = [d for d in pool if d not in _BURNED_DOMAINS]
+        if fresh:
+            return random.choice(fresh)
+    return random.choice(pools[1] or ["andrewslife.tattoo"])
 
 
 def _log(msg: str, level: str = "info"):
@@ -214,14 +269,14 @@ async def _run_worker(wid: str, cfg: dict, proxy=None) -> None:
 
         label = state["proxy"]
 
-        # ── Launch or reuse browser ──
+        # ── Launch or reuse browser (fresh domain each attempt) ──
+        domain = _pick_domain(cfg)
         if bot is None:
-            _domains = cfg.get("mail_domains") or ["mikerossy.com"]
             bot = DiscordAutomation(
                 headless=cfg.get("headless", True),
                 proxy=proxy,  # dict = sticky session; None = TOR in _build_context
                 worker_id=wid,
-                domain=random.choice(_domains),
+                domain=domain,
             )
             state["bot"] = bot
             try:
@@ -237,6 +292,8 @@ async def _run_worker(wid: str, cfg: dict, proxy=None) -> None:
         else:
             # Reuse browser: rotate to a fresh session / TOR circuit
             bot._email = ""
+            bot._domain = domain
+            bot.phone_verify_detected = False
             if not await bot.switch_proxy(proxy):
                 _log(f"[{wid}] Context rebuild failed", level="warn")
                 if proxy:
@@ -252,6 +309,11 @@ async def _run_worker(wid: str, cfg: dict, proxy=None) -> None:
             cam_task = asyncio.create_task(_worker_capture_loop(wid, cfg, stagger * int(cfg.get("camera_interval", 3))))
             ok = await bot.start_discord_signup()
             cam_task.cancel()
+
+            # ── Phone verification hit → burn this domain + rotate everything ──
+            if not ok and getattr(bot, "phone_verify_detected", False):
+                _burn_domain(domain)
+                _log(f"[{wid}] [Phone] Domain {domain} burned - proxy+fingerprint+domain will rotate", level="warn")
 
             # ── Clean up temp-mail session between attempts to prevent
             # aiohttp connector leaks (each failed attempt creates a new
@@ -610,14 +672,16 @@ def handle_config():
             cfg['worker_count'] = int(data['worker_count'])
         if 'mail_domains' in data:
             domains = [str(d).strip().lower() for d in data['mail_domains'] if str(d).strip()]
-            cfg['mail_domains'] = domains or ["mikerossy.com"]
+            cfg['mail_domains'] = domains or ["andrewslife.tattoo"]
         save_config(cfg)
         return jsonify({"ok": True, "config": cfg})
     cfg = load_config()
+    avail = [d for d in CYBERTEMP_DISCORD_DOMAINS if d not in _BURNED_DOMAINS]
     return jsonify({"headless": cfg.get("headless", True),
                     "worker_count": cfg.get("worker_count", WORKER_COUNT),
-                    "mail_domains": cfg.get("mail_domains", ["mikerossy.com"]),
-                    "available_domains": CYBERTEMP_DISCORD_DOMAINS})
+                    "mail_domains": cfg.get("mail_domains", ["andrewslife.tattoo"]),
+                    "burned_domains": sorted(_BURNED_DOMAINS),
+                    "available_domains": avail})
 
 
 # ── Background event loop ─────────────────────────────────
@@ -629,6 +693,7 @@ def _run_event_loop(loop: asyncio.AbstractEventLoop) -> None:
 
 def main() -> None:
     global _loop
+    _load_burned()
     config = load_config()
     web_port = config.get("web_port", 8080)
 
@@ -799,7 +864,7 @@ input:focus{border-color:var(--dim)}
 </style></head><body>
 
 <h1>EY3<span class="tag">TOKEN FORGE</span></h1>
-<div class="sub"><span class="dot" id="dDot"></span> <span id="stLine">idle</span> - discord token gen - cybertemp <span id="domLine">@mikerossy.com</span></div>
+<div class="sub"><span class="dot" id="dDot"></span> <span id="stLine">idle</span> - discord token gen - draxon+cybertemp <span id="domLine">@andrewslife.tattoo</span></div>
 
 <nav>
   <button id="nvMain" class="on" onclick="showTab('Main')">MAIN</button>
@@ -831,7 +896,7 @@ input:focus{border-color:var(--dim)}
     <div class="btnrow" style="margin-top:12px">
       <button class="primary" onclick="saveDomains()">Save domains</button>
     </div>
-    <div class="hint">Pick ONE domain to use - choosing one replaces the current domain and saves immediately. mikerossy.com is the default until you pick another.</div>
+    <div class="hint">Pick ONE discord-friendly domain - choosing one replaces the current and saves immediately. Domains that trigger phone verification get burned automatically.</div>
   </div>
 </div>
 
@@ -933,7 +998,8 @@ function refreshStatus(){
 var FILTERS=['[Proxy]','Fingerprint','Discord site rendered','is in Discord and confirmed','[Account] Email=',
   'Inbox ready','Verification link found','Challenge iframe fully loaded','[Accessibility] [OK]',
   'solved:','Humanized','[Captcha] [READY]','[Captcha]','[FAIL]','[Form]','[Nav] Page:','[Mail] No verification',
-  'No verification link','No email available','DEAD','BLOCKED','rate limit','Starting worker'];
+  'No verification link','No email available','DEAD','BLOCKED','rate limit','Starting worker',
+  '[Phone]','[Fingerprint]','draxon','Draxon'];
 var showAll=false;
 var OKWORDS=['[ok]','confirmed','solved','ready','rendered','humanized','verification link found'];
 function refreshLogs(){
@@ -1122,12 +1188,12 @@ function copyBtn(btn){
 var DOMAINS=[], AVAIL=[];
 function loadConfig(){
   api('/config').then(function(r){return r.json();}).then(function(x){
-    AVAIL=(x.available_domains&&x.available_domains.length)?x.available_domains:['mikerossy.com'];
-    DOMAINS=(x.mail_domains&&x.mail_domains.length)?x.mail_domains.slice():['mikerossy.com'];
+    AVAIL=(x.available_domains&&x.available_domains.length)?x.available_domains:['andrewslife.tattoo'];
+    DOMAINS=(x.mail_domains&&x.mail_domains.length)?x.mail_domains.slice():['andrewslife.tattoo'];
     HEADLESS=x.headless!==false;
     $('swHeadless').classList.toggle('on',HEADLESS);
     renderDomains();
-  }).catch(function(){AVAIL=['mikerossy.com'];DOMAINS=['mikerossy.com'];renderDomains();});
+  }).catch(function(){AVAIL=['andrewslife.tattoo'];DOMAINS=['andrewslife.tattoo'];renderDomains();});
 }
 function renderDomains(){
   var html='';
