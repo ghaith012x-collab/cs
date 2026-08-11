@@ -905,6 +905,38 @@ class DiscordAutomation:
         await self.capture_screenshot()
         return success
 
+    async def _humanize_account(self) -> None:
+        """Set avatar and bio on the newly created Discord account.
+
+        Uses the Discord API directly with the captured token. Best-effort
+        only — failures are logged but never block the account from being
+        saved (a humanized account is nice but non-critical)."""
+        if not (self._token and self._page):
+            return
+        try:
+            import aiohttp
+            bio = random.choice(_BIO_POOL)
+            headers = {"Authorization": self._token, "Content-Type": "application/json"}
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as s:
+                # Set bio
+                async with s.patch(
+                    "https://discord.com/api/v9/users/@me",
+                    json={"bio": bio}, headers=headers,
+                ) as r:
+                    if r.status == 200:
+                        data = await r.json()
+                        self._bio = bio
+                        self._user_id = str(data.get("id", ""))
+                        avatar_hash = data.get("avatar") or ""
+                        if avatar_hash:
+                            self._avatar_data = avatar_hash
+                        self._humanized = True
+                        self._log(f"[Humanize] Bio set: \"{bio}\"")
+                    else:
+                        self._log(f"[Humanize] API returned {r.status}", level="warn")
+        except Exception as e:
+            self._log(f"[Humanize] Error: {e}", level="warn")
+
     async def _detect_phone_verification(self) -> bool:
         """Check the current page for Discord's phone-verification screen.
 

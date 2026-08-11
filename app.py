@@ -789,13 +789,12 @@ def handle_export():
     out = []
     for a in chosen:
         if mode == 'full':
-            if mode == 'full':
-                text = "\n".join([
-                    a.get('token') or '',
-                    "Email: " + str(a.get('email') or ''),
-                    "Password: " + str(a.get('password') or ''),
-                    "Username: " + str(a.get('username') or ''),
-                ])
+            text = "\n".join([
+                a.get('token') or '',
+                "Email: " + str(a.get('email') or ''),
+                "Password: " + str(a.get('password') or ''),
+                "Username: " + str(a.get('username') or ''),
+            ])
         else:
             text = a.get('token') or ''
         out.append({
