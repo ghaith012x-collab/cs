@@ -1237,9 +1237,17 @@ class DiscordAutomation:
     async def _fill_registration_form(self) -> bool:
         try:
             self._log("=" * 40)
-            self._log("FILLING REGISTRATION FORM")
+            self._log("FILLING REGISTRATION FORM (direct value set)")
             self._log("=" * 40)
             self._log(f"Email: {self._email}")
+
+            # ── Pre-define DOB so the age-gate JS can use them ──
+            month_val = random.randint(1, 12)
+            day_val = str(random.randint(1, 28))
+            year_val = str(random.randint(1990, 1999))
+            months = ['January', 'February', 'March', 'April', 'May', 'June',
+                     'July', 'August', 'September', 'October', 'November', 'December']
+            month_name = months[month_val - 1]
 
             # ── Handle Discord age gate (birthday modal before form) ──
             for _ in range(6):
@@ -1256,115 +1264,61 @@ class DiscordAutomation:
                     self._log("[Form] Registration form detected — no age gate")
                     break
                 if has_age_gate:
-                    self._log("[Form] Age gate detected — filling DOB...")
-                    # Discord age gate: pick adult DOB
+                    self._log("[Form] Age gate detected — setting DOB via JS...")
+                    # Set DOB directly by interacting with the DOM
                     try:
                         await self._page.evaluate("""() => {
-                            const pickers = document.querySelectorAll('input, [role="combobox"], [class*="select"]');
-                            for (const p of pickers) {
-                                if (p.offsetParent === null) continue;
-                                const label = (p.getAttribute('aria-label') || p.getAttribute('placeholder') || '').toLowerCase();
-                                // Click and select month/day/year
-                                p.click();
-                                break;
+                            const months = {'january':1,'february':2,'march':3,'april':4,'may':5,'june':6,
+                                'july':7,'august':8,'september':9,'october':10,'november':11,'december':12};
+                            const val = (arguments[0]||'').toLowerCase();
+                            const m = months[val] || 1;
+                            const day = arguments[1] || '15';
+                            const year = arguments[2] || '1995';
+                            const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+                            const all = Array.from(document.querySelectorAll('input, select'));
+                            let idx = 0;
+                            for (const el of all) {
+                                if (el.offsetParent === null) continue;
+                                const tag = el.tagName.toLowerCase();
+                                if (tag === 'select') {
+                                    const opts = el.options;
+                                    const target = idx===0 ? String(m) : (idx===1 ? day : year);
+                                    for (let oi=0; oi<opts.length; oi++) {
+                                        const ot = (opts[oi].text||'').toLowerCase().trim();
+                                        if (ot === target || ot === String(m) || ot === day || ot === year) {
+                                            el.selectedIndex = oi;
+                                            break;
+                                        }
+                                    }
+                                    el.dispatchEvent(new Event('change', {bubbles:true}));
+                                    idx++;
+                                } else {
+                                    const target = idx===0 ? String(m) : (idx===1 ? day : year);
+                                    setter.call(el, target);
+                                    el.dispatchEvent(new Event('input', {bubbles:true}));
+                                    el.dispatchEvent(new Event('change', {bubbles:true}));
+                                    idx++;
+                                }
+                                if (idx >= 3) break;
                             }
-                        }""")
+                        }""", month_name, day_val, year_val)
+                        await asyncio.sleep(1.5)
                     except Exception:
                         pass
-                    # Try typing DOB fields directly
-                    try:
-                        inputs = self._page.locator('input[type="text"], input:not([type])')
-                        count = await inputs.count()
-                        if count >= 3:
-                            await inputs.nth(0).fill("January")
-                            await inputs.nth(1).fill("15")
-                            await inputs.nth(2).fill("1995")
-                            await self._page.keyboard.press("Enter")
-                    except Exception:
-                        pass
-                    try:
-                        await self._page.keyboard.type("01", delay=30)
-                        await self._page.keyboard.press("Tab")
-                        await self._page.keyboard.type("15", delay=30)
-                        await self._page.keyboard.press("Tab")
-                        await self._page.keyboard.type("1995", delay=30)
-                        await self._page.keyboard.press("Enter")
-                    except Exception:
-                        pass
-                    await asyncio.sleep(2)
                     continue
-                # Neither form nor age gate — page may still be loading
                 self._log(f"[Form] Waiting for page content... ({_+1}/6)")
                 await asyncio.sleep(1.5)
 
-            # ── Wait for email input with multiple fallback selectors ──
-            email_input = None
-            for selector in (
-                'input[name="email"]',
-                'input[type="email"]',
-                'input[id*="email" i]',
-                'input[aria-label*="email" i]',
-                'input[placeholder*="email" i]',
-                'input[autocomplete="email"]',
-            ):
-                try:
-                    await self._page.wait_for_selector(selector, timeout=8000)
-                    email_input = self._page.locator(selector)
-                    self._log(f"[Form] Email input found: {selector}")
-                    break
-                except Exception:
-                    continue
-
-            if not email_input:
-                # Last resort: type into the first visible text input
-                try:
-                    all_inputs = self._page.locator('input:not([type="hidden"]):not([type="submit"])')
-                    count = await all_inputs.count()
-                    if count > 0:
-                        email_input = all_inputs.first
-                        self._log("[Form] Using first visible input as email", level="warn")
-                except Exception:
-                    pass
-
-            if not email_input:
-                self._log("[Form] No email input found on page", level="error")
-                await self.capture_screenshot()
-                return False
-
-            await email_input.click()
-            await asyncio.sleep(random.uniform(0.3, 0.6))
-            await human_type(self._page, 'input[name="email"]', self._email)
-            await asyncio.sleep(random.uniform(0.4, 0.8))
-
-            # Generate username with random digits suffix (more human-like)
+            # ── Generate credentials ──
             consonants = 'bcdfghjklmnpqrstvwxyz'
             vowels = 'aeiou'
             username = ''
             for _ in range(random.randint(8, 12)):
                 username += random.choice(vowels if random.random() < 0.35 else consonants)
-            # Add 3-4 random digits so Discord doesn't flag as bot-pattern
             username += str(random.randint(100, 9999))
             self._username = username
             display_name = self._username[:15]
 
-            self._log(f"Display name: {display_name}")
-            try:
-                await self._page.wait_for_selector('input[name="global_name"]', timeout=5000)
-                await self._page.locator('input[name="global_name"]').click()
-                await asyncio.sleep(random.uniform(0.3, 0.6))
-                await human_type(self._page, 'input[name="global_name"]', display_name)
-                await asyncio.sleep(random.uniform(0.4, 0.8))
-            except:
-                pass
-            await self._human_pause()
-
-            self._log(f"Username: {self._username}")
-            await self._page.locator('input[name="username"]').click()
-            await asyncio.sleep(random.uniform(0.3, 0.6))
-            await human_type(self._page, 'input[name="username"]', self._username)
-            await asyncio.sleep(random.uniform(0.4, 0.8))
-
-            # Generate password
             first = random.choice('ABCDEFGHJKLMNPQRSTUVWXYZ')
             body = ''
             for _ in range(random.randint(8, 11)):
@@ -1372,21 +1326,98 @@ class DiscordAutomation:
             specials = '!@#$%&*'
             self._password = first + body + random.choice(specials) + str(random.randint(1, 99))
 
-            self._log("Filling password")
-            await self._page.locator('input[name="password"]').click()
-            await asyncio.sleep(random.uniform(0.3, 0.6))
-            await human_type(self._page, 'input[name="password"]', self._password)
-            await asyncio.sleep(random.uniform(0.4, 0.8))
+            self._log(f"Display: {display_name}  Username: {self._username}  Pass: ***")
 
-            # DOB
-            month_val = random.randint(1, 12)
-            day_val = str(random.randint(1, 28))
-            year_val = str(random.randint(1990, 1999))
-            months = ['January', 'February', 'March', 'April', 'May', 'June',
-                     'July', 'August', 'September', 'October', 'November', 'December']
-            month_name = months[month_val - 1]
+            # ── Set ALL form fields + ToS checkbox directly via JS ──
+            # Using the native value setter + input/change events — React
+            # controlled inputs and checkboxes respond to these reliably.
+            # No humanized typing, no CDP keyboard, no timing issues.
+            form_json = json.dumps({
+                "email": self._email or "",
+                "display": display_name,
+                "username": self._username or "",
+                "password": self._password or "",
+            })
+            try:
+                result = await self._page.evaluate(f"""() => {{
+                    const fields = {form_json};
+                    const setter = Object.getOwnPropertyDescriptor(
+                        HTMLInputElement.prototype, 'value'
+                    ).set;
+                    const selectors = {{
+                        email: 'input[name="email"]',
+                        display: 'input[name="global_name"]',
+                        username: 'input[name="username"]',
+                        password: 'input[name="password"]',
+                    }};
+                    let ok = [];
+                    for (const [k, v] of Object.entries(fields)) {{
+                        const sel = selectors[k];
+                        const el = sel ? document.querySelector(sel) : null;
+                        if (!el) {{ ok.push(k + ':not_found'); continue; }}
+                        el.focus();
+                        setter.call(el, v);
+                        el.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                        el.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                        ok.push(k + ':ok');
+                    }}
+
+                    // ToS checkbox: force-check EVERYTHING unchecked
+                    let cb_hit = 0;
+                    const allCb = document.querySelectorAll('input[type="checkbox"], [role="checkbox"]');
+                    for (const cb of allCb) {{
+                        if (cb.offsetParent === null) continue;
+                        const isChecked = cb.checked || cb.getAttribute('aria-checked') === 'true'
+                            || cb.getAttribute('data-state') === 'checked';
+                        if (isChecked) continue;
+                        cb.scrollIntoView({{block: 'center'}});
+                        cb.focus();
+                        cb.click();
+                        cb.checked = true;
+                        cb.setAttribute('aria-checked', 'true');
+                        cb.setAttribute('data-state', 'checked');
+                        cb.dispatchEvent(new MouseEvent('click', {{ bubbles: true }}));
+                        cb.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                        cb_hit++;
+                    }}
+                    return JSON.stringify({{ fields: ok, checkboxes: cb_hit }});
+                }}""")
+                state = json.loads(result) if result else {}
+                self._log(f"[Form] JS set result: {state}")
+                tos_checked = bool(state.get("checkboxes", 0) > 0)
+            except Exception as e:
+                self._log(f"[Form] JS value-set error: {e}", level="error")
+                tos_checked = False
+
+            # ── Quick verify each field ──
+            try:
+                v = await self._page.evaluate("""() => {
+                    const g = (sel) => { const e = document.querySelector(sel); return e ? (e.value || '') : ''; };
+                    return JSON.stringify({
+                        email: g('input[name="email"]'),
+                        display: g('input[name="global_name"]'),
+                        username: g('input[name="username"]'),
+                        password: g('input[name="password"]'),
+                        tos: document.querySelectorAll('input[type="checkbox"]:checked, [role="checkbox"][aria-checked="true"], [role="checkbox"][data-state="checked"]').length,
+                    });
+                }""")
+                vals = json.loads(v) if v else {}
+                ok = (vals.get("email") == self._email
+                      and vals.get("username") == self._username
+                      and vals.get("password") == self._password
+                      and (vals.get("tos", 0) > 0))
+                if ok:
+                    self._log("[Form] All fields + ToS verified OK")
+                else:
+                    self._log(f"[Form] VERIFY: email_match={vals.get('email','?')[:20]==(self._email or '')[:20]} "
+                              f"user_match={vals.get('username','')==self._username} "
+                              f"pass_match={vals.get('password','')==self._password} "
+                              f"tos={vals.get('tos',0)}", level="warn")
+            except Exception:
+                pass
+
+            # ── DOB ──
             self._log(f"DOB: {month_name} {day_val}, {year_val}")
-
             await self._select_dob("Month", month_name)
             await self._human_pause()
             await self._select_dob("Day", day_val)
@@ -1394,166 +1425,7 @@ class DiscordAutomation:
             await self._select_dob("Year", year_val)
             await self._human_pause()
 
-            # ── ToS Checkbox ── ULTRA-AGGRESSIVE BLAST ──
-            self._log("Checkbox blitz: hitting every visible unchecked element...")
-            tos_checked = False
-
-            async def _tos_state() -> dict:
-                """Read the REAL checkbox state from the DOM."""
-                try:
-                    v = await self._page.evaluate("""() => {
-                        let native = 0;
-                        for (const cb of document.querySelectorAll('input[type="checkbox"]')) {
-                            if (cb.checked) native++;
-                        }
-                        const role = document.querySelectorAll(
-                            '[role="checkbox"][aria-checked="true"]').length;
-                        const dataState = document.querySelectorAll(
-                            '[role="checkbox"][data-state="checked"]').length;
-                        return { native: native, role: role, dataState: dataState };
-                    }""")
-                    if not isinstance(v, dict):
-                        v = {}
-                except Exception:
-                    v = {}
-                return v
-
-            # BLAST every viable checkbox with trusted native click() —
-            # React's event system responds to mouse-originated trusted events.
-            for blast in range(5):
-                try:
-                    hit = await self._page.evaluate("""() => {
-                        let any = false;
-                        const all = document.querySelectorAll('input[type="checkbox"], [role="checkbox"]');
-                        for (const cb of all) {
-                            if (cb.offsetParent === null) continue;
-                            if (cb.checked || cb.getAttribute('aria-checked') === 'true'
-                                || cb.getAttribute('data-state') === 'checked'
-                                || cb.getAttribute('data-checked') === 'true') continue;
-                            cb.scrollIntoView({block: 'center'});
-                            cb.focus();
-                            cb.click();
-                            any = true;
-                        }
-                        return any;
-                    }""")
-                except Exception:
-                    hit = False
-                await asyncio.sleep(0.12)
-                state = await _tos_state()
-                if state.get('native') or state.get('role') or state.get('dataState'):
-                    tos_checked = True
-                    self._log(f"[OK] ToS CHECKED (blast round {blast+1} — state={state})")
-                    break
-                if not hit:
-                    state = await _tos_state()
-                    if state.get('native') or state.get('role') or state.get('dataState'):
-                        tos_checked = True
-                        self._log(f"[OK] All checkboxes already checked (state={state})")
-                    break
-
-            # Precision mouse-click fallback on the ToS label area
-            if not tos_checked:
-                try:
-                    tos_point_raw = await self._page.evaluate("""() => {
-                        const tosKeywords = ['terms of service', 'terms of use', 'terms & conditions',
-                            'terms and conditions', 'i have read', 'read and agree', 'agree to', 'by creating'];
-                        const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null);
-                        let node;
-                        while (node = walker.nextNode()) {
-                            const t = node.textContent.trim().toLowerCase();
-                            if (!tosKeywords.some(k => t.includes(k))) continue;
-                            let el = node.parentElement;
-                            for (let i = 0; i < 12 && el; i++) {
-                                const cb = el.querySelector('input[type="checkbox"], [role="checkbox"]');
-                                if (cb && cb.offsetParent !== null) {
-                                    cb.scrollIntoView({block: 'center'});
-                                    const r = cb.getBoundingClientRect();
-                                    return JSON.stringify({x: r.x + r.width/2, y: r.y + r.height/2});
-                                }
-                                el = el.parentElement;
-                            }
-                        }
-                        return '';
-                    }""")
-                    if tos_point_raw and tos_point_raw.startswith('{'):
-                        tp = json.loads(tos_point_raw)
-                        for pn in range(8):
-                            await self._page.mouse.click(float(tp['x']), float(tp['y']))
-                            await asyncio.sleep(0.1)
-                            state = await _tos_state()
-                            if state.get('native') or state.get('role') or state.get('dataState'):
-                                tos_checked = True
-                                self._log(f"[OK] ToS checked via mouse click (pass {pn+1})")
-                                break
-                except Exception as e:
-                    self._log(f"ToS precision-click error: {e}", level="warn")
-
-            if tos_checked:
-                self._log("[OK] ToS checkbox checked")
-            else:
-                self._log("[WARN] ToS checkbox NOT checked — Create Account button may be disabled", level="warn")
-
-            # — VERIFY every field is actually filled (kill fake-success) —
-            # Read the REAL input values. Anything the page did not accept
-            # is typed again; the log below reports the verified truth.
-            field_selectors = {
-                "email": 'input[name="email"]',
-                "display name": 'input[name="global_name"]',
-                "username": 'input[name="username"]',
-                "password": 'input[name="password"]',
-            }
-            expected_values = {
-                "email": self._email or "",
-                "display name": (self._username or "")[:15],
-                "username": self._username or "",
-                "password": self._password or "",
-            }
-
-            async def _read_field_values() -> dict:
-                try:
-                    v = await self._page.evaluate("""() => {
-                        const g = (sel) => { const e = document.querySelector(sel); return e ? (e.value || '') : ''; };
-                        return {
-                            email: g('input[name="email"]'),
-                            'display name': g('input[name="global_name"]'),
-                            username: g('input[name="username"]'),
-                            password: g('input[name="password"]')
-                        };
-                    }""")
-                    if not isinstance(v, dict):
-                        v = {}
-                except Exception:
-                    v = {}
-                return v
-
-            values = await _read_field_values()
-            refilled = 0
-            for key, sel in field_selectors.items():
-                got = values.get(key) or ""
-                want = expected_values.get(key) or ""
-                if want and got != want:
-                    self._log(f"[Form] {key} not actually filled ({len(got)}/{len(want)} chars) - refilling", level="warn")
-                    try:
-                        await self._page.locator(sel).click()
-                        await asyncio.sleep(0.2)
-                        await human_type(self._page, sel, want)
-                        refilled += 1
-                    except Exception as e:
-                        self._log(f"[Form] refill {key} error: {e}", level="warn")
-            if refilled:
-                await asyncio.sleep(1.0)
-                values = await _read_field_values()
-
-            filled_ok = all(
-                (values.get(k) or "") == (expected_values.get(k) or "")
-                for k in field_selectors if expected_values.get(k)
-            )
-            if filled_ok and tos_checked:
-                self._log("[Form] All fields filled + ToS checked - waiting 2s before Create Account...")
-            else:
-                self._log(f"[Form] VERIFIED state: fields filled={filled_ok} ToS checked={tos_checked} - proceeding anyway", level="warn")
-            await asyncio.sleep(2.0)
+            await asyncio.sleep(1.0)
 
             # ── VERIFY ToS is actually checked before trying Create Account ──
             try:
