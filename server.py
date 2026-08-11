@@ -224,6 +224,10 @@ class DiscordAutomation:
         # True once this session actually rendered Discord's register page
         # (used by the worker to distinguish dead sessions from soft failures).
         self._nav_ok = False
+        # True when the mail provider failed BEFORE Discord even loaded — the
+        # worker uses this to retry the same proxy/fingerprint instead of
+        # rotating (mail failures are not IP problems).
+        self._mail_failed = False
         self._fingerprint = generate_fingerprint(worker_id)
 
     def _log(self, message: str, level: str = "info") -> None:
@@ -242,6 +246,64 @@ class DiscordAutomation:
     def get_activity_log(self) -> list:
         return self._activity_log
 
+    def _clearcote_launch_opts(self) -> dict:
+        """Map the current fingerprint onto Clearcote persona options.
+
+        fingerprint = the session seed — the identity root. rotate_fingerprint()
+        mints a fresh seed per new proxy session, so the engine derives one
+        coherent machine (UA, GPU, fonts, canvas, TLS) per session and a new,
+        unlinkable one when we rotate. platform follows the fingerprint's UA;
+        timezone/accept_language come from the same fingerprint so the bot's
+        chosen locale stays in charge (explicit values win over the persona)."""
+        opts: dict = {
+            "fingerprint": self._fingerprint.get("seed") or int(time.time() * 1000)
+        }
+        fp = self._fingerprint
+        try:
+            from stealth import ua_platform
+            platform = ua_platform(self._ua or "")["ch_platform"].lower()
+            if platform in ("windows", "macos", "linux"):
+                opts["platform"] = platform
+        except Exception:
+            pass
+        profile = fp.get("locale_profile") or {}
+        if profile.get("tz"):
+            opts["timezone"] = profile["tz"]
+        locale = fp.get("locale") or "en-US"
+        opts["accept_language"] = f"{locale},{locale.split('-')[0]};q=0.9,en;q=0.8"
+        return opts
+
+    def _launch_proxy(self) -> Optional[dict]:
+        """The proxy rides on browser launch (Clearcote/Playwright apply it as
+        a --proxy-server launch argument — a context-level proxy would either
+        be ignored or rejected). Returns the Playwright-style
+        {server, username, password} dict (or None for TOR/direct)."""
+        if not (self.proxy and isinstance(self.proxy, dict)):
+            return None
+        p = self.proxy
+        proto = p.get("proto", "http")
+        lp = {"server": f"{proto}://{p.get('host')}:{p.get('port')}"}
+        if p.get("username"):
+            lp["username"] = p.get("username")
+            lp["password"] = p.get("password", "")
+        return lp
+
+    async def _relaunch_browser(self) -> None:
+        """Close and relaunch the browser bound to self.proxy. truedriver
+        cannot change a running browser's proxy (it is a launch flag), so a
+        proxy change requires a full relaunch."""
+        if self._browser:
+            try:
+                await self._browser.close()
+            except Exception:
+                pass
+            self._browser = None
+        args = launch_args(headless=self.headless)
+        self._browser = await self._playwright.chromium.launch(
+            headless=self.headless, args=args, proxy=self._launch_proxy(),
+            **self._clearcote_launch_opts())
+        await self._build_context()
+
     async def initialize(self) -> None:
         self._playwright = await async_playwright().start()
 
@@ -255,7 +317,17 @@ class DiscordAutomation:
         # Keep the fingerprint's UA in sync with the one we actually use.
         self._ua = self._fingerprint.get("ua") or self._ua
         self._log(f"Fingerprint: font={self._fingerprint['font']}, gpu={self._fingerprint['webgl_renderer'][:40]}..., dpr={self._fingerprint['pixel_ratio']}")
-        self._browser = await self._playwright.chromium.launch(headless=self.headless, args=args)
+
+        # Launch the browser WITH the proxy. The engine applies it as a
+        # --proxy-server launch arg — a proxy passed later to new_context()
+        # would be silently ignored and traffic would go direct.
+        launch_proxy = self._launch_proxy()
+        if launch_proxy is None and _tor_check():
+            launch_proxy = {"server": "socks5://127.0.0.1:9050"}
+            self._tor_enabled = True
+        self._browser = await self._playwright.chromium.launch(
+            headless=self.headless, args=args, proxy=launch_proxy,
+            **self._clearcote_launch_opts())
 
         # Standard desktop viewport (1920x1080) — most common real resolution
         await self._build_context()
@@ -278,7 +350,11 @@ class DiscordAutomation:
             self._log("[TOR] Using TOR SOCKS5 proxy...")
             if _tor_newnym():
                 self._log("[TOR] New identity requested")
-            ctx_opts['proxy'] = {'server': 'socks5://127.0.0.1:9050'}
+            # Clearcote already rides the TOR proxy from browser launch — a
+            # context-level proxy would be rejected by Playwright when the
+            # browser was launched with one.
+            if ENGINE != "clearcote":
+                ctx_opts['proxy'] = {'server': 'socks5://127.0.0.1:9050'}
             await asyncio.sleep(1)
         else:
             self._log("[TOR] [FATAL] TOR SOCKS5 (127.0.0.1:9050) NOT reachable - TOR-only mode requires TOR running on this instance", level="error")
@@ -296,21 +372,17 @@ class DiscordAutomation:
         await apply_cdp_stealth(self._context, self._page)
 
     async def switch_proxy(self, new_proxy=None) -> bool:
-        """Swap to a new proxy AND a fresh fingerprint without restarting the
-        browser. Returns True on success."""
+        """Swap to a new proxy AND a fresh fingerprint. Returns True on success.
+
+        truedriver pins the proxy at browser launch, so switching to a
+        DIFFERENT session relaunches the browser; reusing the same session
+        only rebuilds the context (and keeps the fingerprint — rotating an
+        identity on an unchanged IP just churns fingerprints)."""
         same_session = bool(
             new_proxy and self.proxy
             and new_proxy.get("key") == self.proxy.get("key")
         )
-        try:
-            if self._page:
-                await self._page.close()
-            if self._context:
-                await self._context.close()
-        except Exception:
-            pass
-        self._page = None
-        self._context = None
+        proxy_changed = (new_proxy or {}).get("key") != (self.proxy or {}).get("key")
         self.proxy = new_proxy
         if same_session:
             # Pool recycled the SAME session (all sessions blacklisted then
@@ -323,9 +395,22 @@ class DiscordAutomation:
             # fingerprinting red flag and a known trigger for phone verification.
             self.rotate_fingerprint()
         try:
-            await self._build_context()
+            if self._page:
+                await self._page.close()
+            if self._context:
+                await self._context.close()
+        except Exception:
+            pass
+        self._page = None
+        self._context = None
+        try:
+            if proxy_changed:
+                self._log("[Switch] Proxy changed — relaunching browser with new session")
+                await self._relaunch_browser()
+            else:
+                await self._build_context()
             label = 'proxy ' + str(new_proxy.get('key','?')[:40]) if new_proxy else 'fresh TOR circuit'
-            self._log(f"[Switch] Context rebuilt with {label} + new fingerprint")
+            self._log(f"[Switch] Context rebuilt with {label}")
             return True
         except Exception as e:
             self._log(f"[Switch] Context rebuild failed: {e}", level="error")
@@ -636,6 +721,7 @@ class DiscordAutomation:
             await self.initialize()
         self.phone_verify_detected = False
         self._nav_ok = False
+        self._mail_failed = False
 
         # No hardcoded email — create a cybertemp.xyz inbox on a
         # discord-friendly domain (the primary mail provider).
@@ -650,6 +736,7 @@ class DiscordAutomation:
                 self._email = ""
 
         if not self._email:
+            self._mail_failed = True
             self._log("[FAIL] No email available - aborting signup", level="error")
             return False
 
@@ -1267,13 +1354,13 @@ class DiscordAutomation:
                     self._log("[Form] Age gate detected — setting DOB via JS...")
                     # Set DOB directly by interacting with the DOM
                     try:
-                        await self._page.evaluate("""() => {
+                        await self._page.evaluate("""(month_name, day_val, year_val) => {
                             const months = {'january':1,'february':2,'march':3,'april':4,'may':5,'june':6,
                                 'july':7,'august':8,'september':9,'october':10,'november':11,'december':12};
-                            const val = (arguments[0]||'').toLowerCase();
+                            const val = (month_name||'').toLowerCase();
                             const m = months[val] || 1;
-                            const day = arguments[1] || '15';
-                            const year = arguments[2] || '1995';
+                            const day = day_val || '15';
+                            const year = year_val || '1995';
                             const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
                             const all = Array.from(document.querySelectorAll('input, select'));
                             let idx = 0;

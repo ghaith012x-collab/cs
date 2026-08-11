@@ -72,7 +72,17 @@ _STEALTH_ARGS = _BASE_ARGS + [
 
 
 def launch_args(headless: bool = True) -> list:
-    """Launch args for the active engine (patchright = minimal, else full)."""
+    """Launch args for the active engine.
+
+    clearcote = minimal baseline only: the SDK already drops
+    ``--enable-automation`` and derives a coherent headless persona/window
+    geometry in the engine; extra flags (and ``--headless=new``) would fight
+    its machinery and can reintroduce signals.
+    patchright = minimal set (it patches the CDP layer itself).
+    stock = full hardening set.
+    """
+    if ENGINE == "clearcote":
+        return list(_BASE_ARGS)
     args = _BASE_ARGS if ENGINE == "patchright" else _STEALTH_ARGS
     if headless:
         # New headless mode: visually identical to headed, no "HeadlessChrome"
@@ -420,7 +430,15 @@ _INIT_TEMPLATE = r"""
 
 
 def build_init_script(fingerprint: dict, ua: str) -> str:
-    """Build the init script with one consistent identity baked in."""
+    """Build the init script with one consistent identity baked in.
+
+    clearcote: returns a no-op script — the engine's C++ persona already owns
+    the whole identity (webdriver, UA-CH, WebGL, fonts, canvas). Injecting
+    these JS overrides on top would re-introduce the self-revealing shims
+    (toString returns the shim source, realm re-acquisition, descriptor
+    checks) that Clearcote exists to remove."""
+    if ENGINE == "clearcote":
+        return "// clearcote: engine-level persona — no JS shims needed"
     pl = ua_platform(ua)
     version = ua_chrome_version(ua)
     full_version = _CHROME_RE.search(ua)
@@ -482,7 +500,21 @@ def build_context_options(fingerprint: dict, ua: str, proxy=None,
                           viewport=None) -> dict:
     """Context options with a fully coherent identity:
     locale ↔ languages ↔ timezone ↔ geolocation ↔ devicePixelRatio.
-    proxy is a dict {proto, host, port, username, password} or None."""
+    proxy is a dict {proto, host, port, username, password} or None.
+
+    clearcote: the persona lives in the ENGINE (C++), so the context only
+    carries functional options. No user_agent / timezone / locale / headers /
+    proxy — the seed-derived persona owns the identity and the proxy rides on
+    browser launch (Playwright rejects a context-level proxy when the browser
+    was launched with one)."""
+    if ENGINE == "clearcote":
+        vp = viewport or {"width": 1920, "height": 1080}
+        opts = {
+            "viewport": vp,
+            "ignore_https_errors": True,
+            "bypass_csp": True,
+        }
+        return opts
     profile = fingerprint.get("locale_profile") or random.choice(_LOCALE_PROFILES)
     vp = viewport or {"width": 1920, "height": 1080}
     opts = {
@@ -543,7 +575,13 @@ _CDP_WEBDRIVER_SRC = (
 
 async def apply_cdp_stealth(context, page) -> None:
     """CDP-level patches that run before init scripts / page JS.
-    Works for both Playwright and Patchright (new_cdp_session exists on both)."""
+    Works for both Playwright and Patchright (new_cdp_session exists on both).
+
+    clearcote: no-op — the engine's C++ layer already hides webdriver and the
+    SDK's launch defaults hold back CDP side-effects. Injecting JS here would
+    create the exact self-revealing shim tells Clearcote removes."""
+    if ENGINE == "clearcote":
+        return
     try:
         cdp = await context.new_cdp_session(page)
         await cdp.send("Page.addScriptToEvaluateOnNewDocument", {

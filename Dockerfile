@@ -2,7 +2,7 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# System dependencies for Thorium + Tor
+# System dependencies for Chromium (Clearcote) + Tor
 RUN apt-get update && apt-get install -y \
     wget gnupg curl libglib2.0-0 libnss3 libnspr4 libdbus-1-3 \
     libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 libxkbcommon0 \
@@ -13,15 +13,13 @@ RUN apt-get update && apt-get install -y \
     libcurl4 libcurl3-gnutls xdg-utils tor \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Thorium M138 (Chromium 138 — latest with Linux .deb builds)
-RUN wget -q -O /tmp/thorium.deb \
-    https://github.com/Alex313031/thorium/releases/download/M138.0.7204.303/thorium-browser_138.0.7204.303_AVX2.deb && \
-    apt-get update && apt-get install -y /tmp/thorium.deb && \
-    rm /tmp/thorium.deb && rm -rf /var/lib/apt/lists/*
-
 # Install Python dependencies
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
+
+# Pre-fetch + verify the Clearcote stealth Chromium binary into the image cache
+# (the truedriver driver launches this binary; fingerprint personas are engine-level).
+RUN python -c "from clearcote import executable_path; print('Clearcote binary:', executable_path(quiet=True))"
 
 # Copy ALL application files
 COPY *.py ./
@@ -35,7 +33,4 @@ RUN chmod +x start.sh
 EXPOSE 8080
 ENV PYTHONUNBUFFERED=1
 ENV PORT=8080
-# Uncomment to force truedriver + Thorium:
-# ENV ENGINE=truedriver
-
 CMD ["./start.sh"]

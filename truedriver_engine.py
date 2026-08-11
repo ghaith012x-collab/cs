@@ -1,24 +1,32 @@
 """
-truedriver_engine.py — Playwright-compatible async API implemented
-on top of truedriver 0.1.5+ (CDP-based browser automation).
+truedriver_engine.py — Playwright-compatible async API implemented on top of
+truedriver 0.1.5+ (CDP-based browser automation), driving the Clearcote
+stealth Chromium binary.
 
 All truedriver Browser / Tab / Element methods are async.
 Drop-in replacement for ``from browser_engine import async_playwright``.
 
-Set THORIUM_PATH to override the Thorium browser binary location
-(default: /usr/bin/thorium-browser).
+The DRIVER is truedriver (pure CDP — no Playwright driver anywhere). The
+BROWSER is Clearcote's de-Googled Chromium: its C++ fingerprint machinery is
+driven by command-line switches (--fingerprint=..., --fingerprint-platform,
+--timezone, --accept-lang ...), so launch() translates the bot's per-session
+fingerprint seed into the same engine switches the Clearcote SDK would pass.
+
+Set CLEARCOTE_BINARY to override the Clearcote browser binary location.
 """
 
 import asyncio
 import base64
+import json
 import os
+import random
 import re
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
 import truedriver as td
 
-ENGINE = "truedriver"
+ENGINE = "clearcote"
 
 # ─────────────────────────────────────────────────────────────────
 # Helpers
@@ -44,19 +52,104 @@ def _unwrap_evaluate(result):
     return result
 
 
-def _find_thorium() -> str:
-    """Locate the Thorium browser binary."""
-    env = os.environ.get("THORIUM_PATH", "").strip()
+def _is_function_expr(expr: str) -> bool:
+    """True when the expression is a JS function (arrow or declaration)."""
+    return (
+        "=>" in expr
+        or expr.startswith("function(")
+        or expr.startswith("function (")
+        or expr.startswith("async function(")
+        or expr.startswith("async function (")
+    )
+
+
+def _build_eval_expr(expression: str, args: tuple):
+    """Prepare an expression for truedriver's Tab.evaluate().
+
+    Playwright auto-invokes function expressions and passes positional args
+    to them. truedriver does neither, so:
+      - function bodies are wrapped into an IIFE,
+      - positional args are JSON-embedded and spread into the call,
+      - async functions get await_promise=True so the Promise resolves.
+
+    Returns (expression_to_run, await_promise).
+    """
+    s = expression.strip()
+    is_func = _is_function_expr(s)
+    await_promise = s.startswith("async ")
+    if is_func and args:
+        args_json = "[" + ", ".join(
+            json.dumps(a, ensure_ascii=False, default=str) for a in args
+        ) + "]"
+        return f"((..._pw) => ({s})(..._pw))({args_json})", await_promise
+    if is_func:
+        return f"({s})()", await_promise
+    return s, await_promise
+
+
+def _find_browser() -> str:
+    """Locate the Clearcote stealth Chromium binary.
+
+    Order: ``CLEARCOTE_BINARY`` env > the Clearcote SDK's ``executable_path()``
+    (which downloads/verifies the pinned release on first use) > PATH fallback.
+    """
+    env = os.environ.get("CLEARCOTE_BINARY", "").strip()
     if env and os.path.exists(env):
         return env
-    for candidate in (
-        "/usr/bin/thorium-browser",
-        "/usr/bin/thorium",
-        "/opt/thorium/thorium-browser",
-    ):
-        if os.path.exists(candidate):
-            return candidate
-    return "thorium-browser"  # rely on PATH
+    try:
+        from clearcote import executable_path
+        return executable_path(quiet=True)
+    except Exception:
+        pass
+    return "chrome"  # rely on PATH
+
+
+def _clearcote_launch_args(kwargs: dict) -> list:
+    """Translate Clearcote persona kwargs into engine command-line switches.
+
+    Clearcote's fingerprint machinery lives in the binary itself (C++ getters,
+    coherent TLS/JA3, per-seed personas) and is configured purely via launch
+    switches. This accepts the same fingerprint kwargs the Clearcote SDK's
+    ``launch()`` takes (fingerprint seed, platform, timezone, accept_language,
+    brand, gpu_*, ...) and emits the equivalent ``--fingerprint-*`` switches,
+    so the browser gets a real persona even though the driver is truedriver.
+
+    Best-effort: if the Clearcote SDK internals move, degrade to the bare
+    seed switch rather than failing the whole launch.
+    """
+    try:
+        from clearcote._fingerprint import FINGERPRINT_KEYS, fingerprint_args
+        from clearcote._fontpersona import ensure_persona_fonts
+    except Exception:
+        seed = kwargs.get("fingerprint")
+        return [f"--fingerprint={seed}"] if seed else []
+    fp = {k: kwargs[k] for k in FINGERPRINT_KEYS if kwargs.get(k) is not None}
+    if not fp:
+        return []
+    # One seed → one coherent machine identity; a fresh seed → a fresh,
+    # unlinkable one. Default to a random seed when the caller didn't pin one
+    # (solver utilities) so concurrent launches never collide.
+    if fp.get("fingerprint") in (None, ""):
+        fp["fingerprint"] = f"cc-{os.getpid()}-{random.getrandbits(64):016x}"
+    # Give the seeded persona a real machine's font list (same step the SDK
+    # runs before building switches). Best-effort, never blocks a launch.
+    ensure_persona_fonts(fp)
+    return fingerprint_args(fp)
+
+
+def _apply_browser_fonts(exe: str) -> None:
+    """Point the Clearcote binary at its bundled font clones (Linux).
+
+    The SDK merges FONTCONFIG_FILE into Playwright's launch env; truedriver
+    spawns the browser as a child process that inherits our env, so we set it
+    directly instead. Best-effort — never block a launch on font wiring.
+    """
+    try:
+        from clearcote._fonts import linux_font_env
+        for key, value in (linux_font_env(exe) or {}).items():
+            os.environ[key] = value
+    except Exception:
+        pass
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -317,13 +410,15 @@ class _Locator:
             return None
         return _ElementHandle(self._tab, el)
 
-    async def evaluate(self, expression: str, **kwargs):
-        s = expression.strip()
-        if s.startswith('() =>') or s.startswith('async () =>') or s.startswith('function('):
-            expression = f'({expression})()'
+    async def evaluate(self, expression: str, *args, **kwargs):
+        expr, await_promise = _build_eval_expr(expression, args)
         el = await self._require(timeout=5)
         async def _do():
-            return await el.apply(expression, kwargs.get("return_by_value", True))
+            return await el.apply(
+                expr,
+                kwargs.get("return_by_value", True),
+                await_promise=await_promise,
+            )
         return await self._in_frame(_do())
 
     async def dispatch_event(self, event_type: str, **kwargs):
@@ -383,13 +478,13 @@ class _Frame:
     def locator(self, selector: str) -> _Locator:
         return _Locator(self._tab, selector, frame_url=self.url)
 
-    async def evaluate(self, expression: str, **kwargs) -> Any:
-        s = expression.strip()
-        if s.startswith('() =>') or s.startswith('async () =>') or s.startswith('function('):
-            expression = f'({expression})()'
+    async def evaluate(self, expression: str, *args, **kwargs) -> Any:
+        expr, await_promise = _build_eval_expr(expression, args)
         await self._tab.switch_to_frame(self._cdp_frame)
         try:
-            return _unwrap_evaluate(await self._tab.evaluate(expression))
+            return _unwrap_evaluate(
+                await self._tab.evaluate(expr, await_promise=await_promise)
+            )
         finally:
             await self._tab.switch_to_main_frame()
 
@@ -469,7 +564,8 @@ class _ElementHandle:
             return True
 
     async def evaluate(self, expression: str, **kwargs):
-        return await self._el.apply(expression)
+        expr, await_promise = _build_eval_expr(expression, ())
+        return await self._el.apply(expr, await_promise=await_promise)
 
     async def dispatch_event(self, event_type: str, **kwargs):
         js = f"this.dispatchEvent(new Event('{event_type}', {{bubbles: true}}))"
@@ -752,15 +848,17 @@ class _Page:
             return None
 
     # -- evaluate / query --------------------------------------------
-    async def evaluate(self, expression: str, **kwargs):
+    async def evaluate(self, expression: str, *args, **kwargs):
         # truedriver passes expressions directly to CDP Runtime.evaluate
-        # which does NOT auto-invoke function expressions like Playwright.
-        # The bot uses ()=>{...} arrow functions extensively — wrap them.
-        s = expression.strip()
-        if s.startswith('() =>') or s.startswith('async () =>') or s.startswith('function('):
-            expression = f'({expression})()'
+        # which does NOT auto-invoke function expressions or forward
+        # positional args like Playwright. _build_eval_expr handles both:
+        # function bodies are IIFE-wrapped, args are JSON-embedded and
+        # spread into the call, async functions are awaited.
+        expr, await_promise = _build_eval_expr(expression, args)
         try:
-            return _unwrap_evaluate(await self._tab.evaluate(expression))
+            return _unwrap_evaluate(
+                await self._tab.evaluate(expr, await_promise=await_promise)
+            )
         except Exception:
             return None
 
@@ -940,7 +1038,14 @@ class _BrowserType:
         channel: str = None,
         **kwargs,
     ) -> _Browser:
-        exe = executable_path or _find_thorium()
+        exe = executable_path or _find_browser()
+
+        # Clearcote persona switches (--fingerprint=..., --fingerprint-platform,
+        # --timezone, --accept-lang ...) — the binary's C++ layer reads them at
+        # startup. Plus the bundled-font env so the persona's fonts resolve.
+        cc_args = _clearcote_launch_args(kwargs)
+        browser_args = list(args or []) + cc_args
+        _apply_browser_fonts(exe)
 
         proxy_url = ""
         if proxy and proxy.get("server"):
@@ -954,8 +1059,8 @@ class _BrowserType:
                 proxy_url = server
 
         ua = ""
-        if args:
-            for a in args:
+        if browser_args:
+            for a in browser_args:
                 if a.startswith("--user-agent="):
                     ua = a.replace("--user-agent=", "")
 
@@ -963,7 +1068,7 @@ class _BrowserType:
             browser_executable_path=exe,
             headless=headless,
             sandbox=False,
-            browser_args=args if args else [],
+            browser_args=browser_args,
             browser_connection_timeout=25,
             browser_connection_max_tries=2,
         )
