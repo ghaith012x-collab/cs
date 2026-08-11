@@ -304,7 +304,12 @@ async def _run_worker(wid: str, cfg: dict, proxy=None) -> None:
                 if proxy:
                     proxy_pool.release(proxy, ok=False)
                     proxy = None
-                await asyncio.sleep(2)
+                consecutive_tunnel_fails += 1
+                backoff = min(backoff * 2, 30)
+                if consecutive_tunnel_fails >= 4:
+                    _log(f"[{wid}] {consecutive_tunnel_fails} consecutive tunnel failures — aborting (all sessions appear dead)", level="error")
+                    break
+                await asyncio.sleep(backoff)
                 continue
 
         # ── Run signup ──

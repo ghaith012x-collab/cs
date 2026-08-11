@@ -25,6 +25,25 @@ ENGINE = "truedriver"
 # ─────────────────────────────────────────────────────────────────
 
 
+def _unwrap_evaluate(result):
+    """Normalize truedriver Tab.evaluate() results.
+
+    truedriver returns ``(RemoteObject, errors)`` instead of the value
+    whenever the JS result is falsy (0, false, '', null) — its guard is
+    ``if remote_object.value:``. The bot relies on falsy results (e.g.
+    input_idx == 0, '' = "no phone verify", false = "not mounted"), so
+    unwrap the RemoteObject back to its real JS value.
+    """
+    if isinstance(result, tuple) and len(result) == 2:
+        ro = result[0]
+        if ro is None:
+            return None
+        if getattr(ro, "unserializable_value", None) is not None:
+            return ro.unserializable_value
+        return getattr(ro, "value", None)
+    return result
+
+
 def _find_thorium() -> str:
     """Locate the Thorium browser binary."""
     env = os.environ.get("THORIUM_PATH", "").strip()
@@ -370,7 +389,7 @@ class _Frame:
             expression = f'({expression})()'
         await self._tab.switch_to_frame(self._cdp_frame)
         try:
-            return await self._tab.evaluate(expression)
+            return _unwrap_evaluate(await self._tab.evaluate(expression))
         finally:
             await self._tab.switch_to_main_frame()
 
@@ -693,7 +712,7 @@ class _Page:
     # -- content / title / url ----------------------------------------
     async def title(self) -> str:
         try:
-            return (await self._tab.evaluate("document.title")) or ""
+            return _unwrap_evaluate(await self._tab.evaluate("document.title")) or ""
         except Exception:
             return ""
 
@@ -741,7 +760,7 @@ class _Page:
         if s.startswith('() =>') or s.startswith('async () =>') or s.startswith('function('):
             expression = f'({expression})()'
         try:
-            return await self._tab.evaluate(expression)
+            return _unwrap_evaluate(await self._tab.evaluate(expression))
         except Exception:
             return None
 
@@ -825,11 +844,63 @@ class _Browser:
         self._instance = instance
         self.contexts: List[_BrowserContext] = []
 
+    async def _get_or_create_tab(self) -> td.Tab:
+        """Return a live page tab, creating one if none exists.
+
+        truedriver's Browser.get() does ``next(filter(type_ == 'page',
+        self.targets))`` — after the previous tab is closed that raises
+        StopIteration (surfaced as "coroutine raised StopIteration") and
+        every subsequent context rebuild dies. Refresh the target inventory
+        and create a fresh target instead of relying on that path.
+        """
+        from truedriver import cdp
+
+        async def _page_tabs():
+            try:
+                await self._instance.update_targets()
+            except Exception:
+                pass
+            return [t for t in self._instance.targets
+                    if getattr(t, "type_", "") == "page"]
+
+        tabs = await _page_tabs()
+        if tabs:
+            tab = tabs[0]
+            try:
+                tab.browser = self._instance
+            except Exception:
+                pass
+            return tab
+
+        # No page target left (previous tab was closed) — create a fresh one
+        # and wait (bounded) for it to appear in the target inventory.
+        try:
+            target_id = await self._instance.connection.send(
+                cdp.target.create_target(
+                    "about:blank", new_window=False, enable_begin_frame_control=True
+                )
+            )
+        except Exception:
+            target_id = None
+
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            tabs = await _page_tabs()
+            for t in tabs:
+                if target_id is None or t.target_id == target_id:
+                    try:
+                        t.browser = self._instance
+                    except Exception:
+                        pass
+                    return t
+            await asyncio.sleep(0.2)
+        raise RuntimeError("could not create a browser tab (target never appeared)")
+
     async def new_context(self, **kwargs) -> "_BrowserContext":
         viewport = kwargs.get("viewport")
         user_agent = kwargs.get("user_agent", "")
 
-        tab = await self._instance.get("about:blank", False, False, 10)
+        tab = await self._get_or_create_tab()
 
         if viewport:
             w = viewport.get("width", 1280)
