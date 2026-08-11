@@ -356,7 +356,10 @@ class DiscordAutomation:
         circuit is pointless — if Discord blocked that exit node, it won't
         unblock on retry."""
         url = "https://discord.com/register"
-        timeout_ms = 90000
+        # 25s cap: a working residential session renders Discord's register in
+        # a few seconds. Burning the old 90s timeout per dead session made the
+        # worker look like it was only generating mail (one new inbox per ~90s).
+        timeout_ms = 25000
 
         self._log(f"[Nav] Navigating to {url} (timeout={timeout_ms}ms)...")
         try:

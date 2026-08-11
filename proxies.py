@@ -10,6 +10,7 @@ VAULTPROXY_* env vars. Format support:
 The pool hands out proxy dicts so the browser worker can pass
 username/password to Playwright separately.
 """
+import asyncio
 import os
 import re
 import time
@@ -190,6 +191,67 @@ class ProxyPool:
         else:
             self.failed_count += 1
             self._failed.add(proxy.get("key"))
+
+    async def validate_all(self, concurrency: int = 30,
+                           timeout: float = 8.0) -> int:
+        """Live-test proxies with a quick HTTPS request through each one, so
+        'valid' is a real measured number instead of an assumption.
+
+        Resets valid_count to the count already proven working, then raises it
+        as new proxies pass. Proxies that fail are added to _failed so take()
+        stops handing them out. Only unvalidated or previously-failed proxies
+        are retested on later passes (working ones are skipped for speed).
+        """
+        import aiohttp
+
+        targets = [
+            p for p in self._proxies
+            if not p.get("_valid") or p.get("key") in self._failed
+        ]
+        if not targets:
+            return self.valid_count
+
+        self.valid_count = sum(1 for p in self._proxies if p.get("_valid"))
+        sem = asyncio.Semaphore(concurrency)
+        conn = aiohttp.TCPConnector(limit=concurrency, limit_per_host=concurrency,
+                                    ssl=False)
+        timeout_obj = aiohttp.ClientTimeout(total=timeout)
+
+        async def _one(proxy: Dict[str, str]) -> bool:
+            host, port = proxy.get("host"), proxy.get("port")
+            if not host or not port:
+                return False
+            if proxy.get("username"):
+                purl = "http://{}:{}@{}:{}".format(
+                    proxy["username"], proxy["password"], host, port)
+            else:
+                purl = "http://{}:{}".format(host, port)
+            try:
+                async with aiohttp.ClientSession(
+                        connector=conn, timeout=timeout_obj) as s:
+                    async with s.get("https://api.ipify.org", proxy=purl) as r:
+                        return r.status == 200
+            except Exception:
+                return False
+
+        async def _guard(proxy: Dict[str, str]) -> bool:
+            async with sem:
+                ok = await _one(proxy)
+            if ok:
+                proxy["_valid"] = True
+                self._failed.discard(proxy.get("key"))
+                self.valid_count += 1
+            else:
+                proxy["_valid"] = False
+                self._failed.add(proxy.get("key"))
+            return ok
+
+        try:
+            await asyncio.gather(*[_guard(p) for p in targets],
+                                 return_exceptions=True)
+        finally:
+            await conn.close()
+        return self.valid_count
 
 
 # Module-level singleton pool

@@ -99,7 +99,21 @@ def save_config(config: dict, path: str = _config_path) -> None:
         pass
 
 
+# Shared ring buffer so app-level lines (proxy stats, worker outcomes) reach
+# the web terminal, not just stdout.
+_APP_LOGS: list = []
+
+
 def _log(msg: str, level: str = "info"):
+    entry = {
+        "time": time.strftime("%H:%M:%S"),
+        "timestamp": time.time(),
+        "level": level,
+        "message": msg,
+    }
+    _APP_LOGS.append(entry)
+    if len(_APP_LOGS) > 400:
+        _APP_LOGS[:] = _APP_LOGS[-400:]
     print(f"[{level.upper()}] {msg}", flush=True)
 
 
@@ -305,6 +319,20 @@ async def _run_worker(wid: str, cfg: dict, proxy=None) -> None:
         await bot.close()
         state["bot"] = None
 
+async def _proxy_validate_loop() -> None:
+    """Re-test proxies in the background so 'valid' is a real number (not an
+    assumption) and dead sessions stop being handed to workers. Retests only
+    proxies that never passed or previously failed; runs every 3 minutes."""
+    while True:
+        try:
+            if _proxies_available and proxy_pool is not None and proxy_pool.count:
+                n = await proxy_pool.validate_all()
+                _log(f"[Proxy] Live validation: {n} working of {proxy_pool.count} loaded")
+        except Exception as e:
+            _log(f"[Proxy] validation error: {e}", level="warn")
+        await asyncio.sleep(180)
+
+
 async def _start_all_async(cfg: dict) -> None:
     global _running, _start_time
     if _running:
@@ -334,6 +362,9 @@ async def _start_all_async(cfg: dict) -> None:
         _log("[Proxy] [ERROR] PROXY FORCE MODE but 0 sessions loaded — workers will keep retrying, TOR is DISABLED", level="error")
     else:
         _log("[Proxy] No proxy sessions — TOR-only fallback (fresh circuit per attempt)")
+
+    if n_sessions and _proxies_available and proxy_pool is not None:
+        asyncio.create_task(_proxy_validate_loop())
 
     for i, wid in enumerate(WORKER_IDS):
         _log(f"[{wid}] Starting worker...")
@@ -425,10 +456,16 @@ def handle_status():
             "screenshots": s["screenshots"],
             "started_at": s["started_at"],
         })
+    try:
+        cfg_now = load_config()
+        _mail_domains = cfg_now.get("mail_domains", []) or []
+    except Exception:
+        _mail_domains = []
     return jsonify({
         "running": _running,
         "uptime": int(time.time() - _start_time) if _start_time else 0,
         "workers": workers,
+        "mail_domains": _mail_domains,
         "proxies": proxy_pool.stats() if (_proxies_available and proxy_pool is not None) else {},
     })
 
@@ -452,7 +489,17 @@ def handle_worker_logs(wid):
     if not s:
         return jsonify({"logs": [], "status": "unknown"})
     bot = s.get("bot")
-    logs = bot.get_activity_log() if bot else []
+    bot_logs = bot.get_activity_log() if bot else []
+    # Merge app-level lines ([Proxy] stats, [B1] Done/Failed, errors) with the
+    # bot's internal activity log so the terminal shows everything.
+    merged = list(bot_logs)
+    seen = {(e.get("time"), e.get("message")) for e in bot_logs}
+    for e in _APP_LOGS:
+        k = (e.get("time"), e.get("message"))
+        if k not in seen:
+            seen.add(k)
+            merged.append(dict(e))
+    merged.sort(key=lambda e: e.get("timestamp", 0))
     return jsonify({
         "id": wid,
         "status": s["status"],
@@ -461,7 +508,7 @@ def handle_worker_logs(wid):
         "proxy": s.get("proxy", ""),
         "screenshots": s.get("screenshots", 0),
         "started_at": s.get("started_at", 0),
-        "logs": logs[-200:],  # last 200 entries
+        "logs": merged[-200:],  # last 200 entries
     })
 
 
@@ -691,6 +738,9 @@ button:disabled{opacity:.45;cursor:not-allowed}
 .term-head .cd{width:10px;height:10px;border-radius:50%;background:#3a3a40;display:inline-block}
 .term-head .cd.r{background:var(--bad)}.term-head .cd.y{background:var(--warn)}.term-head .cd.g{background:var(--ok)}
 .term-head .t{flex:1;text-align:center;letter-spacing:3px;color:var(--dim2)}
+.pxline{padding:7px 14px;background:#0a0a0c;border-bottom:1px solid var(--line);font-size:11px;letter-spacing:.5px;color:var(--dim2)}
+.chk{display:inline-flex;align-items:center;gap:6px;font-size:11px;letter-spacing:1px;color:var(--dim2);cursor:pointer;user-select:none}
+.chk input{accent-color:var(--ok)}
 .term-body{height:430px;overflow-y:auto;padding:14px;font-size:12px;line-height:1.65}
 .tl{display:flex;gap:10px;white-space:pre-wrap;word-break:break-word;padding:2px 0;border-bottom:1px solid rgba(38,38,43,.25)}
 .tl .tt{color:var(--dim2);min-width:58px}
@@ -749,7 +799,7 @@ input:focus{border-color:var(--dim)}
 </style></head><body>
 
 <h1>EY3<span class="tag">TOKEN FORGE</span></h1>
-<div class="sub"><span class="dot" id="dDot"></span> <span id="stLine">idle</span> - discord token gen - cybertemp @vibify.cc</div>
+<div class="sub"><span class="dot" id="dDot"></span> <span id="stLine">idle</span> - discord token gen - cybertemp <span id="domLine">@mikerossy.com</span></div>
 
 <nav>
   <button id="nvMain" class="on" onclick="showTab('Main')">MAIN</button>
@@ -790,12 +840,14 @@ input:focus{border-color:var(--dim)}
     <button class="ok grow" id="btnStart" onclick="start()">START</button>
     <button class="danger grow" onclick="stop()">STOP</button>
     <button onclick="openView()">VIEW</button>
+    <label class="chk"><input type="checkbox" id="showAllChk" onchange="showAll=this.checked;refreshLogs()"> ALL LOGS</label>
   </div>
   <div class="term">
     <div class="term-head">
       <span class="cd" id="cd1"></span><span class="cd" id="cd2"></span><span class="cd" id="cd3"></span>
       <span class="t">EY3 - WORKER B1</span><span class="badge b-dim" id="termState">idle</span>
     </div>
+    <div class="pxline" id="pxLine">proxies: checking...</div>
     <div class="term-body" id="termBody"><div class="empty">No activity yet - hit START.</div></div>
   </div>
 </div>
@@ -869,21 +921,30 @@ function refreshStatus(){
     var d=$('dDot');d.className='dot'+(st?' '+st:'');
     var running=(x.workers||[]).filter(function(w){return w.status==='running'||w.status==='starting';}).length;
     $('stLine').textContent = x.running ? ('running - '+running+'/'+(x.workers||[]).length+' browsers - '+Math.floor(x.uptime/60)+'m') : 'idle';
+    var dm=(x.mail_domains&&x.mail_domains.length)?x.mail_domains[0]:'';
+    if(dm&&$('domLine'))$('domLine').textContent='@'+dm;
+    var px=x.proxies;
+    if(px&&$('pxLine')){
+      $('pxLine').textContent='proxies: '+px.available+' loaded | '+px.valid+' valid | '+px.used+' used | '+px.working+' working | '+px.failed+' failed';
+    }
   }).catch(function(){});
 }
 
 var FILTERS=['[Proxy]','Fingerprint','Discord site rendered','is in Discord and confirmed','[Account] Email=',
   'Inbox ready','Verification link found','Challenge iframe fully loaded','[Accessibility] [OK]',
-  'solved:','Humanized','[Captcha] [READY]'];
+  'solved:','Humanized','[Captcha] [READY]','[Captcha]','[FAIL]','[Form]','[Nav] Page:','[Mail] No verification',
+  'No verification link','No email available','DEAD','BLOCKED','rate limit','Starting worker'];
+var showAll=false;
 var OKWORDS=['[ok]','confirmed','solved','ready','rendered','humanized','verification link found'];
 function refreshLogs(){
   api('/worker/B1/logs').then(function(r){return r.json();}).then(function(x){
     $('termState').textContent = x.status||'idle';
     var lines=(x.logs||[]).filter(function(l){
+      if(showAll) return true;
       var m=l.message||'';
       for(var i=0;i<FILTERS.length;i++){ if(m.indexOf(FILTERS[i])!==-1) return true; }
       return false;
-    }).slice(-120);
+    }).slice(-150);
     if(!lines.length) return;
     var html='';
     for(var i=0;i<lines.length;i++){
