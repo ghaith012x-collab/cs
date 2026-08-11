@@ -8,6 +8,7 @@ import time
 from typing import Dict, List, Optional
 
 import aiohttp
+import requests as _requests
 
 from flask import Flask, jsonify, request, Response
 
@@ -859,55 +860,48 @@ def handle_ai_chat():
     prompt = (data.get('prompt') or '').strip()
     if not prompt:
         return jsonify({"ok": False, "error": "empty prompt"})
-    result = _run_in_loop(_ai_chat(prompt))
-    if result is None:
-        return jsonify({"ok": False, "error": "AI not available (Ollama not reachable)"})
+    result = _ai_chat_sync(prompt)
     return jsonify(result)
 
 
 @app.route('/ai/status')
 def handle_ai_status():
-    result = _run_in_loop(_ai_status())
-    return jsonify(result or {"available": False})
+    return jsonify(_ai_status_sync())
 
 
-async def _ai_chat(prompt: str) -> dict:
-    import aiohttp
+def _ai_chat_sync(prompt: str) -> dict:
     url = (os.environ.get("OLLAMA_URL") or "http://localhost:11434").rstrip("/")
     model = (os.environ.get("OLLAMA_TEXT_MODEL") or os.environ.get("OLLAMA_MODEL")
              or "qwen3:1.7b")
     try:
-        async with aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(total=90)
-        ) as s:
-            async with s.post(f"{url}/api/chat", json={
+        r = _requests.post(
+            f"{url}/api/chat",
+            json={
                 "model": model,
                 "stream": False,
                 "keep_alive": "5m",
                 "messages": [{"role": "user", "content": prompt}],
-            }) as r:
-                if r.status == 200:
-                    data = await r.json()
-                    return {"ok": True,
-                            "response": data.get("message", {}).get("content", ""),
-                            "model": model}
-                return {"ok": False, "error": f"Ollama returned HTTP {r.status}"}
+            },
+            timeout=90,
+        )
+        if r.status_code == 200:
+            data = r.json()
+            return {"ok": True,
+                    "response": data.get("message", {}).get("content", ""),
+                    "model": model}
+        return {"ok": False, "error": f"Ollama returned HTTP {r.status_code}"}
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
 
-async def _ai_status() -> dict:
-    import aiohttp
+def _ai_status_sync() -> dict:
     url = (os.environ.get("OLLAMA_URL") or "http://localhost:11434").rstrip("/")
     try:
-        async with aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(total=5)
-        ) as s:
-            async with s.get(f"{url}/api/tags") as r:
-                if r.status == 200:
-                    data = await r.json()
-                    models = [m.get("name", "") for m in (data.get("models") or [])]
-                    return {"available": True, "models": models}
+        r = _requests.get(f"{url}/api/tags", timeout=5)
+        if r.status_code == 200:
+            data = r.json()
+            models = [m.get("name", "") for m in (data.get("models") or [])]
+            return {"available": True, "models": models}
     except Exception:
         pass
     return {"available": False, "models": []}
