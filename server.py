@@ -806,8 +806,14 @@ class DiscordAutomation:
             try:
                 self._mail = TempMail(log=self._log, proxy=self.proxy,
                                       headless=self.headless, domain=self._domain)
-                if self._browser is not None:
-                    self._mail.attach_browser(self._browser)
+                # Do NOT share the worker browser with TempMail.
+                # truedriver serialises CDP commands on a single websocket
+                # connection. When the worker already has an active context
+                # (from _build_context), any new_context() call on the same
+                # browser hangs because Target.create_target is blocked
+                # behind the existing context's CDP activity.
+                # TempMail launches its own independent browser (same proxy
+                # IP, same fingerprint domain) = no CDP contention, no hang.
 
                 # Create inbox FIRST (with hard timeout) — never in parallel
                 # with CDP navigation on the same browser.
