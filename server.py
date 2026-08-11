@@ -809,7 +809,11 @@ class DiscordAutomation:
                 async def _inbox() -> str:
                     for mail_try in range(2):
                         try:
-                            addr = await self._mail.create_inbox()
+                            addr = await asyncio.wait_for(
+                                self._mail.create_inbox(), timeout=35.0)
+                        except asyncio.TimeoutError:
+                            self._log("[Mail] Inbox creation TIMED OUT after 35s", level="error")
+                            addr = ""
                         except Exception as e:
                             self._log(f"[Mail] cybertemp inbox error: {e}", level="error")
                             addr = ""

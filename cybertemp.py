@@ -269,7 +269,11 @@ class TempMail:
             self._fingerprint, self._ua, proxy=self._proxy,
             viewport={"width": 1366, "height": 768},
         )
-        self._context = await self._browser.new_context(**ctx_opts)
+        try:
+            self._context = await asyncio.wait_for(
+                self._browser.new_context(**ctx_opts), timeout=15.0)
+        except asyncio.TimeoutError:
+            raise RuntimeError("browser.new_context timed out after 15s")
         await self._context.add_init_script(
             build_init_script(self._fingerprint, self._ua))
         self._page = await self._context.new_page()
@@ -278,8 +282,13 @@ class TempMail:
 
     async def _goto_site(self) -> None:
         try:
-            await self._page.goto(CYBERTEMP_URL, wait_until="domcontentloaded",
-                                  timeout=8000)
+            await asyncio.wait_for(
+                self._page.goto(CYBERTEMP_URL, wait_until="domcontentloaded",
+                                timeout=8000),
+                timeout=11.0)  # 8s Playwright timeout + 3s hard cap
+        except asyncio.TimeoutError:
+            self._log("[Mail] cybertemp goto HARD TIMEOUT after 11s", level="warn")
+            raise RuntimeError("cybertemp page goto timed out")
         except Exception as e:
             self._log(f"[Mail] cybertemp goto: {e}", level="warn")
         self._log("[Mail] cybertemp page loaded — waiting for antibot PoW / email form...")
