@@ -129,11 +129,12 @@ class _Locator:
 
     async def type(self, value: str, delay: float = 0.08, timeout: float = 30, **kwargs):
         el = await self._require(timeout)
+        sleep_s = delay / 1000.0 if delay >= 1 else delay  # ms or seconds
         async def _do():
             await el.focus()
             for ch in value:
                 await el.send_keys(ch)
-                await asyncio.sleep(delay)
+                await asyncio.sleep(sleep_s)
         await self._in_frame(_do())
 
     async def press(self, key: str, timeout: float = 30, **kwargs):
@@ -517,6 +518,9 @@ class _Keyboard:
         )
 
     async def type(self, text: str, delay: float = 0, **kwargs):
+        # delay is in MILLISECONDS (Playwright API). human_type() passes
+        # int(delay*1000) = ~75ms; treating it as seconds made each char
+        # take 75s (a 22-char email = 27 minutes).
         for ch in text:
             await self._tab.evaluate(
                 "(()=>{const t=document.activeElement;if(!t)return;"
@@ -526,7 +530,7 @@ class _Keyboard:
                 "})()" % (repr(ch), repr(ch), repr(ch))
             )
             if delay:
-                await asyncio.sleep(delay)
+                await asyncio.sleep(delay / 1000.0)
 
 
 class _Mouse:
@@ -614,6 +618,18 @@ class _Page:
     def locator(self, selector: str) -> _Locator:
         return _Locator(self._tab, selector)
 
+    async def click(self, selector: str, **kwargs):
+        await _Locator(self._tab, selector).click(**kwargs)
+
+    async def fill(self, selector: str, value: str, **kwargs):
+        await _Locator(self._tab, selector).fill(value, **kwargs)
+
+    async def type(self, selector: str, value: str, **kwargs):
+        await _Locator(self._tab, selector).type(value, **kwargs)
+
+    async def press(self, selector: str, key: str, **kwargs):
+        await _Locator(self._tab, selector).press(key, **kwargs)
+
     def frame_locator(self, selector: str) -> _FrameLocator:
         return _FrameLocator(self._tab, selector)
 
@@ -646,11 +662,20 @@ class _Page:
     # -- screenshots --------------------------------------------------
     async def screenshot(self, path: str = None, full_page: bool = False, type: str = "png", **kwargs):
         fmt = type if type in ("jpeg", "png") else "png"
-        if path:
-            await self._tab.save_screenshot(path, fmt, full_page)
+        try:
+            if path:
+                await self._tab.save_screenshot(path, fmt, full_page)
+                return None
+            try:
+                b64 = await self._tab.screenshot_b64(fmt, full_page)
+            except Exception:
+                # Full-page capture can fail on SPAs (Discord) — retry viewport
+                b64 = await self._tab.screenshot_b64(fmt, False)
+            if not b64:
+                return None
+            return base64.b64decode(b64)
+        except Exception:
             return None
-        b64 = await self._tab.screenshot_b64(fmt, full_page)
-        return base64.b64decode(b64)
 
     # -- evaluate / query --------------------------------------------
     async def evaluate(self, expression: str, **kwargs):
