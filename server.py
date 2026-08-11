@@ -548,7 +548,28 @@ class DiscordAutomation:
                     blank_streak = 0
 
                 if state.get("isLogin") and poll_sec >= 10:
-                    self._log(f"[Nav] Login page detected (redirected from register)")
+                    self._log("[Nav] Login page detected \u2014 clicking Register link...")
+                    try:
+                        clicked_reg = await self._page.evaluate("""() => {
+                            const all = document.querySelectorAll('a, button, [role="link"], [role="button"]');
+                            for (const el of all) {
+                                const t = (el.textContent || '').toLowerCase().trim();
+                                if (t && /register|sign up|create account/i.test(t) && el.offsetParent !== null) {
+                                    el.scrollIntoView({block: 'center'});
+                                    el.click();
+                                    return 'clicked';
+                                }
+                            }
+                            return '';
+                        }""")
+                    except Exception:
+                        clicked_reg = ''
+                    if clicked_reg:
+                        self._log("[Nav] Clicked Register link \u2014 continuing poll for register form...")
+                        blank_streak = 0
+                        await asyncio.sleep(1.5)
+                        continue
+                    self._log("[Nav] Login page, no Register link clickable \u2014 rotating circuit", level="warn")
                     break
 
             # Check for redirect to app
@@ -1373,188 +1394,105 @@ class DiscordAutomation:
             await self._select_dob("Year", year_val)
             await self._human_pause()
 
-            # ── ToS Checkbox — FIND THE CORRECT ONE (Terms of Service, not newsletter) ──
-            self._log("Checking ToS checkbox...")
+            # ── ToS Checkbox ── ULTRA-AGGRESSIVE BLAST ──
+            self._log("Checkbox blitz: hitting every visible unchecked element...")
             tos_checked = False
 
-            try:
-                tos_result = await self._page.evaluate("""() => {
-                    // Find ANY text node containing ToS-like keywords
-                    const tosKeywords = ['terms of service', 'terms of use', 'terms & conditions',
-                                        'terms and conditions', 'i have read', 'read and agree',
-                                        'agree to', 'by creating'];
-                    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null);
-                    let node;
-                    while (node = walker.nextNode()) {
-                        const t = node.textContent.trim().toLowerCase();
-                        if (!tosKeywords.some(k => t.includes(k))) continue;
-
-                        // Walk UP to find a clickable container that has a checkbox nearby
-                        let el = node.parentElement;
-                        for (let i = 0; i < 10 && el; i++) {
-                            // Look for checkbox inside this container
-                            const cb = el.querySelector('input[type="checkbox"]');
-                            if (cb) {
-                                cb.scrollIntoView({block: 'center'});
-                                // Prefer clicking the wrapping label / clickable parent
-                                // (trusted gesture -> React state actually updates).
-                                const clickable = cb.closest('label') || cb.parentElement;
-                                let r = cb.getBoundingClientRect();
-                                if (clickable && clickable.offsetParent !== null) {
-                                    const cr = clickable.getBoundingClientRect();
-                                    if (cr.width >= 5 && cr.height >= 5) r = cr;
-                                }
-                                window.__tosPoint = {x: r.x + r.width/2, y: r.y + r.height/2, kind: 'native'};
-                                return JSON.stringify(window.__tosPoint);
-                            }
-                            // Also try role=checkbox
-                            const roleCb = el.querySelector('[role="checkbox"]');
-                            if (roleCb) {
-                                roleCb.scrollIntoView({block: 'center'});
-                                const rr = roleCb.getBoundingClientRect();
-                                window.__tosPoint = {x: rr.x + rr.width/2, y: rr.y + rr.height/2, kind: 'role'};
-                                return JSON.stringify(window.__tosPoint);
-                            }
-                            el = el.parentElement;
-                        }
-                    }
-
-                    // FALLBACK: check ALL visible unchecked checkboxes (Discord has max 2)
-                    const allCbs = document.querySelectorAll('input[type="checkbox"]');
-                    let checked = 0;
-                    for (const cb of allCbs) {
-                        if (cb.offsetParent === null) continue;
-                        if (cb.checked) continue;
-                        cb.scrollIntoView({block: 'center'});
-                        cb.click();
-                        cb.checked = true;
-                        cb.dispatchEvent(new Event('change', { bubbles: true }));
-                        cb.dispatchEvent(new Event('input', { bubbles: true }));
-                        checked++;
-                    }
-                    if (checked > 0) return 'fallback_checked_' + checked;
-
-                    // Also try role checkboxes
-                    const roleCbs = document.querySelectorAll('[role="checkbox"]');
-                    for (const rc of roleCbs) {
-                        if (rc.offsetParent === null) continue;
-                        if (rc.getAttribute('aria-checked') === 'true') continue;
-                        rc.click();
-                        rc.setAttribute('aria-checked', 'true');
-                        rc.dispatchEvent(new Event('change', { bubbles: true }));
-                        checked++;
-                    }
-                    if (checked > 0) return 'role_fallback_' + checked;
-
-                    return 'not_found';
-                }""")
-                tos_point = None
+            async def _tos_state() -> dict:
+                """Read the REAL checkbox state from the DOM."""
                 try:
-                    if tos_result and tos_result.startswith('{'):
-                        tos_point = json.loads(tos_result)
-                except Exception:
-                    tos_point = None
-
-                async def _tos_state() -> dict:
-                    """Read the REAL checkbox state from the DOM: native
-                    inputs + role checkboxes + React data-state toggles."""
-                    try:
-                        v = await self._page.evaluate("""() => {
-                            let native = 0;
-                            for (const cb of document.querySelectorAll('input[type="checkbox"]')) {
-                                if (cb.checked) native++;
-                            }
-                            const role = document.querySelectorAll(
-                                '[role="checkbox"][aria-checked="true"]').length;
-                            const dataState = document.querySelectorAll(
-                                '[role="checkbox"][data-state="checked"]').length;
-                            return { native: native, role: role, dataState: dataState };
-                        }""")
-                        if not isinstance(v, dict):
-                            v = {}
-                    except Exception:
+                    v = await self._page.evaluate("""() => {
+                        let native = 0;
+                        for (const cb of document.querySelectorAll('input[type="checkbox"]')) {
+                            if (cb.checked) native++;
+                        }
+                        const role = document.querySelectorAll(
+                            '[role="checkbox"][aria-checked="true"]').length;
+                        const dataState = document.querySelectorAll(
+                            '[role="checkbox"][data-state="checked"]').length;
+                        return { native: native, role: role, dataState: dataState };
+                    }""")
+                    if not isinstance(v, dict):
                         v = {}
-                    return v
+                except Exception:
+                    v = {}
+                return v
 
-                if tos_point and 'x' in tos_point and 'y' in tos_point:
-                    # Real mouse click, then VERIFY: a click that misses
-                    # is NOT success and is never logged as one.
-                    await asyncio.sleep(0.5)
-                    state = {}
-                    for _ in range(3):
-                        await self._page.mouse.click(float(tos_point['x']), float(tos_point['y']))
-                        await asyncio.sleep(0.7)
-                        state = await _tos_state()
-                        if state.get('native') or state.get('role') or state.get('dataState'):
-                            tos_checked = True
-                            self._log(f"[OK] ToS checkbox actually checked (kind={tos_point.get('kind')} state={state})")
-                            break
-                    if not tos_checked:
-                        self._log(f"[WARN] ToS mouse click did not register (state={state}) - trying JS element click", level="warn")
-                        try:
-                            js_ok = await self._page.evaluate("""() => {
-                                const tosKeywords = ['terms of service', 'terms of use',
-                                                    'terms & conditions', 'terms and conditions',
-                                                    'i have read', 'read and agree',
-                                                    'agree to', 'by creating'];
-                                const walker = document.createTreeWalker(
-                                    document.body, NodeFilter.SHOW_TEXT, null);
-                                let node;
-                                while (node = walker.nextNode()) {
-                                    const t = node.textContent.trim().toLowerCase();
-                                    if (!tosKeywords.some(k => t.includes(k))) continue;
-                                    let el = node.parentElement;
-                                    for (let i = 0; i < 10 && el; i++) {
-                                        const cb = el.querySelector('input[type="checkbox"], [role="checkbox"]');
-                                        if (cb) {
-                                            cb.scrollIntoView({block: 'center'});
-                                            cb.click();
-                                            return 'clicked';
-                                        }
-                                        el = el.parentElement;
-                                    }
-                                }
-                                return 'not_found';
-                            }""")
-                            await asyncio.sleep(0.8)
-                            state = await _tos_state()
-                            if js_ok == 'clicked' and (state.get('native') or state.get('role') or state.get('dataState')):
-                                tos_checked = True
-                                self._log(f"[OK] ToS checked via JS element click (state={state})")
-                        except Exception as e:
-                            self._log(f"ToS JS click error: {e}", level="warn")
-                elif tos_result and tos_result != 'not_found':
-                    # JS-only result (e.g. fallback_checked_N) - verify it stuck.
-                    await asyncio.sleep(0.8)
+            # BLAST every viable checkbox with trusted native click() —
+            # React's event system responds to mouse-originated trusted events.
+            for blast in range(5):
+                try:
+                    hit = await self._page.evaluate("""() => {
+                        let any = false;
+                        const all = document.querySelectorAll('input[type="checkbox"], [role="checkbox"]');
+                        for (const cb of all) {
+                            if (cb.offsetParent === null) continue;
+                            if (cb.checked || cb.getAttribute('aria-checked') === 'true'
+                                || cb.getAttribute('data-state') === 'checked'
+                                || cb.getAttribute('data-checked') === 'true') continue;
+                            cb.scrollIntoView({block: 'center'});
+                            cb.focus();
+                            cb.click();
+                            any = true;
+                        }
+                        return any;
+                    }""")
+                except Exception:
+                    hit = False
+                await asyncio.sleep(0.12)
+                state = await _tos_state()
+                if state.get('native') or state.get('role') or state.get('dataState'):
+                    tos_checked = True
+                    self._log(f"[OK] ToS CHECKED (blast round {blast+1} — state={state})")
+                    break
+                if not hit:
                     state = await _tos_state()
                     if state.get('native') or state.get('role') or state.get('dataState'):
                         tos_checked = True
-                        self._log(f"[OK] ToS checked via JS: {tos_result} (verified state={state})")
-                    else:
-                        self._log(f"[WARN] ToS JS result {tos_result} did not stick (state={state})", level="warn")
-                else:
-                    self._log(f"[WARN] ToS checkbox not found by JS ({tos_result}) - trying Playwright locator...")
-                    # Playwright fallback: click any visible checkbox input
-                    try:
-                        checkboxes = self._page.locator('input[type="checkbox"]:visible')
-                        cb_count = await checkboxes.count()
-                        for i in range(cb_count):
-                            cb = checkboxes.nth(i)
-                            is_checked = await cb.is_checked()
-                            if not is_checked:
-                                await cb.scroll_into_view_if_needed()
-                                await cb.check(force=True)
-                                self._log(f"[OK] ToS checkbox {i} checked via Playwright")
+                        self._log(f"[OK] All checkboxes already checked (state={state})")
+                    break
+
+            # Precision mouse-click fallback on the ToS label area
+            if not tos_checked:
+                try:
+                    tos_point_raw = await self._page.evaluate("""() => {
+                        const tosKeywords = ['terms of service', 'terms of use', 'terms & conditions',
+                            'terms and conditions', 'i have read', 'read and agree', 'agree to', 'by creating'];
+                        const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null);
+                        let node;
+                        while (node = walker.nextNode()) {
+                            const t = node.textContent.trim().toLowerCase();
+                            if (!tosKeywords.some(k => t.includes(k))) continue;
+                            let el = node.parentElement;
+                            for (let i = 0; i < 12 && el; i++) {
+                                const cb = el.querySelector('input[type="checkbox"], [role="checkbox"]');
+                                if (cb && cb.offsetParent !== null) {
+                                    cb.scrollIntoView({block: 'center'});
+                                    const r = cb.getBoundingClientRect();
+                                    return JSON.stringify({x: r.x + r.width/2, y: r.y + r.height/2});
+                                }
+                                el = el.parentElement;
+                            }
+                        }
+                        return '';
+                    }""")
+                    if tos_point_raw and tos_point_raw.startswith('{'):
+                        tp = json.loads(tos_point_raw)
+                        for pn in range(8):
+                            await self._page.mouse.click(float(tp['x']), float(tp['y']))
+                            await asyncio.sleep(0.1)
+                            state = await _tos_state()
+                            if state.get('native') or state.get('role') or state.get('dataState'):
                                 tos_checked = True
-                    except Exception as pw_e:
-                        self._log(f"Playwright checkbox fallback error: {pw_e}", level="warn")
-            except Exception as e:
-                self._log(f"ToS JS evaluate error: {e}", level="warn")
+                                self._log(f"[OK] ToS checked via mouse click (pass {pn+1})")
+                                break
+                except Exception as e:
+                    self._log(f"ToS precision-click error: {e}", level="warn")
 
             if tos_checked:
                 self._log("[OK] ToS checkbox checked")
             else:
-                self._log("[WARN] ToS checkbox NOT checked - the Create Account button may be disabled", level="warn")
+                self._log("[WARN] ToS checkbox NOT checked — Create Account button may be disabled", level="warn")
 
             # — VERIFY every field is actually filled (kill fake-success) —
             # Read the REAL input values. Anything the page did not accept
