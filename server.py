@@ -627,35 +627,21 @@ class DiscordAutomation:
         self._log("=" * 40)
 
         try:
-            # Refresh-retry loop: a loaded drag captcha ("Wait! Are you
-            # human?") can't be solved in-browser, so we refresh the page
-            # for a fresh captcha up to 3 times before giving up and letting
-            # the worker rotate proxy + fingerprint + mail domain.
-            refresh_attempt = 0
-            while True:
-                refresh_attempt += 1
-                if not await self._goto_register():
-                    self._log("[FAIL] Could not navigate to Discord /register - aborting", level="error")
-                    return False
-                self._log("[Nav] Discord site rendered")
-                await asyncio.sleep(1.5)
-                await self.capture_screenshot()
+            if not await self._goto_register():
+                self._log("[FAIL] Could not navigate to Discord /register - aborting", level="error")
+                return False
+            self._log("[Nav] Discord site rendered")
+            await asyncio.sleep(1.5)
+            await self.capture_screenshot()
 
-                # Fill the form
-                form_ok = await self._fill_registration_form()
-                if not form_ok:
-                    self._log("[FAIL] Form filling failed", level="error")
-                    success = False
-                    break
-
+            # Fill the form
+            form_ok = await self._fill_registration_form()
+            success = False
+            if form_ok:
                 self._log("[OK] Form filled - now solving captcha...")
-                solve_result = await self._solve_hcaptcha_if_present()
-                if solve_result == "refresh" and refresh_attempt < 3:
-                    self._log(f"[Captcha] Refreshing page for fresh captcha ({refresh_attempt}/3)...")
-                    await asyncio.sleep(1.5)
-                    continue
-                success = bool(solve_result)
-                break
+                success = await self._solve_hcaptcha_if_present()
+            else:
+                self._log("[FAIL] Form filling failed", level="error")
 
             if success:
                 self._log("[OK] CAPTCHA SOLVED! Registration submitted.")
@@ -996,20 +982,13 @@ class DiscordAutomation:
             mode = await self._detect_challenge_mode(iframe)
             self._log(f"[Captcha] Challenge mode: {mode}")
 
-            # ── DRAG CHALLENGE ("Wait! Are you human?") → REFRESH + RETRY ──
-            # Drag puzzles can't be solved in-browser reliably — the
-            # accessibility route grinds for minutes. Instead, signal the
-            # caller to refresh the page for a FRESH captcha (often a
-            # checkbox type). Capped at 3 refreshes, then the worker
-            # rotates proxy + fingerprint + mail domain.
-            if mode == "drag":
-                self._log("[Captcha] Drag challenge loaded — refreshing page for a fresh captcha")
-                return "refresh"
-
-            # ── ACCESSIBILITY CHALLENGE (checkbox widget / other types) ──
+            # ── ACCESSIBILITY CHALLENGE — THE ONLY SOLVER ──
             # Opens the 3-dots menu and uses the Accessibility Challenge,
             # which gives a text/audio question that's solvable locally
-            # (math, word puzzles) with Ollama vision as fallback.
+            # (math, word puzzles) with Ollama vision as fallback. Drag
+            # challenges included: no page refresh — if it can't be solved
+            # the attempt fails fast and the worker rotates proxy +
+            # fingerprint + mail domain.
             self._log("[Captcha] Trying accessibility challenge (only solver)...")
             acc_result = await solve_hcaptcha_accessibility(self._page, iframe, log=self._log)
             if acc_result:
