@@ -989,10 +989,15 @@ class _Browser:
                     # because they embed credentials in the proxy URL, but
                     # Chromium cannot — it needs CDP Fetch auth per tab.
                     try:
-                        if getattr(self._instance, "_proxy_auth", None):
+                        auth = getattr(self._instance, "_proxy_auth", None)
+                        if auth:
                             await t.setup_proxy_auth()
-                    except Exception:
-                        pass
+                            # Log at most once per browser session
+                            if not getattr(self._instance, "_proxy_auth_logged", False):
+                                print(f"[Engine] CDP Fetch proxy auth wired for tab (user={auth.get('username','?')[:20]}...)", flush=True)
+                                self._instance._proxy_auth_logged = True
+                    except Exception as e:
+                        print(f"[Engine] CDP Fetch proxy auth FAILED: {e}", flush=True)
                     return t
             await asyncio.sleep(0.2)
         raise RuntimeError("could not create a browser tab (target never appeared)")
@@ -1091,8 +1096,13 @@ class _BrowserType:
         # the vaultproxies gateway 407-challenges the tab, Chromium
         # hangs with no credentials, and the page never loads:
         # title="(unknown)" url="(unknown)".
+        # Must be a DICT with "username"/"password" keys —
+        # Browser.setup_proxy_auth() reads it as self._proxy_auth["username"].
         if proxy and proxy.get("username"):
-            instance._proxy_auth = (proxy.get("username"), proxy.get("password", ""))
+            instance._proxy_auth = {
+                "username": proxy.get("username"),
+                "password": proxy.get("password", ""),
+            }
         return _Browser(instance)
 
     async def launch_persistent_context(self, user_data_dir: str = None, **kwargs) -> _Browser:
