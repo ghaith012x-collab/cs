@@ -794,9 +794,12 @@ class DiscordAutomation:
         # inbox rides the same proxy IP and fingerprint as the Discord
         # session. Retry fast (2x, no backoff) when cybertemp hiccups.
         #
-        # Inbox creation and Discord navigation run in PARALLEL — they live
-        # on different tabs of the same browser — so by the time the register
-        # form renders the email is almost always already provisioned.
+        # Inbox is created FIRST (sequentially), then Discord navigation
+        # runs alone. truedriver's CDP layer serialises commands to the
+        # browser; running inbox creation + page.goto() concurrently on the
+        # SAME browser causes a CDP deadlock when the proxy is dead (the
+        # hung Page.navigate holds the CDP connection, and the concurrent
+        # Target.createTarget waits forever for it).
         if not self._email:
             self._log(f"[Mail] No email configured - creating cybertemp.xyz inbox (@{self._domain})...")
             nav_ok = False
@@ -806,25 +809,23 @@ class DiscordAutomation:
                 if self._browser is not None:
                     self._mail.attach_browser(self._browser)
 
-                async def _inbox() -> str:
-                    for mail_try in range(2):
-                        try:
-                            addr = await asyncio.wait_for(
-                                self._mail.create_inbox(), timeout=35.0)
-                        except asyncio.TimeoutError:
-                            self._log("[Mail] Inbox creation TIMED OUT after 35s", level="error")
-                            addr = ""
-                        except Exception as e:
-                            self._log(f"[Mail] cybertemp inbox error: {e}", level="error")
-                            addr = ""
-                        if addr:
-                            return addr
-                        self._log(f"[Mail] Inbox creation failed — retrying ({mail_try + 1}/2)...", level="warn")
-                    return ""
+                # Create inbox FIRST (with hard timeout) — never in parallel
+                # with CDP navigation on the same browser.
+                self._email = ""
+                for mail_try in range(2):
+                    try:
+                        self._email = await asyncio.wait_for(
+                            self._mail.create_inbox(), timeout=35.0)
+                    except asyncio.TimeoutError:
+                        self._log("[Mail] Inbox creation TIMED OUT after 35s", level="error")
+                    except Exception as e:
+                        self._log(f"[Mail] cybertemp inbox error: {e}", level="error")
+                    if self._email:
+                        break
+                    self._log(f"[Mail] Inbox creation failed — retrying ({mail_try + 1}/2)...", level="warn")
 
-                nav_task = asyncio.create_task(self._goto_register())
-                mail_task = asyncio.create_task(_inbox())
-                nav_ok, self._email = await asyncio.gather(nav_task, mail_task)
+                # NOW navigate to Discord — inbox is ready (or we gave up)
+                nav_ok = await self._goto_register()
             except Exception as e:
                 self._log(f"[Mail] cybertemp inbox error: {e}", level="error")
                 self._email = ""
