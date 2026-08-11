@@ -554,22 +554,41 @@ class _Page:
 
     # -- navigation ---------------------------------------------------
     async def goto(self, url: str, timeout: float = 30, wait_until: str = "load", **kwargs):
-        # Navigate (with timeout on the navigation itself)
+        # Navigate via raw CDP Page.navigate. We deliberately do NOT use
+        # truedriver's tab.get(): it ends with an UNBOUNDED `await wait()`
+        # that never returns on pages like Discord (websockets + polling
+        # never go "idle"), which made goto() hang for minutes.
         nav_timeout = min(timeout, 30)
-        await self._tab.get(url, False, False, nav_timeout)
-        # Wait for the requested ready state (respects bot's wait_until choice)
-        state = wait_until if wait_until in ("load", "domcontentloaded") else "domcontentloaded"
-        if state == "domcontentloaded":
-            state = "interactive"  # truedriver uses "interactive" for DOM ready
+        from truedriver import cdp
+
+        async def _navigate():
+            try:
+                await self._tab.send(cdp.page.navigate(url))
+            except Exception:
+                # Fallback: JS navigation
+                try:
+                    await self._tab.evaluate(f"location.href = {url!r}")
+                except Exception:
+                    pass
+            # Wait for DOM ready (bounded)
+            state = "interactive" if wait_until == "domcontentloaded" else "complete"
+            try:
+                await self._tab.wait_for_ready_state(state, nav_timeout)
+            except Exception:
+                pass
+            # Cache frames after navigation
+            try:
+                self._cached_frames = [_Frame(self._tab, f) for f in await self._tab.get_frames()]
+            except Exception:
+                self._cached_frames = []
+
+        # Hard cap: even if a CDP call stalls, goto() always returns.
         try:
-            await self._tab.wait_for_ready_state(state, timeout - nav_timeout + 5)
+            await asyncio.wait_for(_navigate(), timeout=nav_timeout + 5)
+        except asyncio.TimeoutError:
+            pass
         except Exception:
             pass
-        # Cache frames after navigation
-        try:
-            self._cached_frames = [_Frame(self._tab, f) for f in await self._tab.get_frames()]
-        except Exception:
-            self._cached_frames = []
 
     async def reload(self, **kwargs):
         await self._tab.reload()
