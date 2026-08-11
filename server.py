@@ -20,7 +20,6 @@ from captcha_solver import (
     solve_hcaptcha_accessibility,
 )
 from cybertemp import TempMail
-from draxon import DraxonMail
 
 
 # ── TOR Control ───────────────────────────────────────────
@@ -222,6 +221,9 @@ class DiscordAutomation:
         # Set when Discord asks for phone verification after account creation
         # — the worker then rotates proxy + fingerprint + mail domain and retries.
         self.phone_verify_detected = False
+        # True once this session actually rendered Discord's register page
+        # (used by the worker to distinguish dead sessions from soft failures).
+        self._nav_ok = False
         self._fingerprint = generate_fingerprint(worker_id)
 
     def _log(self, message: str, level: str = "info") -> None:
@@ -296,6 +298,10 @@ class DiscordAutomation:
     async def switch_proxy(self, new_proxy=None) -> bool:
         """Swap to a new proxy AND a fresh fingerprint without restarting the
         browser. Returns True on success."""
+        same_session = bool(
+            new_proxy and self.proxy
+            and new_proxy.get("key") == self.proxy.get("key")
+        )
         try:
             if self._page:
                 await self._page.close()
@@ -306,9 +312,16 @@ class DiscordAutomation:
         self._page = None
         self._context = None
         self.proxy = new_proxy
-        # Fresh fingerprint per session — same UA/GPU/font on a new IP is a
-        # fingerprinting red flag and a known trigger for phone verification.
-        self.rotate_fingerprint()
+        if same_session:
+            # Pool recycled the SAME session (all sessions blacklisted then
+            # re-issued). Rebuilding the context with the same fingerprint is
+            # consistent — regenerating an identity on an unchanged IP only
+            # churns fingerprints for nothing.
+            self._log("[Fingerprint] Same proxy session reused - keeping fingerprint")
+        else:
+            # Fresh fingerprint per session — same UA/GPU/font on a new IP is a
+            # fingerprinting red flag and a known trigger for phone verification.
+            self.rotate_fingerprint()
         try:
             await self._build_context()
             label = 'proxy ' + str(new_proxy.get('key','?')[:40]) if new_proxy else 'fresh TOR circuit'
@@ -601,34 +614,19 @@ class DiscordAutomation:
         if not self._page:
             await self.initialize()
         self.phone_verify_detected = False
+        self._nav_ok = False
 
-        # No hardcoded email — try DraxonMails first (instant REST inbox on a
-        # discord-friendly domain, no browser launch), fall back to cybertemp.
-        # Circuit breaker: once Draxon fails, skip it for 5 minutes so a down
-        # provider doesn't cost seconds per attempt before the fallback.
+        # No hardcoded email — create a cybertemp.xyz inbox on a
+        # discord-friendly domain (the primary mail provider).
         if not self._email:
-            now_ts = time.time()
-            if now_ts < getattr(type(self), "_draxon_skip_until", 0.0):
-                self._log("[Mail] Draxon down (circuit open) - using cybertemp directly...", level="warn")
-            else:
-                self._log("[Mail] No email configured - creating DraxonMails inbox (discord-friendly)...")
-                try:
-                    self._mail = DraxonMail(log=self._log)
-                    self._email = await self._mail.create_inbox()
-                except Exception as e:
-                    self._log(f"[Mail] Draxon inbox error: {e}", level="error")
-                    self._email = ""
-                if not self._email:
-                    type(self)._draxon_skip_until = now_ts + 300
-            if not self._email:
-                self._log(f"[Mail] Draxon unavailable - falling back to cybertemp.xyz (@{self._domain})...", level="warn")
-                try:
-                    self._mail = TempMail(log=self._log, proxy=self.proxy,
-                                          headless=self.headless, domain=self._domain)
-                    self._email = await self._mail.create_inbox()
-                except Exception as e:
-                    self._log(f"[Mail] cybertemp inbox error: {e}", level="error")
-                    self._email = ""
+            self._log(f"[Mail] No email configured - creating cybertemp.xyz inbox (@{self._domain})...")
+            try:
+                self._mail = TempMail(log=self._log, proxy=self.proxy,
+                                      headless=self.headless, domain=self._domain)
+                self._email = await self._mail.create_inbox()
+            except Exception as e:
+                self._log(f"[Mail] cybertemp inbox error: {e}", level="error")
+                self._email = ""
 
         if not self._email:
             self._log("[FAIL] No email available - aborting signup", level="error")
@@ -642,6 +640,7 @@ class DiscordAutomation:
             if not await self._goto_register():
                 self._log("[FAIL] Could not navigate to Discord /register - aborting", level="error")
                 return False
+            self._nav_ok = True
             self._log("[Nav] Discord site rendered")
             await asyncio.sleep(1.5)
             await self.capture_screenshot()

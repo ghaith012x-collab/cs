@@ -58,8 +58,8 @@ _config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.
 # Domains that already triggered Discord phone verification are removed here
 # (mikerossy.com, blobers.it.com, vibify.cc, vibeify.cc). The worker also
 # burns a domain at runtime when a signup ends in phone verification, so it is
-# never reused. DraxonMails (discord-friendly) is the primary mail source;
-# this list is the fallback pool for cybertemp.
+# never reused. cybertemp.xyz is the primary mail source; this list is
+# the discord-friendly domain pool.
 CYBERTEMP_DISCORD_DOMAINS = [
     "andrewslife.tattoo",
     "dianeplumber.mom",
@@ -251,6 +251,7 @@ async def _run_worker(wid: str, cfg: dict, proxy=None) -> None:
 
     bot = None
     consecutive_tunnel_fails = 0  # fast-fail after consecutive dead connections
+    backoff = 2  # seconds between attempts; doubles after dead-session failures
 
     for attempt in range(max_tries):
         if not _running:
@@ -297,6 +298,7 @@ async def _run_worker(wid: str, cfg: dict, proxy=None) -> None:
             bot._email = cfg.get("custom_email") or ""
             bot._domain = domain
             bot.phone_verify_detected = False
+            bot._nav_ok = False
             if not await bot.switch_proxy(proxy):
                 _log(f"[{wid}] Context rebuild failed", level="warn")
                 if proxy:
@@ -368,14 +370,21 @@ async def _run_worker(wid: str, cfg: dict, proxy=None) -> None:
                 return
 
             # ── Track consecutive tunnel failures ──
-            err_tag = state.get("proxy", "").lower()
-            if not ok and any(k in err_tag for k in ("tor", "proxy")):
+            # A failure before Discord rendered is a dead session (nav error,
+            # blocked, rate-limited): back off between attempts and abort after
+            # 4 in a row instead of spamming proxy+fingerprint rotations on
+            # sessions that never work. Soft failures (form/captcha/phone)
+            # reset the backoff — the session itself was healthy.
+            nav_ok = bool(getattr(bot, "_nav_ok", False))
+            if not ok and not nav_ok:
                 consecutive_tunnel_fails += 1
+                backoff = min(backoff * 2, 30)
                 if consecutive_tunnel_fails >= 4:
                     _log(f"[{wid}] {consecutive_tunnel_fails} consecutive tunnel failures — aborting (all sessions appear dead)", level="error")
                     break
             else:
                 consecutive_tunnel_fails = 0
+                backoff = 2
 
             _log(f"[{wid}] Failed (attempt {attempt+1}/{max_tries}, {label})", level="warn")
         except Exception as e:
@@ -386,7 +395,7 @@ async def _run_worker(wid: str, cfg: dict, proxy=None) -> None:
             proxy_pool.release(proxy, ok=False)
             proxy = None
         _proxy_stats_line(wid)
-        await asyncio.sleep(2)
+        await asyncio.sleep(backoff)
 
     state["status"] = "error"
     state["step"] = "retries exhausted - all proxy/TOR attempts failed"
@@ -893,7 +902,7 @@ input:focus{border-color:var(--dim)}
 </style></head><body>
 
 <h1>EY3<span class="tag">TOKEN FORGE</span></h1>
-<div class="sub"><span class="dot" id="dDot"></span> <span id="stLine">idle</span> - discord token gen - draxon+cybertemp <span id="domLine">@andrewslife.tattoo</span></div>
+<div class="sub"><span class="dot" id="dDot"></span> <span id="stLine">idle</span> - discord token gen - cybertemp <span id="domLine">@andrewslife.tattoo</span></div>
 
 <nav>
   <button id="nvMain" class="on" onclick="showTab('Main')">MAIN</button>
@@ -1033,7 +1042,7 @@ var FILTERS=['[Proxy]','Fingerprint','Discord site rendered','is in Discord and 
   'Inbox ready','Verification link found','Challenge iframe fully loaded','[Accessibility] [OK]',
   'solved:','Humanized','[Captcha] [READY]','[Captcha]','[FAIL]','[Form]','[Nav] Page:','[Mail] No verification',
   'No verification link','No email available','DEAD','BLOCKED','rate limit','Starting worker',
-  '[Phone]','[Fingerprint]','draxon','Draxon'];
+  '[Phone]','[Fingerprint]'];
 var showAll=false;
 var OKWORDS=['[ok]','confirmed','solved','ready','rendered','humanized','verification link found'];
 function refreshLogs(){
