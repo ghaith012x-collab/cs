@@ -225,8 +225,13 @@ class ProxyPool:
         else:
             purl = "http://{}:{}".format(host, port)
         import aiohttp
+        import ssl as _ssl
         try:
-            conn = aiohttp.TCPConnector(ssl=False)
+            # Proper SSL verification matching the browser's TLS path.
+            # ssl=False was the original lie — it skipped cert checks and
+            # gave false positives, then Chromium failed with chrome-error://.
+            ssl_ctx = _ssl.create_default_context()
+            conn = aiohttp.TCPConnector(ssl=ssl_ctx)
             timeout_obj = aiohttp.ClientTimeout(total=timeout)
             try:
                 async with aiohttp.ClientSession(connector=conn,
@@ -234,7 +239,8 @@ class ProxyPool:
                     async with s.get("https://discord.com", proxy=purl,
                                      headers={"User-Agent": "Mozilla/5.0"}) as r:
                         # Any real response (including 403 from Cloudflare)
-                        # means the proxy can reach Discord's edge.
+                        # means the proxy can reach Discord's edge with a
+                        # valid TLS session — same as the browser.
                         return r.status in (200, 403, 429)
             finally:
                 await conn.close()
@@ -268,10 +274,13 @@ class ProxyPool:
             return stats
 
         import aiohttp
+        import ssl as _ssl
         deadline = time.monotonic() + window
         sem = asyncio.Semaphore(concurrency)
+        # Proper SSL verification matching the browser's TLS path.
+        ssl_ctx = _ssl.create_default_context()
         conn = aiohttp.TCPConnector(limit=concurrency, limit_per_host=concurrency,
-                                    ssl=False)
+                                    ssl=ssl_ctx)
         timeout_obj = aiohttp.ClientTimeout(total=timeout)
         last_log = [0.0]
 
@@ -360,8 +369,10 @@ class ProxyPool:
             # All trusted (vault) or already-valid — nothing to test.
             return self.valid_count
         sem = asyncio.Semaphore(concurrency)
+        import ssl as _ssl
+        ssl_ctx = _ssl.create_default_context()
         conn = aiohttp.TCPConnector(limit=concurrency, limit_per_host=concurrency,
-                                    ssl=False)
+                                    ssl=ssl_ctx)
         timeout_obj = aiohttp.ClientTimeout(total=timeout)
 
         # ONE shared session for all probes — a per-probe ClientSession would
