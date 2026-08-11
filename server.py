@@ -520,16 +520,25 @@ class DiscordAutomation:
         timeout_ms = 6000
 
         self._log(f"[Nav] Navigating to {url} (timeout={timeout_ms}ms)...")
+        t0 = time.time()
         try:
             # domcontentloaded (not "load"): "load" waits for EVERY subresource
             # including the hCaptcha widget iframe and all its JS, which through
             # slow proxies hangs for tens of seconds. The form-poll loop below
             # already waits for the Discord SPA to boot, so we lose nothing.
-            await self._page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
-            self._log("[Nav] Page DOM ready (not waiting for hCaptcha subresources)")
-        except Exception as e:
-            err = str(e)[:120]
-            self._log(f"[Nav] Page.goto error: {err}", level="warn")
+            #
+            # WRAPPED in asyncio.wait_for: Playwright's timeout is advisory
+            # only. When the proxy is dead, Chromium's internal TCP retry logic
+            # can hang for 30+ seconds regardless of timeout — asyncio.wait_for
+            # with a hard cap kills the coroutine and forces a fresh proxy.
+            await asyncio.wait_for(
+                self._page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms),
+                timeout=(timeout_ms / 1000.0) + 3.0,  # 9s hard cap (never 38s)
+            )
+            self._log(f"[Nav] Page DOM ready in {time.time() - t0:.1f}s (not waiting for hCaptcha subresources)")
+        except asyncio.TimeoutError:
+            elapsed = time.time() - t0
+            self._log(f"[Nav] Page.goto HARD TIMEOUT after {elapsed:.1f}s — proxy likely dead", level="warn")
 
         # ── Check what we got ──
         try:
