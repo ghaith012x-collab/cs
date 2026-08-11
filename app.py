@@ -500,25 +500,12 @@ async def _proxy_validate_loop() -> None:
 
 
 async def _ai_warmup() -> None:
-    """Preload the AI stack in the background so the first captcha is fast:
-    torch captcha brains (drag + grid .pth) and the Ollama text model.
+    """Pre-warm the Ollama text model so the first captcha answer is fast.
 
-    The torch model load is CPU-bound, so it runs in a worker thread — it
-    must never stall the event loop the workers run on (browser launch,
-    mail inbox, navigation all share that loop)."""
-    try:
-        from solver import TileClassifier, get_drag_brain
-        _log("[AI] Warming up captcha brains (drag + grid models)...")
-
-        def _load_brains() -> str:
-            brain = get_drag_brain()
-            TileClassifier()
-            return str(getattr(brain, "use_model", "?"))
-
-        use_model = await asyncio.to_thread(_load_brains)
-        _log(f"[AI] Captcha brains ready (drag_model={use_model})")
-    except Exception as e:
-        _log(f"[AI] Brain warm-up skipped: {e}", level="warn")
+    The bot uses accessibility-only captcha solving (no drag/grid models).
+    The Ollama model answers the text questions the accessibility challenge
+    presents (math, word puzzles, object identification)."""
+    _log("[AI] Accessibility-only solver — Ollama text model handles all captcha questions")
     try:
         import aiohttp
         url = (os.environ.get("OLLAMA_URL") or "http://localhost:11434").rstrip("/")
