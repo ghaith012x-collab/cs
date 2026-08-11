@@ -251,6 +251,14 @@ class _Locator:
             nth_index=index,
         )
 
+    @property
+    def first(self) -> "_Locator":
+        return self.nth(0)
+
+    @property
+    def last(self) -> "_Locator":
+        return _Locator(self._tab, self._raw_sel, frame_url=self._frame_url, nth_index=-1)
+
     def locator(self, selector: str) -> "_Locator":
         return _Locator(
             self._tab,
@@ -322,6 +330,18 @@ class _FrameLocator:
 
     def nth(self, index: int) -> "_FrameLocator":
         return self
+
+    def get_by_role(self, role: str, name: str = None, **kwargs) -> _Locator:
+        sel = f'[role="{role}"], {role}'
+        if name:
+            sel = f'{role}:has-text("{name}"), [role="{role}"]:has-text("{name}"), [aria-label="{name}"]'
+        return _Locator(self._tab, sel, frame_url=self._frame_url)
+
+    def get_by_label(self, text: str, **kwargs) -> _Locator:
+        return _Locator(self._tab, f'[aria-label="{text}"], [aria-labelledby*="{text}"]', frame_url=self._frame_url)
+
+    def get_by_text(self, text: str, **kwargs) -> _Locator:
+        return _Locator(self._tab, f'text="{text}"', frame_url=self._frame_url)
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -592,8 +612,17 @@ class _Page:
             return _ElementHandle(self._tab, el)
         return None
 
-    async def get_by_text(self, text: str) -> _Locator:
+    def get_by_text(self, text: str, **kwargs) -> _Locator:
         return _Locator(self._tab, f'text="{text}"')
+
+    def get_by_role(self, role: str, name: str = None, **kwargs) -> _Locator:
+        sel = f'[role="{role}"], {role}'
+        if name:
+            sel = f'{role}:has-text("{name}"), [role="{role}"]:has-text("{name}"), [aria-label="{name}"]'
+        return _Locator(self._tab, sel)
+
+    def get_by_label(self, text: str, **kwargs) -> _Locator:
+        return _Locator(self._tab, f'[aria-label="{text}"], [aria-labelledby*="{text}"]')
 
     # -- configuration (no-ops that don't break) -----------------------
     async def set_viewport_size(self, viewport: dict):
@@ -615,14 +644,13 @@ class _Page:
 
 
 class _BrowserContext:
-    def __init__(self, browser: td.Browser, page: _Page):
+    def __init__(self, browser: td.Browser, tab: td.Tab):
         self._browser = browser
-        self._page = page
-        self.browser = None  # set externally
+        self._tab = tab
+        self.browser = None  # set externally by _Browser.new_context()
 
     async def new_page(self) -> _Page:
-        tab = await self._browser.get("about:blank")
-        page = _Page(tab, context=self)
+        page = _Page(self._tab, context=self)
         return page
 
     async def close(self, **kwargs):
@@ -640,7 +668,7 @@ class _Browser:
         self._instance = instance
         self.contexts: List[_BrowserContext] = []
 
-    async def new_context(self, **kwargs) -> _Page:
+    async def new_context(self, **kwargs) -> "_BrowserContext":
         viewport = kwargs.get("viewport")
         user_agent = kwargs.get("user_agent", "")
 
@@ -660,12 +688,10 @@ class _Browser:
             except Exception:
                 pass
 
-        page = _Page(tab)
-        ctx = _BrowserContext(self._instance, page)
+        ctx = _BrowserContext(self._instance, tab)
         ctx.browser = self
-        page._context = ctx
         self.contexts.append(ctx)
-        return page
+        return ctx
 
     async def close(self, **kwargs):
         try:
