@@ -74,6 +74,7 @@ DEFAULT_CONFIG = {
     "camera_interval": 3,
     "worker_count": WORKER_COUNT,
     "mail_domains": ["andrewslife.tattoo"],
+    "custom_email": "",
 }
 
 
@@ -277,6 +278,7 @@ async def _run_worker(wid: str, cfg: dict, proxy=None) -> None:
                 proxy=proxy,  # dict = sticky session; None = TOR in _build_context
                 worker_id=wid,
                 domain=domain,
+                email=cfg.get("custom_email") or "",
             )
             state["bot"] = bot
             try:
@@ -291,7 +293,8 @@ async def _run_worker(wid: str, cfg: dict, proxy=None) -> None:
                 continue
         else:
             # Reuse browser: rotate to a fresh session / TOR circuit
-            bot._email = ""
+            # Custom email (if set) always wins; otherwise blank = fresh inbox.
+            bot._email = cfg.get("custom_email") or ""
             bot._domain = domain
             bot.phone_verify_detected = False
             if not await bot.switch_proxy(proxy):
@@ -528,6 +531,7 @@ def handle_status():
         "uptime": int(time.time() - _start_time) if _start_time else 0,
         "workers": workers,
         "mail_domains": _mail_domains,
+        "custom_email": cfg_now.get("custom_email", ""),
         "proxies": proxy_pool.stats() if (_proxies_available and proxy_pool is not None) else {},
     })
 
@@ -673,6 +677,8 @@ def handle_config():
         if 'mail_domains' in data:
             domains = [str(d).strip().lower() for d in data['mail_domains'] if str(d).strip()]
             cfg['mail_domains'] = domains or ["andrewslife.tattoo"]
+        if 'custom_email' in data:
+            cfg['custom_email'] = str(data.get('custom_email') or '').strip().lower()
         save_config(cfg)
         return jsonify({"ok": True, "config": cfg})
     cfg = load_config()
@@ -680,6 +686,7 @@ def handle_config():
     return jsonify({"headless": cfg.get("headless", True),
                     "worker_count": cfg.get("worker_count", WORKER_COUNT),
                     "mail_domains": cfg.get("mail_domains", ["andrewslife.tattoo"]),
+                    "custom_email": cfg.get("custom_email", ""),
                     "burned_domains": sorted(_BURNED_DOMAINS),
                     "available_domains": avail})
 
@@ -886,6 +893,11 @@ input:focus{border-color:var(--dim)}
         <span class="sw" id="swHeadless" onclick="toggleHeadless()"></span>
       </span>
       <span class="badge b-dim" id="stPending2">0 pending</span>
+    </div>
+    <div style="margin-bottom:6px">
+      <label style="display:block;font-size:12px;opacity:.7;margin-bottom:4px">Custom email (optional - leave empty to auto-generate)</label>
+      <input type="text" id="inpEmail" placeholder="your@email.com">
+      <button style="margin-top:6px" onclick="saveCustomEmail()">Save email</button>
     </div>
     <h3 style="margin-top:14px">Mail domains (discord-friendly on cybertemp)</h3>
     <div id="domPick" class="pick"></div>
@@ -1192,6 +1204,7 @@ function loadConfig(){
     DOMAINS=(x.mail_domains&&x.mail_domains.length)?x.mail_domains.slice():['andrewslife.tattoo'];
     HEADLESS=x.headless!==false;
     $('swHeadless').classList.toggle('on',HEADLESS);
+    if(x.custom_email&&$('inpEmail'))$('inpEmail').value=x.custom_email;
     renderDomains();
   }).catch(function(){AVAIL=['andrewslife.tattoo'];DOMAINS=['andrewslife.tattoo'];renderDomains();});
 }
@@ -1224,6 +1237,14 @@ function addCustomDomain(){
   DOMAINS.push(v);renderDomains();
 }
 function toggleHeadless(){$('swHeadless').classList.toggle('on');}
+function saveCustomEmail(){
+  var v=$('inpEmail').value.trim().toLowerCase();
+  api('/config',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({custom_email:v})})
+    .then(function(r){return r.json();}).then(function(x){
+      toast(x.ok?(v?('Custom email set: '+v):'Custom email cleared - auto-generate on'):'save failed');
+    }).catch(function(e){toast('Save error: '+e.message);});
+}
 function saveDomains(){
   var cleaned=[];
   for(var i=0;i<DOMAINS.length;i++){

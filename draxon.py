@@ -75,14 +75,28 @@ class DraxonMail:
         return self._provider or "none"
 
     async def create_inbox(self, timeout: float = 12.0) -> str:
-        """Fetch a fresh random inbox on a discord-friendly domain."""
+        """Create a fresh inbox on the discord-friendly biharihiro.xyz domain.
+        Draxon's inbox endpoint reads ANY address on a public domain, so we
+        construct one directly instead of relying on /api/random (which picks
+        a random domain). Falls back to /api/random if needed."""
         try:
-            data = await self._api_get("/api/random", params={"type": "discord"},
-                                       timeout=timeout)
-            addr = (data or {}).get("address") or ""
-            if not addr or "@" not in addr:
-                self._log(f"[Mail] Draxon random address invalid: {data}", level="warn")
-                return ""
+            local = "".join(_EMAIL_RANDOM.choice(string.ascii_lowercase + string.digits)
+                            for _ in range(10))
+            addr = f"{local}@biharihiro.xyz"
+            # Verify the address is readable (public inbox endpoint works)
+            try:
+                msgs = await self._api_get(f"/api/inboxes/{quote(addr, safe='')}",
+                                           timeout=timeout)
+                if msgs is None:
+                    raise RuntimeError("inbox read failed")
+            except Exception:
+                # Fall back to whatever discord domain /api/random hands out
+                data = await self._api_get("/api/random", params={"type": "discord"},
+                                           timeout=timeout)
+                addr = (data or {}).get("address") or ""
+                if not addr or "@" not in addr:
+                    self._log(f"[Mail] Draxon random address invalid: {data}", level="warn")
+                    return ""
             self._address = addr
             self._provider = PROVIDER
             self._log(f"[Mail] [OK] Inbox ready: {self._address} ({PROVIDER})")
