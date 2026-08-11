@@ -270,6 +270,11 @@ class DiscordAutomation:
                 opts["platform"] = platform
         except Exception:
             pass
+        # Pass the bot-chosen UA so clearcote's persona uses it instead of
+        # deriving its own from the seed (which wouldn't match self._ua).
+        if self._ua:
+            opts["user_agent"] = self._ua
+        opts["pixel_ratio"] = fp.get("pixel_ratio", 1.0)
         profile = fp.get("locale_profile") or {}
         if profile.get("tz"):
             opts["timezone"] = profile["tz"]
