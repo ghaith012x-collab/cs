@@ -978,6 +978,21 @@ class _Browser:
                         t.browser = self._instance
                     except Exception:
                         pass
+                    # CRITICAL: wire CDP Fetch proxy auth on this tab so the
+                    # proxy's 407 challenge gets answered. truedriver only
+                    # applies setup_proxy_auth() to tabs IT creates — this
+                    # raw create_target path bypasses that, leaving the tab
+                    # without a Fetch handler. The vaultproxies gateway then
+                    # rejects the unauthenticated CONNECT with 407 and the
+                    # page hangs: title="(unknown)" url="(unknown)" /
+                    # chrome-error://chromewebdata/. aiohttp probes passed
+                    # because they embed credentials in the proxy URL, but
+                    # Chromium cannot — it needs CDP Fetch auth per tab.
+                    try:
+                        if getattr(self._instance, "_proxy_auth", None):
+                            await t.setup_proxy_auth()
+                    except Exception:
+                        pass
                     return t
             await asyncio.sleep(0.2)
         raise RuntimeError("could not create a browser tab (target never appeared)")
