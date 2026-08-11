@@ -575,6 +575,16 @@ async def _start_all_async(cfg: dict) -> None:
                  f"{sw['unproven']} unproven (available, re-checked on use), "
                  f"{sw['untested']} untested of {n_sessions} — "
                  f"workers probe-gate every session before launching a browser")
+            if sw.get("tested") and not sw.get("reachable"):
+                _log(
+                    "[Proxy] [ERROR] 0 sessions can reach Discord. vaultproxies "
+                    "sessions expire (ttl-600 = 10 min) and cannot be revived — "
+                    "reusing the same session IDs across runs always ends here. "
+                    "Generate a FRESH session list in the vaultproxies dashboard "
+                    "and replace the session IDs in vaultproxies.txt (the part "
+                    "after '-s-'). Nothing else can fix expired sessions.",
+                    level="error",
+                )
         except Exception as e:
             _log(f"[Proxy] Sweep error: {e}", level="warn")
         asyncio.create_task(_proxy_validate_loop())
