@@ -52,12 +52,27 @@ WORKER_IDS = [f"B{i+1}" for i in range(WORKER_COUNT)]
 
 _config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
 
+# Discord-friendly cybertemp.xyz mail domains (from their public /api/domains:
+# discord:true and status:active). Shown as the selectable database in the
+# dashboard domain picker. mikerossy.com is the locked default.
+CYBERTEMP_DISCORD_DOMAINS = [
+    "andrewslife.tattoo",
+    "blobers.it.com",
+    "dianeplumber.mom",
+    "mikerossy.com",
+    "mikethe.guru",
+    "philipsllc.lol",
+    "turkinster.us",
+    "vibeify.cc",
+    "vibify.cc",
+]
+
 DEFAULT_CONFIG = {
     "headless": True,
     "web_port": 8080,
     "camera_interval": 3,
     "worker_count": WORKER_COUNT,
-    "mail_domains": ["vibify.cc"],
+    "mail_domains": ["mikerossy.com"],
 }
 
 
@@ -142,6 +157,18 @@ async def _next_proxy(force: bool = False):
     if proxy_pool.count > 0:
         return proxy_pool.take()
     return None
+
+
+def _proxy_stats_line(wid: str) -> None:
+    """Log live proxy usage counters (used / working / failed) for the terminal."""
+    try:
+        s = proxy_pool.stats() if proxy_pool is not None else {}
+    except Exception:
+        return
+    _log(
+        f"[{wid}] [Proxy] Used {s.get('used', 0)} sessions, "
+        f"Working {s.get('working', 0)}, Failed {s.get('failed', 0)}"
+    )
 
 
 async def _run_worker(wid: str, cfg: dict, proxy=None) -> None:
@@ -240,6 +267,9 @@ async def _run_worker(wid: str, cfg: dict, proxy=None) -> None:
                         humanized=bool(acc.get("humanized")),
                     )
                 _log(f"[{wid}] Done - token {len(acc['token'])} chars ({label})")
+                if proxy:
+                    proxy_pool.release(proxy, ok=True)
+                _proxy_stats_line(wid)
                 if bot: await bot.close()
                 return
             elif ok:
@@ -266,6 +296,7 @@ async def _run_worker(wid: str, cfg: dict, proxy=None) -> None:
         if proxy:
             proxy_pool.release(proxy, ok=False)
             proxy = None
+        _proxy_stats_line(wid)
         await asyncio.sleep(2)
 
     state["status"] = "error"
@@ -538,7 +569,8 @@ def handle_config():
     cfg = load_config()
     return jsonify({"headless": cfg.get("headless", True),
                     "worker_count": cfg.get("worker_count", WORKER_COUNT),
-                    "mail_domains": cfg.get("mail_domains", ["vibify.cc"])})
+                    "mail_domains": cfg.get("mail_domains", ["mikerossy.com"]),
+                    "available_domains": CYBERTEMP_DISCORD_DOMAINS})
 
 
 # ── Background event loop ─────────────────────────────────
@@ -644,6 +676,9 @@ button:disabled{opacity:.45;cursor:not-allowed}
 .dom input:focus{border-color:var(--dim)}
 .dom .x{background:none;border:none;color:var(--dim);font-size:16px;padding:4px 8px;cursor:pointer}
 .dom .x:hover{color:var(--bad)}
+.pick{display:flex;flex-wrap:wrap;gap:8px}
+.chip{font-size:11px;letter-spacing:.5px;padding:8px 13px;border-radius:99px;background:var(--panel2);color:var(--dim);border:1px solid var(--line2);cursor:pointer}
+.chip.on{background:#e7e7ea;color:#0a0a0b;border-color:#e7e7ea}
 .hint{color:var(--dim2);font-size:11px;margin-top:8px}
 .tog{display:flex;align-items:center;gap:10px;font-size:12px;color:var(--dim)}
 .sw{width:44px;height:24px;border-radius:99px;background:var(--line2);position:relative;cursor:pointer;transition:.2s}
@@ -737,13 +772,16 @@ input:focus{border-color:var(--dim)}
       </span>
       <span class="badge b-dim" id="stPending2">0 pending</span>
     </div>
-    <h3 style="margin-top:14px">Mail domains (used for temp inboxes)</h3>
-    <div id="domList"></div>
+    <h3 style="margin-top:14px">Mail domains (discord-friendly on cybertemp)</h3>
+    <div id="domPick" class="pick"></div>
+    <div class="dom" style="margin-top:10px">
+      <input type="text" id="domCustom" placeholder="custom domain e.g. mysite.cc">
+      <button onclick="addCustomDomain()">Add custom</button>
+    </div>
     <div class="btnrow" style="margin-top:12px">
-      <button onclick="addDomain()">Add domain</button>
       <button class="primary" onclick="saveDomains()">Save domains</button>
     </div>
-    <div class="hint">vibify.cc is the default and auto-set - Discord-capable domain on cybertemp.xyz. Each signup picks a random domain from the list.</div>
+    <div class="hint">mikerossy.com is the default and auto-set - it is always kept in the pool. Each signup picks a random selected domain.</div>
   </div>
 </div>
 
@@ -834,7 +872,7 @@ function refreshStatus(){
   }).catch(function(){});
 }
 
-var FILTERS=['Fingerprint','Discord site rendered','is in Discord and confirmed','[Account] Email=',
+var FILTERS=['[Proxy]','Fingerprint','Discord site rendered','is in Discord and confirmed','[Account] Email=',
   'Inbox ready','Verification link found','Challenge iframe fully loaded','[Accessibility] [OK]',
   'solved:','Humanized','[Captcha] [READY]'];
 var OKWORDS=['[ok]','confirmed','solved','ready','rendered','humanized','verification link found'];
@@ -1020,25 +1058,45 @@ function copyBtn(btn){
   }
 }
 
-var DOMAINS=[];
+var DOMAINS=[], AVAIL=[];
 function loadConfig(){
   api('/config').then(function(r){return r.json();}).then(function(x){
-    DOMAINS=(x.mail_domains&&x.mail_domains.length)?x.mail_domains:['vibify.cc'];
+    AVAIL=(x.available_domains&&x.available_domains.length)?x.available_domains:['mikerossy.com'];
+    DOMAINS=(x.mail_domains&&x.mail_domains.length)?x.mail_domains.slice():['mikerossy.com'];
+    if(DOMAINS.indexOf('mikerossy.com')===-1) DOMAINS.unshift('mikerossy.com');
     HEADLESS=x.headless!==false;
     $('swHeadless').classList.toggle('on',HEADLESS);
     renderDomains();
-  }).catch(function(){DOMAINS=['vibify.cc'];renderDomains();});
+  }).catch(function(){AVAIL=['mikerossy.com'];DOMAINS=['mikerossy.com'];renderDomains();});
 }
 function renderDomains(){
   var html='';
-  for(var i=0;i<DOMAINS.length;i++){
-    html+='<div class="dom"><input value="'+esc(DOMAINS[i])+'" onchange="DOMAINS['+i+']=this.value.trim()">'+
-      '<button class="x" onclick="delDomain('+i+')">X</button></div>';
+  for(var i=0;i<AVAIL.length;i++){
+    var d=AVAIL[i];
+    var sel=DOMAINS.indexOf(d)!==-1;
+    html+='<button type="button" class="chip'+(sel?' on':'')+'" data-d="'+esc(d)+'" onclick="pickDomain(this)">'+esc(d)+'</button>';
   }
-  $('domList').innerHTML=html;
+  for(var j=0;j<DOMAINS.length;j++){
+    if(AVAIL.indexOf(DOMAINS[j])===-1){
+      html+='<button type="button" class="chip on" data-d="'+esc(DOMAINS[j])+'" onclick="pickDomain(this)">'+esc(DOMAINS[j])+'</button>';
+    }
+  }
+  $('domPick').innerHTML=html;
 }
-function addDomain(){DOMAINS.push('');renderDomains();}
-function delDomain(i){DOMAINS.splice(i,1);renderDomains();}
+function pickDomain(btn){
+  var d=btn.getAttribute('data-d')||'';
+  var i=DOMAINS.indexOf(d);
+  if(d==='mikerossy.com') return toast('mikerossy.com is the locked default - it stays on');
+  if(i===-1){DOMAINS.push(d);btn.classList.add('on');}
+  else{DOMAINS.splice(i,1);btn.classList.remove('on');}
+}
+function addCustomDomain(){
+  var v=$('domCustom').value.trim().toLowerCase();
+  $('domCustom').value='';
+  if(!v)return;
+  if(DOMAINS.indexOf(v)!==-1)return toast('already in the pool');
+  DOMAINS.push(v);renderDomains();
+}
 function toggleHeadless(){$('swHeadless').classList.toggle('on');}
 function saveDomains(){
   var cleaned=[];
@@ -1046,7 +1104,7 @@ function saveDomains(){
     var d=DOMAINS[i].trim().toLowerCase();
     if(d && cleaned.indexOf(d)===-1) cleaned.push(d);
   }
-  if(cleaned.indexOf('vibify.cc')===-1) cleaned.unshift('vibify.cc');
+  if(cleaned.indexOf('mikerossy.com')===-1) cleaned.unshift('mikerossy.com');
   DOMAINS=cleaned;
   renderDomains();
   api('/config',{method:'POST',headers:{'Content-Type':'application/json'},

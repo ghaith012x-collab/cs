@@ -137,6 +137,9 @@ class ProxyPool:
         self.last_refresh = 0.0
         self.fetched_count = 0
         self.valid_count = 0
+        self.used_count = 0
+        self.worked_count = 0
+        self.failed_count = 0
 
     @property
     def count(self) -> int:
@@ -147,7 +150,9 @@ class ProxyPool:
             "available": self.count,
             "fetched": self.fetched_count,
             "valid": self.valid_count,
-            "failed": len(self._failed),
+            "used": self.used_count,
+            "working": self.worked_count,
+            "failed": self.failed_count,
             "last_refresh": self.last_refresh,
         }
 
@@ -174,12 +179,16 @@ class ProxyPool:
         candidates.sort(key=lambda p: self._used_at.get(p.get("key"), 0))
         proxy = candidates[0]
         self._used_at[proxy.get("key")] = now
+        self.used_count += 1
         return proxy
 
     def release(self, proxy: Optional[Dict[str, str]], ok: bool = True) -> None:
         if proxy is None:
             return
-        if not ok:
+        if ok:
+            self.worked_count += 1
+        else:
+            self.failed_count += 1
             self._failed.add(proxy.get("key"))
 
 
