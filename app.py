@@ -459,14 +459,18 @@ async def _run_worker(wid: str, cfg: dict, proxy=None) -> None:
         state["bot"] = None
 
 async def _proxy_validate_loop() -> None:
-    """Re-test proxies in the background so 'valid' is a real number (not an
-    assumption) and dead sessions stop being handed to workers. Retests only
-    proxies that never passed or previously failed; runs every 3 minutes."""
+    """Re-test proxies in the background so 'valid' stays honest and dead
+    sessions stop being handed to workers. Runs every 3 minutes."""
     while True:
         try:
             if _proxies_available and proxy_pool is not None and proxy_pool.count:
-                n = await proxy_pool.validate_all()
-                _log(f"[Proxy] Live validation: {n} working of {proxy_pool.count} loaded")
+                await proxy_pool.validate_all()
+                # Read the real valid_count computed from _valid flags — never
+                # stale (sweep updates it, not just refresh).
+                n = proxy_pool.valid_count
+                bl = len(proxy_pool._failed)
+                _log(f"[Proxy] Live validation: {n} working, {bl} blacklisted "
+                     f"of {proxy_pool.count} loaded")
         except Exception as e:
             _log(f"[Proxy] validation error: {e}", level="warn")
         await asyncio.sleep(180)

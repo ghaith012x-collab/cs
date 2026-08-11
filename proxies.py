@@ -336,6 +336,10 @@ class ProxyPool:
         """
         import aiohttp
 
+        # Always recompute from the current _valid flags so the number is
+        # never stale (sweep may have updated them after the last refresh).
+        self.valid_count = sum(1 for p in self._proxies if p.get("_valid"))
+
         targets = [
             p for p in self._proxies
             if not p.get("vault")
@@ -344,8 +348,6 @@ class ProxyPool:
         if not targets:
             # All trusted (vault) or already-valid — nothing to test.
             return self.valid_count
-
-        self.valid_count = sum(1 for p in self._proxies if p.get("_valid"))
         sem = asyncio.Semaphore(concurrency)
         conn = aiohttp.TCPConnector(limit=concurrency, limit_per_host=concurrency,
                                     ssl=False)
