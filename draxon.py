@@ -74,7 +74,7 @@ class DraxonMail:
     def provider(self) -> str:
         return self._provider or "none"
 
-    async def create_inbox(self, timeout: float = 30.0) -> str:
+    async def create_inbox(self, timeout: float = 12.0) -> str:
         """Fetch a fresh random inbox on a discord-friendly domain."""
         try:
             data = await self._api_get("/api/random", params={"type": "discord"},

@@ -163,6 +163,12 @@ class ProxyPool:
         # validation is skipped; workers rotate on failure via pool.release().
         vault = vault_proxies()
         self.fetched_count = len(vault)
+        # Vault sessions are freshly issued residential sessions — trusted as
+        # valid. Bulk-testing 5000+ through one account rate-limits and marks
+        # good proxies failed (pool collapsed to 1 valid). They self-verify
+        # during real signups: release(ok=False) blacklists the dead ones.
+        for pr in vault:
+            pr["_valid"] = True
         self.valid_count = len(vault)
         self._proxies = vault
         self._used_at = {}
@@ -206,9 +212,11 @@ class ProxyPool:
 
         targets = [
             p for p in self._proxies
-            if not p.get("_valid") or p.get("key") in self._failed
+            if not p.get("vault")
+            and (not p.get("_valid") or p.get("key") in self._failed)
         ]
         if not targets:
+            # All trusted (vault) or already-valid — nothing to test.
             return self.valid_count
 
         self.valid_count = sum(1 for p in self._proxies if p.get("_valid"))

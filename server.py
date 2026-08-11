@@ -122,10 +122,10 @@ async def human_type(page, selector: str, text: str):
     except Exception:
         pass
     for i, char in enumerate(text):
-        # Base 90-180ms per char with Gaussian distribution (slower, smoother)
-        delay = max(35, random.gauss(125, 35)) / 1000.0
-        if random.random() < 0.06:  # 6% chance of pause
-            delay += random.gauss(800, 200) / 1000.0
+        # Base 40-110ms per char with Gaussian distribution (fast but varied)
+        delay = max(18, random.gauss(75, 28)) / 1000.0
+        if random.random() < 0.04:  # 4% chance of pause
+            delay += random.gauss(600, 200) / 1000.0
         if random.random() < 0.02 and i > 0:  # 2% chance of backspace
             await page.keyboard.press("Backspace")
             await asyncio.sleep(random.gauss(150, 50) / 1000.0)
@@ -592,14 +592,22 @@ class DiscordAutomation:
 
         # No hardcoded email — try DraxonMails first (instant REST inbox on a
         # discord-friendly domain, no browser launch), fall back to cybertemp.
+        # Circuit breaker: once Draxon fails, skip it for 5 minutes so a down
+        # provider doesn't cost seconds per attempt before the fallback.
         if not self._email:
-            self._log("[Mail] No email configured - creating DraxonMails inbox (discord-friendly)...")
-            try:
-                self._mail = DraxonMail(log=self._log)
-                self._email = await self._mail.create_inbox()
-            except Exception as e:
-                self._log(f"[Mail] Draxon inbox error: {e}", level="error")
-                self._email = ""
+            now_ts = time.time()
+            if now_ts < getattr(type(self), "_draxon_skip_until", 0.0):
+                self._log("[Mail] Draxon down (circuit open) - using cybertemp directly...", level="warn")
+            else:
+                self._log("[Mail] No email configured - creating DraxonMails inbox (discord-friendly)...")
+                try:
+                    self._mail = DraxonMail(log=self._log)
+                    self._email = await self._mail.create_inbox()
+                except Exception as e:
+                    self._log(f"[Mail] Draxon inbox error: {e}", level="error")
+                    self._email = ""
+                if not self._email:
+                    type(self)._draxon_skip_until = now_ts + 300
             if not self._email:
                 self._log(f"[Mail] Draxon unavailable - falling back to cybertemp.xyz (@{self._domain})...", level="warn")
                 try:
@@ -858,15 +866,14 @@ class DiscordAutomation:
 
             # ── Phase 1: Wait for ANY hCaptcha iframe to appear (widget or challenge) ──
             # The widget iframe (newassets.hcaptcha.com) loads first, then the
-            # challenge iframe loads inside it. Poll every 0.5s for up to 50s —
-            # if the challenge hasn't rendered by then, rotate instead of
-            # hanging forever on a dead captcha.
-            self._log("[Captcha] Waiting for hCaptcha to load (polling DOM every 0.5s, max 50s)...")
-            deadline = time.time() + 50.0
+            # challenge iframe loads inside it. Poll every 0.5s with NO timeout —
+            # the captcha takes as long as it takes. (Rate-limit detection and
+            # the _past_captcha check below still exit the loop when appropriate.)
+            self._log("[Captcha] Waiting for hCaptcha to load (no timeout)...")
             last_state = "waiting"
             iframe = None
 
-            while time.time() < deadline:
+            while True:
                 if await self._past_captcha():
                     self._log(f"[Captcha] Already past captcha — at {self._page.url[:50]}")
                     return True
@@ -885,9 +892,17 @@ class DiscordAutomation:
 
                         // A rendered challenge (drag puzzle etc.) expands the
                         // widget iframe TALL, unlike the short checkbox widget.
-                        const wRect = widgetFrame ? widgetFrame.getBoundingClientRect() : null;
-                        const challengeTall = !!widgetFrame && widgetFrame.offsetParent !== null
-                                              && wRect.height >= 250;
+                        // Scan ALL hcaptcha iframes (any src variant) for one
+                        // that is visible and tall — that's a loaded challenge.
+                        let tallSrc = '';
+                        for (const f of document.querySelectorAll('iframe[src*="hcaptcha"]')) {
+                            const r = f.getBoundingClientRect();
+                            if (f.offsetParent !== null && r.height >= 250) {
+                                tallSrc = (f.src || f.title || 'present').substring(0, 80);
+                                break;
+                            }
+                        }
+                        const challengeTall = tallSrc !== '';
 
                         return {
                             hasWidget: !!widgetFrame,
@@ -1159,7 +1174,7 @@ class DiscordAutomation:
 
             if success and 'selected' in str(success):
                 self._log(f"Selected {label}: {option_text} ({success})")
-                await asyncio.sleep(0.8)
+                await asyncio.sleep(0.3)
                 return True
 
             self._log(f"JS result for {label}: {success}")
@@ -1309,9 +1324,9 @@ class DiscordAutomation:
                 return False
 
             await email_input.click()
-            await asyncio.sleep(random.uniform(0.7, 1.3))
+            await asyncio.sleep(random.uniform(0.3, 0.6))
             await human_type(self._page, 'input[name="email"]', self._email)
-            await asyncio.sleep(random.uniform(0.9, 1.8))
+            await asyncio.sleep(random.uniform(0.4, 0.8))
 
             # Generate username with random digits suffix (more human-like)
             consonants = 'bcdfghjklmnpqrstvwxyz'
@@ -1328,18 +1343,18 @@ class DiscordAutomation:
             try:
                 await self._page.wait_for_selector('input[name="global_name"]', timeout=5000)
                 await self._page.locator('input[name="global_name"]').click()
-                await asyncio.sleep(random.uniform(0.5, 1.0))
+                await asyncio.sleep(random.uniform(0.3, 0.6))
                 await human_type(self._page, 'input[name="global_name"]', display_name)
-                await asyncio.sleep(random.uniform(0.8, 1.6))
+                await asyncio.sleep(random.uniform(0.4, 0.8))
             except:
                 pass
             await self._human_pause()
 
             self._log(f"Username: {self._username}")
             await self._page.locator('input[name="username"]').click()
-            await asyncio.sleep(random.uniform(0.7, 1.3))
+            await asyncio.sleep(random.uniform(0.3, 0.6))
             await human_type(self._page, 'input[name="username"]', self._username)
-            await asyncio.sleep(random.uniform(0.9, 1.8))
+            await asyncio.sleep(random.uniform(0.4, 0.8))
 
             # Generate password
             first = random.choice('ABCDEFGHJKLMNPQRSTUVWXYZ')
@@ -1351,9 +1366,9 @@ class DiscordAutomation:
 
             self._log("Filling password")
             await self._page.locator('input[name="password"]').click()
-            await asyncio.sleep(random.uniform(0.7, 1.3))
+            await asyncio.sleep(random.uniform(0.3, 0.6))
             await human_type(self._page, 'input[name="password"]', self._password)
-            await asyncio.sleep(random.uniform(0.9, 1.8))
+            await asyncio.sleep(random.uniform(0.4, 0.8))
 
             # DOB
             month_val = random.randint(1, 12)
@@ -1364,14 +1379,12 @@ class DiscordAutomation:
             month_name = months[month_val - 1]
             self._log(f"DOB: {month_name} {day_val}, {year_val}")
 
-            self._log("[Form] Filling DOB one field at a time...")
             await self._select_dob("Month", month_name)
             await self._human_pause()
             await self._select_dob("Day", day_val)
             await self._human_pause()
             await self._select_dob("Year", year_val)
             await self._human_pause()
-            await asyncio.sleep(random.uniform(0.4, 0.9))
 
             # ── ToS Checkbox — FIND THE CORRECT ONE (Terms of Service, not newsletter) ──
             self._log("Checking ToS checkbox...")
@@ -1657,7 +1670,7 @@ class DiscordAutomation:
             return False
 
     async def _human_pause(self) -> None:
-        await asyncio.sleep(random.uniform(0.5, 1.1))
+        await asyncio.sleep(random.uniform(0.15, 0.4))
 
     async def live_camera_loop(self, interval: int = 4) -> None:
         while True:
