@@ -426,17 +426,24 @@ async def _run_worker(wid: str, cfg: dict, proxy=None) -> None:
                 return
 
             # ── Track consecutive tunnel failures ──
-            # A failure before Discord rendered is a dead session (nav error,
-            # blocked, rate-limited): back off between attempts and abort after
-            # 4 in a row instead of spamming proxy+fingerprint rotations on
-            # sessions that never work. Soft failures (form/captcha/phone)
-            # reset the backoff — the session itself was healthy.
+            # With residential proxies (proxy dict), 4 dead sessions in a row
+            # means the pool is dry — abort early instead of burning attempts.
+            # With TOR (no proxy), every attempt gets a fresh exit node via
+            # _tor_newnym() — each circuit is independent, so short backoffs
+            # and no early abort; let max_tries (12) run its course.
+            using_tor = proxy is None and getattr(bot, "_tor_enabled", False)
             nav_ok = bool(getattr(bot, "_nav_ok", False))
             if not ok and not nav_ok:
                 consecutive_tunnel_fails += 1
-                backoff = min(backoff * 2, 8)
-                if consecutive_tunnel_fails >= 4:
-                    _log(f"[{wid}] {consecutive_tunnel_fails} consecutive tunnel failures — aborting (all sessions appear dead)", level="error")
+                if using_tor:
+                    backoff = min(backoff * 2, 2.0)    # TOR: fast rotate, tiny backoff
+                    abort_at = max_tries               # never early-abort on TOR
+                else:
+                    backoff = min(backoff * 2, 8)      # residential: longer cooldown
+                    abort_at = 4                       # dry pool → stop fast
+                if consecutive_tunnel_fails >= abort_at:
+                    reason = "all TOR circuits blocked" if using_tor else "all sessions appear dead"
+                    _log(f"[{wid}] {consecutive_tunnel_fails} consecutive tunnel failures — aborting ({reason})", level="error")
                     break
             else:
                 consecutive_tunnel_fails = 0
