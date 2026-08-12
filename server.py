@@ -261,6 +261,7 @@ class DiscordAutomation:
         self._avatar_data = ""
         self._bio = ""
         self._humanized = False
+        self._exit_ip = ""
         # Set when Discord asks for phone verification after account creation
         # — the worker then rotates proxy + fingerprint + mail domain and retries.
         self.phone_verify_detected = False
@@ -422,6 +423,7 @@ class DiscordAutomation:
         except Exception:
             return
         if ip:
+            self._exit_ip = ip  # captured for the persistent proxy store
             label = "proxy session" if self.proxy else "TOR circuit"
             self._log(f"[Proxy] Exit IP ({label}): {ip}")
 
@@ -1744,7 +1746,7 @@ class DiscordAutomation:
                 "password": self._password or "",
             })
             try:
-                result = await self._page.evaluate(f"""() => {{
+                result = await self._page.evaluate(f"""async () => {{
                     const fields = {form_json};
                     const setter = Object.getOwnPropertyDescriptor(
                         HTMLInputElement.prototype, 'value'
@@ -1755,28 +1757,23 @@ class DiscordAutomation:
                         username: 'input[name="username"]',
                         password: 'input[name="password"]',
                     }};
-                    // Humanized typing: clear the field, then type in random
-                    // 2-5-char chunks with per-chunk delays (110-450ms) so
-                    // Discord's React validation + event log see human-paced
-                    // input, while the native setter keeps the fill reliable.
-                    // Random pause between fields too.
+                    // Humanized but RELIABLE fill: a human pause, then ONE
+                    // native-setter write + input event. Chunked partial
+                    // writes broke React controlled inputs — the value
+                    // tracker never updates, so Discord's next re-render
+                    // (validation, password meter) resets the field to
+                    // empty. That was the "only dates fill" bug.
                     const typeInto = async (el, value) => {{
                         const setter = Object.getOwnPropertyDescriptor(
                             HTMLInputElement.prototype, 'value'
                         ).set;
                         el.focus();
                         el.scrollIntoView({{ block: 'center' }});
-                        setter.call(el, '');
+                        await new Promise(r => setTimeout(r, 140 + Math.random() * 360));
+                        setter.call(el, value);
+                        try {{ if (el._valueTracker) el._valueTracker.setValue(el.value); }} catch (e) {{}}
                         el.dispatchEvent(new Event('input', {{ bubbles: true }}));
-                        await new Promise(r => setTimeout(r, 120 + Math.random() * 250));
-                        let i = 0;
-                        while (i < value.length) {{
-                            const step = 2 + Math.floor(Math.random() * 4);
-                            i += step;
-                            setter.call(el, value.slice(0, i));
-                            el.dispatchEvent(new Event('input', {{ bubbles: true }}));
-                            await new Promise(r => setTimeout(r, 110 + Math.random() * 340));
-                        }}
+                        await new Promise(r => setTimeout(r, 120 + Math.random() * 300));
                         el.dispatchEvent(new Event('change', {{ bubbles: true }}));
                     }};
                     let ok = [];
@@ -1843,6 +1840,12 @@ class DiscordAutomation:
                               f"user_match={vals.get('username','')==self._username} "
                               f"pass_match={vals.get('password','')==self._password} "
                               f"tos={vals.get('tos',0)}", level="warn")
+                    # ── Keyboard fallback ──
+                    # If React wiped any field, type it with REAL keystrokes
+                    # so the form is genuinely filled before we press Create
+                    # Account (never fake). Playwright type() sends actual
+                    # key events Discord's React handlers process directly.
+                    await self._fill_missing_fields(display_name)
             except Exception:
                 pass
 
@@ -2021,6 +2024,33 @@ class DiscordAutomation:
             import traceback
             traceback.print_exc()
             return False
+
+    async def _fill_missing_fields(self, display_name: str) -> None:
+        """Real-keystroke fallback for fields the JS fill didn't keep."""
+        fields = (
+            ("input[name='email']", self._email or ""),
+            ("input[name='global_name']", display_name),
+            ("input[name='username']", self._username or ""),
+            ("input[name='password']", self._password or ""),
+        )
+        for sel, val in fields:
+            if not val:
+                continue
+            try:
+                loc = self._page.locator(sel)
+                if (await loc.count()) == 0:
+                    continue
+                if await loc.input_value() == val:
+                    continue
+                await loc.click()
+                await loc.press("Control+A")
+                await loc.type(val, delay=45 + random.randint(15, 70))
+            except Exception:
+                pass
+        try:
+            await self._page.wait_for_timeout(500)
+        except Exception:
+            pass
 
     async def _human_pause(self) -> None:
         await asyncio.sleep(random.uniform(0.08, 0.2))

@@ -14,3 +14,6 @@ env/
 # Misc
 *.log
 .DS_Store
+
+# runtime proxy usage record (regenerated per run)
+data/used_proxies.json

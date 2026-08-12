@@ -12,7 +12,9 @@ The pool hands out proxy dicts so the browser worker can pass
 username/password to Playwright separately.
 """
 import asyncio
+import json
 import os
+import random
 import re
 import time
 from pathlib import Path
@@ -31,6 +33,13 @@ VAULTPROXY_FILES = ["proxies.txt", "vaultproxies.txt"]
 
 # Files actually present at the last load (for startup logging).
 loaded_files: List[str] = []
+
+# Persistent record of proxy sessions that have been handed to a worker.
+# Survives redeploys (Postgres used_proxies table when DATABASE_URL is set,
+# else a local JSON cache) so the pool skips previously-used sessions — each
+# vaultproxies session ID maps to one sticky IP, and reusing an IP across
+# accounts would link them.
+USED_PROXIES_FILE = os.environ.get("USED_PROXIES_FILE", "data/used_proxies.json")
 
 
 def proxy_files() -> List[Path]:
@@ -163,6 +172,128 @@ def configured() -> bool:
     return bool(_vault_proxy_urls())
 
 
+class UsedProxyStore:
+    """Persistent record of every proxy session handed to a worker.
+
+    Survives redeploys so the pool skips previously-used sessions (each
+    vaultproxies session ID = one sticky IP — reusing an IP across accounts
+    would link them). Persists to the Postgres used_proxies table when
+    DATABASE_URL is set (authoritative across redeploys) and to a local JSON
+    cache as a fallback.
+    """
+
+    def __init__(self, path: str = USED_PROXIES_FILE):
+        self.path = path
+        self._cache: Dict[str, dict] = {}
+        self._loaded = False
+
+    def _load(self) -> None:
+        if self._loaded:
+            return
+        try:
+            p = Path(self.path)
+            if p.exists():
+                self._cache = json.loads(p.read_text(errors="ignore"))
+        except Exception:
+            self._cache = {}
+        self._loaded = True
+
+    def _save(self) -> None:
+        try:
+            p = Path(self.path)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            tmp = p.with_suffix(".tmp")
+            tmp.write_text(json.dumps(self._cache, indent=1))
+            tmp.replace(p)
+        except Exception:
+            pass
+
+    async def load(self) -> None:
+        """Load local cache + merge Postgres rows (source of truth across
+        redeploys)."""
+        self._load()
+        try:
+            import db
+            if db.db_ok():
+                rows = await db.list_proxies()
+                for r in rows:
+                    key = r.get("key") or ""
+                    if not key:
+                        continue
+                    cur = dict(self._cache.get(key) or {})
+                    cur["status"] = r.get("status") or cur.get("status", "used")
+                    if r.get("exit_ip"):
+                        cur["exit_ip"] = r["exit_ip"]
+                    self._cache[key] = cur
+        except Exception:
+            pass
+
+    async def keys(self) -> set:
+        await self.load()
+        return set(self._cache)
+
+    async def record(self, key: str, status: str = "used",
+                     exit_ip: str = "") -> None:
+        """Upsert one session. Skips persistence when nothing changed."""
+        if not key:
+            return
+        self._load()
+        cur = dict(self._cache.get(key) or {})
+        changed = (cur.get("status") != status
+                   or (exit_ip and cur.get("exit_ip") != exit_ip))
+        cur["status"] = status
+        cur["last_used"] = time.time()
+        if exit_ip:
+            cur["exit_ip"] = exit_ip
+        self._cache[key] = cur
+        if not changed:
+            return
+        self._save()
+        try:
+            import db
+            if db.db_ok():
+                await db.record_proxy(key=key, status=status, exit_ip=exit_ip)
+        except Exception:
+            pass
+
+    async def record_many(self, items: List[tuple]) -> None:
+        """Batch upsert — one file write + per-key DB upserts (sweep)."""
+        self._load()
+        changed = []
+        for key, status, exit_ip in items:
+            if not key:
+                continue
+            cur = dict(self._cache.get(key) or {})
+            if (cur.get("status") != status
+                    or (exit_ip and cur.get("exit_ip") != exit_ip)):
+                cur["status"] = status
+                cur["last_used"] = time.time()
+                if exit_ip:
+                    cur["exit_ip"] = exit_ip
+                self._cache[key] = cur
+                changed.append((key, status, exit_ip))
+        if not changed:
+            return
+        self._save()
+        try:
+            import db
+            if db.db_ok():
+                await db.record_proxies(changed)
+        except Exception:
+            pass
+
+    async def all(self) -> List[dict]:
+        await self.load()
+        return [
+            {"key": k, **v}
+            for k, v in sorted(self._cache.items(),
+                               key=lambda kv: kv[1].get("last_used", 0))
+        ]
+
+
+used_store = UsedProxyStore()
+
+
 class ProxyPool:
     """Rotating pool of working proxies (with optional auth)."""
 
@@ -170,6 +301,7 @@ class ProxyPool:
         self._proxies: List[Dict[str, str]] = []
         self._used_at: dict = {}
         self._failed: set = set()
+        self._used_before: set = set()  # sessions used in previous runs/redeploys
         self.last_refresh = 0.0
         self.fetched_count = 0
         self.valid_count = 0
@@ -207,8 +339,23 @@ class ProxyPool:
         self._used_at = {}
         self._failed = set()
         self.last_refresh = time.time()
+        # Load previously-used sessions from the persistent store so a
+        # redeploy never re-hands the same sticky IP to a new account.
+        try:
+            await used_store.load()
+            self._used_before = set(used_store._cache)
+        except Exception:
+            self._used_before = set()
 
     def take(self) -> Optional[Dict[str, str]]:
+        """Pick the next session RANDOMLY — never the same first-sorted one
+        every run.
+
+        Preference order: sessions never used before (per the persistent
+        store) > Discord-validated sessions > untested. Random within each
+        tier so every launch draws a different session; a previously-used
+        session is only handed out once every loaded session has been tried.
+        """
         if not self._proxies:
             return None
         now = time.time()
@@ -216,15 +363,18 @@ class ProxyPool:
         if not candidates:
             self._failed = set()
             candidates = list(self._proxies)
-        # Proven-valid sessions first, then untested ones — dead ones are
-        # already excluded by the _failed filter above.
-        candidates.sort(key=lambda p: (
-            0 if p.get("_valid") else 1,
-            self._used_at.get(p.get("key"), 0),
-        ))
-        proxy = candidates[0]
-        self._used_at[proxy.get("key")] = now
+        fresh = [p for p in candidates if p.get("key") not in self._used_before]
+        pool_ = fresh or candidates
+        valid = [p for p in pool_ if p.get("_valid")]
+        proxy = random.choice(valid) if valid else random.choice(pool_)
+        key = proxy.get("key")
+        self._used_at[key] = now
+        self._used_before.add(key)
         self.used_count += 1
+        try:
+            asyncio.create_task(used_store.record(key, "used"))
+        except Exception:
+            pass
         return proxy
 
     def release(self, proxy: Optional[Dict[str, str]], ok: bool = True) -> None:
@@ -232,9 +382,19 @@ class ProxyPool:
             return
         if ok:
             self.worked_count += 1
+            try:
+                asyncio.create_task(
+                    used_store.record(proxy.get("key"), "valid"))
+            except Exception:
+                pass
         else:
             self.failed_count += 1
             self._failed.add(proxy.get("key"))
+            try:
+                asyncio.create_task(
+                    used_store.record(proxy.get("key"), "invalid"))
+            except Exception:
+                pass
 
     async def probe(self, proxy: Optional[Dict[str, str]],
                     timeout: float = 3.0) -> bool:
@@ -378,6 +538,22 @@ class ProxyPool:
 
         stats["untested"] = total - stats["tested"]
         self.valid_count = sum(1 for p in self._proxies if p.get("_valid"))
+        # Batch-record sweep results (valid + resolved IP per session) into
+        # the persistent store — keep a previously-recorded status (used /
+        # invalid) rather than overwriting it with 'unproven'.
+        try:
+            items = []
+            for p in self._proxies:
+                key = p.get("key")
+                if p.get("_valid"):
+                    items.append((key, "valid", p.get("_resolved_ip", "")))
+                else:
+                    prev = (used_store._cache.get(key) or {}).get("status")
+                    items.append((key, prev or "unproven",
+                                  p.get("_resolved_ip", "")))
+            await used_store.record_many(items)
+        except Exception:
+            pass
         return stats
 
     async def validate_all(self, concurrency: int = 30,

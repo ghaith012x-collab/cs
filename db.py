@@ -60,6 +60,17 @@ async def init_db() -> bool:
                     )
                 except Exception:
                     pass
+            # used_proxies — every proxy session handed to a worker, so a
+            # redeploy can skip sticky IPs that were already used.
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS used_proxies (
+                    key        TEXT PRIMARY KEY,
+                    exit_ip    TEXT DEFAULT '',
+                    status     TEXT DEFAULT 'used',
+                    first_seen TIMESTAMPTZ DEFAULT now(),
+                    last_used  TIMESTAMPTZ DEFAULT now()
+                );
+            """)
         _db_ready = True
         print("[DB] Connected - accounts table ready", flush=True)
         return True
@@ -177,4 +188,60 @@ async def validate_all_tokens(accounts: List[dict]) -> int:
     for r in results:
         if r is True:
             valid += 1
-    return valid
+
+
+# ── used_proxies: persistent record of proxy sessions handed to workers ──
+
+def _proxy_upsert_sql() -> str:
+    return """
+        INSERT INTO used_proxies (key, status, exit_ip, last_used)
+        VALUES ($1, $2, $3, now())
+        ON CONFLICT (key) DO UPDATE SET
+            status = EXCLUDED.status,
+            exit_ip = CASE WHEN EXCLUDED.exit_ip <> '' THEN EXCLUDED.exit_ip
+                           ELSE used_proxies.exit_ip END,
+            last_used = now()
+    """
+
+
+async def record_proxy(key: str, status: str = "used", exit_ip: str = "") -> bool:
+    """Upsert one used-proxy record. Never raises."""
+    if not db_ok() or not key:
+        return False
+    try:
+        async with _pool.acquire() as conn:
+            await conn.execute(_proxy_upsert_sql(), key, status, exit_ip or "")
+        return True
+    except Exception:
+        return False
+
+
+async def record_proxies(items) -> bool:
+    """Batch upsert [(key, status, exit_ip), ...]. Never raises."""
+    if not db_ok() or not items:
+        return False
+    try:
+        async with _pool.acquire() as conn:
+            for key, status, exit_ip in items:
+                if key:
+                    await conn.execute(_proxy_upsert_sql(), key, status,
+                                       exit_ip or "")
+        return True
+    except Exception:
+        return False
+
+
+async def list_proxies(limit: int = 3000) -> List[dict]:
+    """All used-proxy records, newest first. Never raises."""
+    if not db_ok():
+        return []
+    try:
+        async with _pool.acquire() as conn:
+            rows = await conn.fetch(
+                """SELECT key, exit_ip, status, first_seen, last_used
+                   FROM used_proxies ORDER BY last_used DESC LIMIT $1""",
+                limit,
+            )
+        return [dict(r) for r in rows]
+    except Exception:
+        return []

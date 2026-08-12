@@ -3,6 +3,7 @@ import base64
 import json
 import os
 import random
+import re
 import threading
 import time
 from typing import Dict, List, Optional
@@ -22,10 +23,11 @@ except ImportError:
 
 try:
     from proxies import (pool as proxy_pool, configured as _proxies_configured,
-                         proxy_files, proxy_files_signature)
+                         proxy_files, proxy_files_signature, used_store)
     _proxies_available = True
 except ImportError:
     proxy_pool = None
+    used_store = None
     _proxies_configured = lambda: False
     _proxies_available = False
     print("[app] proxies.py not found - direct connections only", flush=True)
@@ -402,6 +404,16 @@ async def _run_worker(wid: str, cfg: dict, proxy=None) -> None:
                 _log(f"[{wid}] Done - token {len(acc['token'])} chars ({label})")
                 if proxy:
                     proxy_pool.release(proxy, ok=True)
+                    # Record the session's REAL egress IP (resolved by the
+                    # browser) in the persistent store so future redeploys
+                    # can see + skip this sticky IP.
+                    try:
+                        if (used_store is not None and bot is not None
+                                and getattr(bot, "_exit_ip", "")):
+                            await used_store.record(
+                                proxy.get("key"), "valid", bot._exit_ip)
+                    except Exception:
+                        pass
                 _proxy_stats_line(wid)
                 if bot: await bot.close()
                 return
@@ -714,6 +726,88 @@ def handle_proxy_refresh():
         _run_in_loop(proxy_pool.refresh())
         return jsonify(proxy_pool.stats())
     return jsonify({"error": "proxies module not loaded"})
+
+
+def _mask_proxy_key(key: str) -> str:
+    """Display-safe form of a proxy key (user:pass@host:port) — never leak
+    the credentials: show the short session id + host only."""
+    host = key.rsplit("@", 1)[-1] if "@" in key else key
+    sid = ""
+    m = re.search(r"-s-([A-Za-z0-9]+)", key)
+    if m:
+        sid = "s-" + m.group(1)[:10]
+    return f"{sid} @ {host}" if sid else host
+
+
+@app.route('/proxies')
+def handle_proxies():
+    """Proxy dashboard data: valid / used / invalid / unproven sessions.
+
+    Merges the live pool state with the persistent used_proxies store so the
+    tab still shows history (and the pool skips already-used sticky IPs)
+    after a redeploy."""
+    rows = []
+    if _db_available and db is not None:
+        rows = _run_in_loop(db.list_proxies()) or []
+    db_map = {r.get("key"): r for r in rows}
+
+    def _mk(key, rec, live_flag=False):
+        return {
+            "label": _mask_proxy_key(key),
+            "ip": (live_flag and rec.get("ip")) or rec.get("exit_ip") or "",
+            "used": True,
+            "invalid": rec.get("status") == "invalid",
+            "valid": rec.get("status") == "valid",
+        }
+
+    valid, invalid, used = [], [], []
+    live = set()
+    if proxy_pool is not None:
+        for p in proxy_pool._proxies:
+            key = p.get("key", "")
+            live.add(key)
+            rec = db_map.get(key) or {}
+            status = "invalid" if key in proxy_pool._failed else (
+                "valid" if p.get("_valid") else rec.get("status") or "unproven")
+            entry = {
+                "label": _mask_proxy_key(key),
+                "ip": p.get("_resolved_ip") or rec.get("exit_ip") or "",
+                "used": (key in proxy_pool._used_at
+                          or key in proxy_pool._used_before),
+                "invalid": status == "invalid",
+                "valid": status == "valid",
+            }
+            if entry["invalid"]:
+                invalid.append(entry)
+            elif entry["valid"]:
+                valid.append(entry)
+            if entry["used"]:
+                used.append(entry)
+
+    # Persistent history that survives redeploys: DB rows not in the live pool.
+    for key, rec in db_map.items():
+        if key in live:
+            continue
+        entry = {
+            "label": _mask_proxy_key(key),
+            "ip": rec.get("exit_ip") or "",
+            "used": True,
+            "invalid": rec.get("status") == "invalid",
+            "valid": rec.get("status") == "valid",
+        }
+        if entry["invalid"]:
+            invalid.append(entry)
+        else:
+            used.append(entry)
+
+    return jsonify({
+        "total": len(proxy_pool._proxies) if proxy_pool is not None else len(db_map),
+        "valid": valid,
+        "invalid": invalid,
+        "used": used,
+        "db": bool(db_map),
+        "stats": proxy_pool.stats() if proxy_pool is not None else {},
+    })
 
 @app.route('/status')
 def handle_status():
@@ -1157,6 +1251,27 @@ input:focus{border-color:var(--dim)}
   color:var(--txt);padding:10px 12px;outline:none}
 .ai-input-row input:focus{border-color:var(--dim)}
 .ai-typing{color:var(--dim2);font-size:11px;align-self:flex-start;font-style:italic}
+.px-cols{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}
+@media(max-width:900px){.px-cols{grid-template-columns:1fr}}
+.px-col{min-width:0}
+.px-head{font-family:'JetBrains Mono',monospace;font-size:11px;letter-spacing:2px;
+  padding:8px 10px;border:1px solid var(--line);border-radius:9px 9px 0 0;background:var(--panel2)}
+.px-head.g{color:#63d9a8;border-color:#1c4a38}
+.px-head.b{color:#8fb4ff;border-color:#22335c}
+.px-head.r{color:#ff7a7a;border-color:#5c2222}
+.px-list{max-height:420px;overflow-y:auto;border:1px solid var(--line);border-top:none;
+  border-radius:0 0 9px 9px;background:#050506}
+.px-item{display:flex;justify-content:space-between;gap:8px;align-items:center;
+  padding:7px 10px;font-family:'JetBrains Mono',monospace;font-size:10.5px;
+  border-bottom:1px solid var(--line);color:var(--dim)}
+.px-item:last-child{border-bottom:none}
+.px-item .ip{color:#9fb0c8;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.px-item .st{flex:none;font-size:9px;letter-spacing:1px}
+.px-item .st.used{color:#8fb4ff}
+.px-item .st.invalid{color:#ff7a7a}
+.px-item .st.valid{color:#63d9a8}
+.px-empty{color:var(--dim2);text-align:center;padding:18px 0;font-size:11px;
+  font-family:'JetBrains Mono',monospace}
 @media(max-width:600px){.stats{gap:6px}.stat{padding:10px 6px}.stat .num{font-size:20px}
   .acc{flex-wrap:wrap}.acc .acts{width:100%;justify-content:flex-end}}
 </style></head><body>
@@ -1166,6 +1281,7 @@ input:focus{border-color:var(--dim)}
 
 <nav>
   <button id="nvMain" class="on" onclick="showTab('Main')">MAIN</button>
+  <button id="nvProxy" onclick="showTab('Proxy')">PROXIES</button>
   <button id="nvTerm" onclick="showTab('Term')">TERMINAL</button>
   <button id="nvMan" onclick="showTab('Manage')">MANAGE</button>
   <button id="nvAI" onclick="showTab('AI')">AI</button>
@@ -1201,6 +1317,23 @@ input:focus{border-color:var(--dim)}
       <button class="primary" onclick="saveDomains()">Save domains</button>
     </div>
     <div class="hint">Pick ONE discord-friendly domain - choosing one replaces the current and saves immediately. Domains that trigger phone verification get burned automatically.</div>
+  </div>
+</div>
+
+<div id="tabProxy" class="tab">
+  <div class="stats">
+    <div class="stat"><div class="num a" id="pxTotal">0</div><div class="lbl">Total</div></div>
+    <div class="stat"><div class="num g" id="pxValid">0</div><div class="lbl">Valid</div></div>
+    <div class="stat"><div class="num b" id="pxUsed">0</div><div class="lbl">Used</div></div>
+    <div class="stat"><div class="num r" id="pxInvalid">0</div><div class="lbl">Invalid</div></div>
+  </div>
+  <div class="card">
+    <h3>Proxy Sessions <span class="badge b-dim" id="pxDbBadge">DB off</span></h3>
+    <div class="px-cols">
+      <div class="px-col"><div class="px-head g">VALID</div><div id="pxValidList" class="px-list"></div></div>
+      <div class="px-col"><div class="px-head b">USED</div><div id="pxUsedList" class="px-list"></div></div>
+      <div class="px-col"><div class="px-head r">INVALID</div><div id="pxInvalidList" class="px-list"></div></div>
+    </div>
   </div>
 </div>
 
@@ -1289,7 +1422,7 @@ function toast(m){var t=$('toast');t.textContent=m;t.classList.add('on');clearTi
 function api(p,o){return fetch(p,o);}
 
 function showTab(n){
-  var tabs=['Main','Term','Manage','AI'];
+  var tabs=['Main','Proxy','Term','Manage','AI'];
   for(var i=0;i<tabs.length;i++){
     $('tab'+tabs[i]).classList.toggle('on',tabs[i]===n);
     $('nv'+tabs[i]).classList.toggle('on',tabs[i]===n);
@@ -1297,6 +1430,32 @@ function showTab(n){
   if(n==='Manage') refreshTokens();
   if(n==='Term') refreshLogs();
   if(n==='AI') aiCheckStatus();
+  if(n==='Proxy') refreshProxies();
+}
+function refreshProxies(){
+  api('/proxies').then(function(r){return r.json();}).then(function(x){
+    $('pxTotal').textContent = x.total||0;
+    $('pxValid').textContent = (x.valid||[]).length;
+    $('pxUsed').textContent = (x.used||[]).length;
+    $('pxInvalid').textContent = (x.invalid||[]).length;
+    $('pxDbBadge').textContent = x.db ? 'DB ON — used IPs skipped' : 'DB off — in-session only';
+    renderPxList('pxValidList', x.valid||[], 'valid');
+    renderPxList('pxUsedList', x.used||[], 'used');
+    renderPxList('pxInvalidList', x.invalid||[], 'invalid');
+  }).catch(function(){});
+}
+function renderPxList(id, items, cls){
+  var el=$(id), html='';
+  var shown = items.slice(0,150);
+  for(var i=0;i<shown.length;i++){
+    var it=shown[i];
+    html+='<div class="px-item"><span class="ip" title="'+esc(it.label)+'">'+esc(it.label)+'</span>'
+       +'<span class="ip">'+(it.ip?esc(it.ip):'')+'</span>'
+       +'<span class="st '+cls+'">'+cls.toUpperCase()+'</span></div>';
+  }
+  if(!shown.length) html='<div class="px-empty">none yet</div>';
+  if(items.length>shown.length) html+='<div class="px-empty">+'+(items.length-shown.length)+' more</div>';
+  el.innerHTML=html;
 }
 
 function refreshStatus(){
