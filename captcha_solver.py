@@ -7834,6 +7834,28 @@ async def solve_hcaptcha_accessibility(page, iframe,
                         log("[Accessibility] Token appeared mid-chain!")
                         break
 
+                    # ── Pure error-state guard ──
+                    # hCaptcha shows "Please try again" with NO question text
+                    # when the previous attempt was rejected/errored. Burning
+                    # Q1..Q6 on it is fake solving — abort the chain so the
+                    # outer attempt loop retries fresh instead.
+                    try:
+                        _body_txt = await hcaptcha.locator("body").inner_text()
+                    except Exception:
+                        _body_txt = ""
+                    _low_txt = (_body_txt or "").lower()
+                    if "please try again" in _low_txt:
+                        _clean_txt = re.sub(
+                            r"please\s+try\s+again.*", "", _low_txt,
+                            flags=re.DOTALL)
+                        _clean_txt = re.sub(
+                            r"\s*(?:verify|skip)\s*en\b.*$", "", _clean_txt)
+                        _clean_txt = re.sub(
+                            r"[^a-z0-9?]+", " ", _clean_txt).strip()
+                        if len(_clean_txt) < 6:
+                            log("[Accessibility] hCaptcha error state ('Please try again', no question) — aborting chain", level="warn")
+                            break
+
                     answer = await _get_answer(hcaptcha, q)
                     # ── Duplicate detection: if we get the same question
                     # text 3+ times in a row, the page isn't showing real
