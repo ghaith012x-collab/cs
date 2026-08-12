@@ -1156,6 +1156,33 @@ class DiscordAutomation:
             self._log(f"[Captcha] submit click error: {e}", level="warn")
         return False
 
+    async def _click_widget_checkbox(self, widget_iframe) -> bool:
+        """JS-click the hCaptcha widget checkbox (functional readiness probe).
+
+        The checkbox is the widget's static markup, so clicking it proves
+        nothing by itself — the CALLER then polls for the challenge to open,
+        which only happens when hCaptcha's JS is actually initialized and
+        functional. Returns True when a clickable checkbox was found.
+        """
+        try:
+            wframe = await widget_iframe.content_frame()
+            if wframe is None:
+                return False
+            res = await wframe.evaluate("""() => {
+                const cb = document.querySelector('#checkbox')
+                      || document.querySelector('.checkbox');
+                if (cb && cb.offsetParent !== null) {
+                    cb.dispatchEvent(new MouseEvent('mousedown', {bubbles: true}));
+                    cb.dispatchEvent(new MouseEvent('mouseup', {bubbles: true}));
+                    cb.dispatchEvent(new MouseEvent('click', {bubbles: true}));
+                    return 'clicked';
+                }
+                return null;
+            }""")
+            return bool(res)
+        except Exception:
+            return False
+
     async def _solve_hcaptcha_if_present(self) -> bool:
         """Detect and solve the hCaptcha challenge.
 
@@ -1171,17 +1198,18 @@ class DiscordAutomation:
                 return True
 
             # ── Phase 1: Wait for hCaptcha to actually LOAD ──
-            # Never fake: we only proceed when hCaptcha is provably
-            # interactive — a rendered challenge iframe, or the widget iframe
-            # whose #checkbox is visible (proves hCaptcha's JS finished
-            # initializing). An empty shell iframe (scripts still loading or
-            # blocked) is NOT a loaded captcha: grabbing it and claiming to
-            # solve was the lie the old flow told. Cross-origin frames are
-            # visible to locators, so no evaluate() timeout can blind us.
+            # Never fake: "ready" is only claimed when hCaptcha PROVABLY
+            # works — a rendered challenge iframe, or the widget REACTING to
+            # a checkbox click by opening a real challenge. The widget's
+            # #checkbox lives in its static markup from the very first paint,
+            # so "checkbox visible" alone is NOT readiness (that was the
+            # instant false-READY bug). We functionally test the widget:
+            # click its checkbox every 3s and watch for the challenge to open.
             self._log("[Captcha] Waiting for hCaptcha to load...")
             iframe = None
             loop_start = time.time()
-            widget_since = None  # when any hcaptcha iframe first appeared
+            widget_since = None  # when the widget iframe first appeared
+            last_checkbox_click = 0.0
             funcaptcha_checked = False
             honest_logged = {8: False, 20: False}
             # If hCaptcha never loads (dead session / blocked scripts), do
@@ -1206,7 +1234,8 @@ class DiscordAutomation:
                     self._log("[Captcha] RATE LIMITED — rotating circuit", level="warn")
                     return False
 
-                # 1) Dedicated challenge iframe rendered (hcaptcha-challenge)
+                # 1) Challenge iframe already rendered → genuinely ready
+                #    (an active challenge is showing; solve it directly).
                 try:
                     chall = self._page.locator(
                         'iframe[title*="hCaptcha challenge"], iframe[src*="hcaptcha-challenge"]')
@@ -1214,36 +1243,48 @@ class DiscordAutomation:
                         box = await chall.first.bounding_box()
                         if box and box.get("height", 0) >= 80:
                             iframe = chall.first
-                            self._log("[Captcha] [READY] Dedicated challenge iframe rendered")
+                            self._log("[Captcha] [READY] hCaptcha challenge already rendered")
                             break
                 except Exception:
                     pass
 
-                # 2) Widget iframe — only ready when hCaptcha actually
-                #    initialized: #checkbox visible inside proves it. The
-                #    checkbox widget is ~74px tall; a challenge expanded
-                #    inside the widget is 150px+.
+                # 2) Widget present → functional readiness test. Click the
+                #    checkbox (re-click every 3s while it loads) and require
+                #    the challenge to open. No challenge = widget still
+                #    loading — keep waiting honestly.
                 try:
                     widget = self._page.locator('iframe[src*="newassets.hcaptcha.com"]')
                     if await widget.count() > 0:
                         if widget_since is None:
                             widget_since = time.time()
-                        wframe = await widget.first.content_frame()
-                        if wframe is not None:
-                            chk = await wframe.query_selector('#checkbox')
-                            if chk is not None:
-                                try:
-                                    chk_vis = await chk.is_visible()
-                                except Exception:
-                                    chk_vis = False
-                                if chk_vis:
-                                    iframe = widget.first
-                                    self._log("[Captcha] [READY] hCaptcha widget loaded and interactive (checkbox visible)")
+                        # Checkbox-only pass: token already present, no
+                        # challenge needed.
+                        if await read_hcaptcha_token(self._page):
+                            self._log("[Captcha] [OK] hCaptcha already solved (token present)")
+                            return True
+                        now = time.time()
+                        if now - last_checkbox_click >= 3.0:
+                            last_checkbox_click = now
+                            clicked = await self._click_widget_checkbox(widget.first)
+                            if clicked:
+                                self._log("[Captcha] Clicked hCaptcha checkbox — waiting for challenge to open...")
+                        # Challenge opened by the click (separate iframe)
+                        try:
+                            chall = self._page.locator(
+                                'iframe[title*="hCaptcha challenge"], iframe[src*="hcaptcha-challenge"]')
+                            if await chall.count() > 0:
+                                box = await chall.first.bounding_box()
+                                if box and box.get("height", 0) >= 80:
+                                    iframe = chall.first
+                                    self._log("[Captcha] [READY] hCaptcha challenge opened after checkbox click")
                                     break
+                        except Exception:
+                            pass
+                        # Challenge rendered inside the widget (it grew tall)
                         wbox = await widget.first.bounding_box()
                         if wbox and wbox.get("height", 0) >= 150:
                             iframe = widget.first
-                            self._log("[Captcha] [READY] Challenge rendered inside widget iframe")
+                            self._log("[Captcha] [READY] hCaptcha challenge rendered inside widget")
                             break
                 except Exception:
                     pass
@@ -1273,7 +1314,7 @@ class DiscordAutomation:
                         honest_logged[flag] = True
                         if widget_since is not None:
                             self._log(
-                                f"[Captcha] hCaptcha widget present but not interactive after {int(elapsed)}s — still loading...",
+                                f"[Captcha] hCaptcha widget present but no challenge after {int(elapsed)}s — still loading...",
                                 level="warn")
                         else:
                             self._log(
@@ -1283,7 +1324,7 @@ class DiscordAutomation:
                 # Watchdog: hCaptcha never loaded — rotate honestly.
                 if time.time() > no_widget_deadline:
                     if widget_since is not None:
-                        self._log("[Captcha] hCaptcha widget never became interactive in 45s — "
+                        self._log("[Captcha] hCaptcha widget never became ready in 45s — "
                                   "scripts blocked or session stalled, rotating", level="warn")
                     else:
                         self._log("[Captcha] No hCaptcha widget in 45s — script blocked or dead "
