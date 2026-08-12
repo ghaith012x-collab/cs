@@ -257,7 +257,10 @@ class DiscordAutomation:
         self._password = ""
         self._token = ""
         self._solver = NoCaptchaAI(log=self._log)
-        self._mail: Optional[TempMail] = None
+        # duckmail.sbs client — created once per bot, reused across attempts.
+        # (Lost in the cybertemp→duckmail switch, which silently killed every
+        # inbox creation with a NoneType crash — see git log efb6f99.)
+        self._mail: Optional[TempMail] = TempMail(log=self._log)
         self._user_id = ""
         self._avatar_data = ""
         self._bio = ""
