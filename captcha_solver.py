@@ -7924,20 +7924,55 @@ async def solve_hcaptcha_accessibility(page, iframe,
                         break
 
                 # ── After answering all questions, detect ANY new captcha ──
-                # A brand-new hCaptcha can appear right after a completed one.
-                # The widget iframe (newassets.hcaptcha.com) stays in the DOM
-                # forever, so only look for the CHALLENGE iframe — otherwise
-                # we'd loop forever on the idle widget.
-                await asyncio.sleep(0.5)
-                try:
-                    _chall = page.locator(
-                        'iframe[title="hCaptcha challenge"], '
-                        'iframe[src*="hcaptcha-challenge"]'
-                    )
-                    _has_challenge = await _chall.count() > 0
-                except Exception:
-                    _has_challenge = False
-                if _has_challenge:
+                # hCaptcha can throw a NEW challenge right after a solved one
+                # (Discord re-arms the widget). The widget iframe
+                # (newassets.hcaptcha.com) stays in the DOM forever, so only
+                # watch the CHALLENGE iframe — otherwise we'd loop forever on
+                # the idle widget.
+                # Phase 1: let the solved challenge CLOSE (hCaptcha collapses
+                # the challenge iframe on success) — up to 4s. Phase 2: watch
+                # for a fresh rendered challenge to appear — up to 8s. A
+                # chained captcha takes a couple of seconds to spawn, and the
+                # old single 0.5s check missed it.
+                chall_sel = ('iframe[title="hCaptcha challenge"], '
+                             'iframe[src*="hcaptcha-challenge"]')
+                _chall = page.locator(chall_sel)
+
+                # Phase 1: wait for the solved challenge to close.
+                saw_absent = False
+                for _pi in range(8):
+                    try:
+                        _cnt = await _chall.count()
+                    except Exception:
+                        _cnt = 1
+                    if _cnt == 0:
+                        saw_absent = True
+                        break
+                    await asyncio.sleep(0.5)
+
+                # Phase 2: poll for a NEW rendered challenge. Only chain when
+                # the iframe genuinely (re)appeared — a stale solved frame
+                # lingering in the DOM must not count.
+                new_chall_seen = False
+                for _pi in range(16):
+                    try:
+                        _cnt = await _chall.count()
+                    except Exception:
+                        _cnt = 0
+                    if _cnt == 0:
+                        saw_absent = True
+                    else:
+                        try:
+                            _box = await _chall.first.bounding_box()
+                        except Exception:
+                            _box = None
+                        _rendered = _box is None or _box.get("height", 0) >= 40
+                        if _rendered and (saw_absent or not await _token_present()):
+                            new_chall_seen = True
+                            break
+                    await asyncio.sleep(0.5)
+
+                if new_chall_seen:
                     # Chain loop below re-opens 3-dots → Accessibility Challenge.
                     log("[Accessibility] NEW captcha detected — clicking 3-dots + accessibility again")
                     continue

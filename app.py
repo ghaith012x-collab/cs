@@ -159,18 +159,21 @@ _APP_LOG_ALL = os.environ.get("LOG_LEVEL", "").strip().lower() \
 
 
 def _log(msg: str, level: str = "info"):
-    if level not in ("warn", "error") and not _APP_LOG_ALL:
-        return
+    # Store EVERYTHING so the dashboard's ALL LOGS toggle can show it; only
+    # print warnings/errors to the console (and everything with LOG_LEVEL=all).
+    essential = level in ("warn", "error")
     entry = {
         "time": time.strftime("%H:%M:%S"),
         "timestamp": time.time(),
         "level": level,
+        "essential": essential,
         "message": msg,
     }
     _APP_LOGS.append(entry)
     if len(_APP_LOGS) > 400:
         _APP_LOGS[:] = _APP_LOGS[-400:]
-    print(f"[{level.upper()}] {msg}", flush=True)
+    if _APP_LOG_ALL or essential:
+        print(f"[{level.upper()}] {msg}", flush=True)
 
 
 # ── Worker management (runs in the asyncio thread) ──
@@ -792,7 +795,7 @@ def handle_worker_logs(wid):
         "proxy": s.get("proxy", ""),
         "screenshots": s.get("screenshots", 0),
         "started_at": s.get("started_at", 0),
-        "logs": merged[-200:],  # last 200 entries
+        "logs": merged,  # store caps (500 bot / 400 app) bound the size
     })
 
 
@@ -1317,11 +1320,6 @@ function refreshStatus(){
   }).catch(function(){});
 }
 
-var FILTERS=['[Proxy]','Fingerprint','Discord site rendered','is in Discord and confirmed','[Account] Email=',
-  'Inbox ready','Verification link found','Challenge iframe fully loaded','[Accessibility] [OK]',
-  'solved:','Humanized','[Captcha] [READY]','[Captcha]','[FAIL]','[Form]','[Nav] Page:','[Nav] Navigating','[Nav] Poll','[Mail] No verification',
-  'No verification link','No email available','DEAD','BLOCKED','rate limit','Starting worker',
-  '[Phone]','[Fingerprint]','Starting Discord signup','Using configured email','No email configured'];
 var showAll=false;
 var OKWORDS=['[ok]','confirmed','solved','ready','rendered','humanized','verification link found'];
 function refreshLogs(){
@@ -1329,9 +1327,12 @@ function refreshLogs(){
     $('termState').textContent = x.status||'idle';
     var lines=(x.logs||[]).filter(function(l){
       if(showAll) return true;
-      var m=l.message||'';
-      for(var i=0;i<FILTERS.length;i++){ if(m.indexOf(FILTERS[i])!==-1) return true; }
-      return false;
+      // ALL LOGS off: only essential events + warnings/errors (the server
+      // tags each entry with an `essential` flag - same rules as the console).
+      // ALL LOGS on shows everything.
+      var lv=(l.level||'').toLowerCase();
+      if(lv==='warn'||lv==='error') return true;
+      return !!l.essential;
     }).slice(-150);
     if(!lines.length) return;
     var html='';

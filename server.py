@@ -49,6 +49,8 @@ _ESSENTIAL_PREFIXES = (
     "[Captcha] [OK]",
     "[Accessibility] Clicked 3-dots",
     "[Accessibility] Accessibility option clicked",
+    "[Accessibility] NEW captcha detected",  # chained captcha re-trigger
+    "[Accessibility] [OK]",                 # solved / no new challenge
     "[Accessibility] Q",                    # question answers — refined below
 )
 
@@ -284,22 +286,24 @@ class DiscordAutomation:
             self._fingerprint = generate_fingerprint(worker_id)
 
     def _log(self, message: str, level: str = "info") -> None:
-        # Normal mode: only essential events + warnings/errors. The full
-        # detail lives in the ALL logs (LOG_LEVEL=all).
-        if level not in ("warn", "error") and not _LOG_ALL \
-                and not _log_essential(message):
-            return
+        # The store keeps EVERYTHING so the dashboard's ALL LOGS toggle can
+        # show the full detail; the console only prints essential events +
+        # warnings/errors unless LOG_LEVEL=all.
+        essential = level in ("warn", "error") or _log_essential(message)
+        print_console = _LOG_ALL or essential
         tagged = f"[{self.worker_id}] {message}"
         entry = {
             "time": time.strftime("%H:%M:%S"),
             "timestamp": time.time(),
             "level": level,
+            "essential": essential,
             "message": tagged
         }
         self._activity_log.append(entry)
         if len(self._activity_log) > 500:
             self._activity_log = self._activity_log[-500:]
-        print(f"[{entry['time']}] [{level.upper()}] {tagged}", flush=True)
+        if print_console:
+            print(f"[{entry['time']}] [{level.upper()}] {tagged}", flush=True)
 
     def get_activity_log(self) -> list:
         return self._activity_log
@@ -1639,6 +1643,8 @@ class DiscordAutomation:
             self._log("FILLING REGISTRATION FORM (direct value set)")
             self._log("=" * 40)
             self._log(f"Email: {self._email}")
+            # Humanization: a moment to "read" the form before typing.
+            await asyncio.sleep(random.uniform(0.5, 1.3))
 
             # ── Pre-define DOB so the age-gate JS can use them ──
             month_val = random.randint(1, 12)
@@ -1749,16 +1755,38 @@ class DiscordAutomation:
                         username: 'input[name="username"]',
                         password: 'input[name="password"]',
                     }};
+                    // Humanized typing: clear the field, then type in random
+                    // 2-5-char chunks with per-chunk delays (110-450ms) so
+                    // Discord's React validation + event log see human-paced
+                    // input, while the native setter keeps the fill reliable.
+                    // Random pause between fields too.
+                    const typeInto = async (el, value) => {{
+                        const setter = Object.getOwnPropertyDescriptor(
+                            HTMLInputElement.prototype, 'value'
+                        ).set;
+                        el.focus();
+                        el.scrollIntoView({{ block: 'center' }});
+                        setter.call(el, '');
+                        el.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                        await new Promise(r => setTimeout(r, 120 + Math.random() * 250));
+                        let i = 0;
+                        while (i < value.length) {{
+                            const step = 2 + Math.floor(Math.random() * 4);
+                            i += step;
+                            setter.call(el, value.slice(0, i));
+                            el.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                            await new Promise(r => setTimeout(r, 110 + Math.random() * 340));
+                        }}
+                        el.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                    }};
                     let ok = [];
                     for (const [k, v] of Object.entries(fields)) {{
                         const sel = selectors[k];
                         const el = sel ? document.querySelector(sel) : null;
                         if (!el) {{ ok.push(k + ':not_found'); continue; }}
-                        el.focus();
-                        setter.call(el, v);
-                        el.dispatchEvent(new Event('input', {{ bubbles: true }}));
-                        el.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                        await typeInto(el, v);
                         ok.push(k + ':ok');
+                        await new Promise(r => setTimeout(r, 350 + Math.random() * 900));
                     }}
 
                     // ToS checkbox: force-check EVERYTHING unchecked
@@ -1845,6 +1873,8 @@ class DiscordAutomation:
                 pass
 
             # ── Create Account Button — try multiple strategies ────────
+            # Humanization: pause to review the filled form before submitting.
+            await asyncio.sleep(random.uniform(0.9, 1.9))
             self._log("Clicking Create Account...")
             create_clicked = False
 
