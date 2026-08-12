@@ -78,6 +78,19 @@ _TOS_TARGET_JS = r"""() => {
 }"""
 
 
+# ── Discord rate-limit phrases — rotate the proxy the moment these show ──
+_RATE_LIMIT_KEYWORDS = (
+    "the resource is being rate limited",
+    "resource is being rate limited",
+    "you are being rate limited",
+    "rate limited",
+    "ratelimited",
+    "too many requests",
+    "slowdown",
+    "try again later",
+)
+
+
 # ── Log verbosity ─────────────────────────────────────────
 # Normal mode prints ONLY the essential signup events listed below (plus
 # warnings / errors, which always print). Everything else — proxy sweeps,
@@ -779,17 +792,20 @@ class DiscordAutomation:
         except Exception:
             pass
 
-        # ── Rate-limit detection — rotate TOR circuit fast ──
-        # Discord/Cloudflare throttle abused TOR exit nodes with 429s that
-        # render as "rate limited / too many requests" text on the page.
+        # ── Rate-limit detection — rotate as soon as the message renders ──
+        # Discord/Cloudflare throttle abused exit nodes with 429s that render
+        # as "The resource is being rate limited." / "too many requests".
+        # Check the FULL body text — the message often paints below the first
+        # few hundred chars, so truncating would miss it.
         try:
-            rl_text = (body_text or "").lower()
+            full_body = await asyncio.wait_for(
+                self._page.evaluate("document.body ? document.body.innerText : ''"),
+                timeout=3.0)
         except Exception:
-            rl_text = ""
-        if any(kw in rl_text for kw in ("rate limit", "ratelimited", "rate limited",
-                                        "too many requests", "slowdown", "429")):
+            full_body = ""
+        if any(kw in (full_body or "").lower() for kw in _RATE_LIMIT_KEYWORDS):
             self._nav_error = "rate limited (429) by Discord"
-            self._log("[Nav] RATE LIMITED (429) - rotating TOR circuit", level="warn")
+            self._log("[Nav] RATE LIMITED (429) - rotating circuit", level="warn")
             return False
 
         # ── Block keywords in title ──
@@ -1568,14 +1584,13 @@ class DiscordAutomation:
                     self._log(f"[Captcha] Already past captcha — at {self._page.url[:50]}")
                     return True
 
-                # ── Fast-fail: rate limiting (lightweight text peek) ──
+                # ── Fast-fail: rate limiting (rotate the moment it shows) ──
                 try:
                     body = await self._page.evaluate(
-                        "() => (document.body ? document.body.innerText.substring(0, 200) : '').toLowerCase()")
+                        "() => (document.body ? document.body.innerText : '').toLowerCase()")
                 except Exception:
                     body = ""
-                if any(k in body for k in ("rate limit", "ratelimited", "too many requests",
-                                           "slowdown", "try again later", "you are being rate")):
+                if any(k in body for k in _RATE_LIMIT_KEYWORDS):
                     self._log("[Captcha] RATE LIMITED — rotating circuit", level="warn")
                     return False
 
@@ -1933,6 +1948,18 @@ class DiscordAutomation:
             traceback.print_exc()
             return False
 
+    async def _rate_limited(self) -> bool:
+        """True when Discord shows its rate-limit message ("The resource is
+        being rate limited.") on the current page. Cheap full-page text
+        check so the worker rotates the proxy the instant it renders."""
+        try:
+            text = await self._page.evaluate(
+                "() => (document.body ? document.body.innerText : '')")
+        except Exception:
+            return False
+        low = (text or "").lower()
+        return any(k in low for k in _RATE_LIMIT_KEYWORDS)
+
     async def _fill_registration_form(self) -> bool:
         try:
             self._log("=" * 40)
@@ -1941,6 +1968,12 @@ class DiscordAutomation:
             self._log(f"Email: {self._email}")
             # Humanization: a moment to "read" the form before typing.
             await asyncio.sleep(random.uniform(0.5, 1.3))
+
+            # Rotate the proxy the moment Discord's rate-limit message shows.
+            if await self._rate_limited():
+                self._nav_error = "rate limited (429) by Discord"
+                self._log("[Form] RATE LIMITED — rotating circuit", level="warn")
+                return False
 
             # ── Pre-define DOB so the age-gate JS can use them ──
             month_val = random.randint(1, 12)
@@ -2337,6 +2370,13 @@ class DiscordAutomation:
                 self._log("[OK] Create Account submitted - waiting for response...")
             else:
                 self._log("[FAIL] Could not click Create Account after all attempts!", level="error")
+                await self.capture_screenshot()
+                return False
+
+            # Rotate the moment Discord answers with a rate-limit message.
+            if await self._rate_limited():
+                self._nav_error = "rate limited (429) by Discord"
+                self._log("[Form] RATE LIMITED after submit — rotating circuit", level="warn")
                 await self.capture_screenshot()
                 return False
 
