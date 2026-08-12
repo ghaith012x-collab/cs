@@ -45,6 +45,7 @@ _ESSENTIAL_PREFIXES = (
     "[OK] Create Account submitted",
     "[Captcha] Checking for hCaptcha",
     "[Captcha] Waiting for hCaptcha to load",
+    "[Captcha] Checkbox clicked",           # auto-clicked the hCaptcha checkbox
     "[Captcha] [READY]",                    # hCaptcha rendered
     "[Captcha] [OK]",
     "[Accessibility] Clicked 3-dots",
@@ -1206,6 +1207,24 @@ class DiscordAutomation:
             return t.trim().length >= 3;
         }""")
 
+    async def _click_hcaptcha_checkbox(self, iframe) -> bool:
+        """Real-mouse click the hCaptcha 'I\'m a human' checkbox.
+
+        Only ever called after _widget_rendered() verified the widget has
+        genuinely painted, so the click happens on a live, interactive
+        checkbox — never as a blind readiness probe. A real mouse click
+        (not JS) is what hCaptcha's pointer handler trusts.
+        """
+        try:
+            frame = await iframe.content_frame()
+            if frame is None:
+                return False
+            await asyncio.sleep(random.uniform(0.2, 0.6))  # human pause
+            await frame.locator("#checkbox").first.click(timeout=3000)
+            return True
+        except Exception:
+            return False
+
     async def _detect_challenge_mode(self, iframe_element) -> str:
         """Identify the hCaptcha state: 'checkbox' or 'drag'.
 
@@ -1325,6 +1344,8 @@ class DiscordAutomation:
             iframe = None
             loop_start = time.time()
             widget_since = None  # when the widget iframe first appeared
+            checkbox_clicked = False    # auto-clicked the hCaptcha checkbox
+            checkbox_clicked_at = 0.0   # when the checkbox was clicked
             funcaptcha_checked = False
             honest_logged = {8: False, 20: False}
             # If hCaptcha never loads (dead session / blocked scripts), do
@@ -1367,10 +1388,13 @@ class DiscordAutomation:
                 except Exception:
                     pass
 
-                # 2) Widget present → hand it to the solver as soon as its
-                #    document has ACTUALLY rendered (verified content, not a
-                #    timer). No checkbox click — the solver verifies
-                #    interactivity by opening the 3-dots menu.
+                # 2) Widget present → verify it ACTUALLY rendered, then
+                #    auto-click the checkbox (user request) so hCaptcha spawns
+                #    its challenge. After the click, the loop's challenge check
+                #    catches the spawned challenge iframe (5s budget); if no
+                #    challenge ever appears, fall back to handing the widget
+                #    over so the solver forces the accessibility challenge via
+                #    the 3-dots menu.
                 try:
                     widget = self._page.locator('iframe[src*="newassets.hcaptcha.com"]')
                     if await widget.count() > 0:
@@ -1383,6 +1407,16 @@ class DiscordAutomation:
                             self._log("[Captcha] [OK] hCaptcha already solved (token present)")
                             return True
                         if await self._widget_rendered(widget.first):
+                            if not checkbox_clicked:
+                                if await self._click_hcaptcha_checkbox(widget.first):
+                                    checkbox_clicked = True
+                                    checkbox_clicked_at = time.time()
+                                    self._log("[Captcha] Checkbox clicked — waiting for challenge to spawn...")
+                            if checkbox_clicked and (time.time() - checkbox_clicked_at) < 5.0:
+                                # hCaptcha swaps to the challenge a moment
+                                # after the click — the next loop iteration
+                                # (0.25s) catches the painted challenge iframe.
+                                continue
                             iframe = widget.first
                             self._log("[Captcha] [READY] hCaptcha widget rendered — opening accessibility challenge")
                             break
