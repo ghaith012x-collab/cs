@@ -2015,25 +2015,10 @@ class DiscordAutomation:
                         await new Promise(r => setTimeout(r, 350 + Math.random() * 900));
                     }}
 
-                    // ToS checkbox: force-check EVERYTHING unchecked
-                    let cb_hit = 0;
-                    const allCb = document.querySelectorAll('input[type="checkbox"], [role="checkbox"]');
-                    for (const cb of allCb) {{
-                        if (cb.offsetParent === null) continue;
-                        const isChecked = cb.checked || cb.getAttribute('aria-checked') === 'true'
-                            || cb.getAttribute('data-state') === 'checked';
-                        if (isChecked) continue;
-                        cb.scrollIntoView({{block: 'center'}});
-                        cb.focus();
-                        cb.click();
-                        cb.checked = true;
-                        cb.setAttribute('aria-checked', 'true');
-                        cb.setAttribute('data-state', 'checked');
-                        cb.dispatchEvent(new MouseEvent('click', {{ bubbles: true }}));
-                        cb.dispatchEvent(new Event('change', {{ bubbles: true }}));
-                        cb_hit++;
-                    }}
-                    return JSON.stringify({{ fields: ok, checkboxes: cb_hit }});
+                    // ToS checkboxes are NOT touched here — _click_tos_checkboxes
+                    // clicks them ONCE each afterwards. A JS click here + a real
+                    // mouse click later double-toggles the box back OFF.
+                    return JSON.stringify({{ fields: ok, checkboxes: 0 }});
                 }}""")
                 state = json.loads(result) if result else {}
                 self._log(f"[Form] JS set result: {state}")
@@ -2166,6 +2151,8 @@ class DiscordAutomation:
                             if (btn.disabled || btn.getAttribute('aria-disabled') === 'true') continue;
                             const t = (btn.textContent || '').toLowerCase().trim();
                             const v = (btn.value || '').toLowerCase().trim();
+                            // Never the "Already have an account?" / back-to-login link
+                            if (/already have an account|log in|login|sign in|back to|forgot/.test(t)) continue;
                             if (t.includes('create account') || t.includes('sign up') || t.includes('continue') ||
                                 v.includes('create account') || v.includes('sign up')) {
                                 btn.scrollIntoView({block: 'center'});
@@ -2174,17 +2161,22 @@ class DiscordAutomation:
                             }
                         }
 
-                        // Strategy 2: Find any submit-type button
+                        // Strategy 2: real submit button — but NEVER a
+                        // navigation button like "Already have an account?"
+                        // (it's a type=submit button that navigates to /login
+                        // and silently kills the run). Require an actual
+                        // type="submit" inside a form + no login text.
                         for (const btn of btns) {
                             if (btn.offsetParent === null) continue;
                             if (btn.disabled || btn.getAttribute('aria-disabled') === 'true') continue;
-                            if (btn.getAttribute('type') === 'submit' || btn.tagName === 'BUTTON') {
-                                const t = btn.textContent.toLowerCase().trim();
-                                if (t.length > 4) {  // has meaningful text
-                                    btn.scrollIntoView({block: 'center'});
-                                    btn.click();
-                                    return 'btntype_' + t.slice(0, 20);
-                                }
+                            const t = btn.textContent.toLowerCase().trim();
+                            if (/already have an account|log in|login|sign in|back to|forgot/.test(t)) continue;
+                            if (btn.getAttribute('type') !== 'submit') continue;
+                            if (!btn.closest('form')) continue;
+                            if (t.length > 2) {  // has meaningful text
+                                btn.scrollIntoView({block: 'center'});
+                                btn.click();
+                                return 'btntype_' + t.slice(0, 20);
                             }
                         }
 
@@ -2283,41 +2275,75 @@ class DiscordAutomation:
         checkbox's center generate trusted input React actually processes.
 
         SINGLE pass, no retry loop: re-clicking a checkbox that React
-        already committed toggles it back OFF. The finder only collects
-        unchecked boxes, so each one is clicked exactly once.
+        already committed toggles it back OFF. Iterates ONE unchecked box
+        at a time — scrolls it into view first (off-screen coords click
+        nothing), real-mouse-clicks its center, and dedupes by on-screen
+        position so a container div and its inner box never both get
+        clicked (that's a double-click = toggle back off). Verifies with
+        the definitive signal: boxes checked, OR the Continue button
+        enabled (a genuinely checked ToS is what enables it).
         """
-        try:
-            candidates = await self._page.evaluate("""() => {
-                const out = [];
-                const seen = new Set();
-                const els = document.querySelectorAll(
-                    'input[type="checkbox"], [role="checkbox"], [class*="checkbox"]');
-                for (const cb of els) {
-                    if (seen.has(cb)) continue;
-                    seen.add(cb);
-                    if (cb.checked || cb.getAttribute('aria-checked') === 'true'
-                        || cb.getAttribute('data-state') === 'checked') continue;
-                    const r = cb.getBoundingClientRect();
-                    if (!r || r.width < 5 || r.height < 5) continue;
-                    out.push({ x: r.x + r.width / 2, y: r.y + r.height / 2 });
-                }
-                return out;
-            }""")
-        except Exception:
-            candidates = []
-        for c in (candidates or []):
+        clicked = 0
+        seen = set()
+        for _guard in range(8):  # bounded; one new distinct box per pass
             try:
-                await self._page.mouse.click(c["x"], c["y"])
-                await asyncio.sleep(0.25)
+                target = await self._page.evaluate("""() => {
+                    const els = document.querySelectorAll(
+                        'input[type="checkbox"], [role="checkbox"], .checkbox, [class*="checkbox"]');
+                    for (const cb of els) {
+                        if (cb.checked || cb.getAttribute('aria-checked') === 'true'
+                            || cb.getAttribute('data-state') === 'checked') continue;
+                        cb.scrollIntoView({ block: 'center' });
+                        const r = cb.getBoundingClientRect();
+                        if (!r || r.width < 5 || r.height < 5) continue;
+                        return {
+                            x: r.x + r.width / 2,
+                            y: r.y + r.height / 2,
+                            cx: Math.round(r.x),
+                            cy: Math.round(r.y)
+                        };
+                    }
+                    return null;
+                }""")
+            except Exception:
+                target = None
+            if not target:
+                break
+            key = (target["cx"], target["cy"])
+            if key in seen:
+                # Only the same visual box remains — every distinct box got
+                # its one click; do not re-click (toggle-back).
+                break
+            seen.add(key)
+            try:
+                await self._page.mouse.click(target["x"], target["y"])
+                clicked += 1
+                await asyncio.sleep(0.3)
             except Exception:
                 pass
+        verified = 0
         try:
-            n = await self._page.evaluate("""() => document.querySelectorAll(
-                'input[type="checkbox"]:checked, [role="checkbox"][aria-checked="true"], [role="checkbox"][data-state="checked"]').length""")
+            verified = int(await self._page.evaluate("""() => document.querySelectorAll(
+                'input[type="checkbox"]:checked, [role="checkbox"][aria-checked="true"], [role="checkbox"][data-state="checked"]').length""") or 0)
         except Exception:
-            n = 0
-        self._log(f"[Form] ToS checkboxes: clicked {len(candidates or [])}, verified {n}")
-        return int(n or 0)
+            pass
+        continue_enabled = False
+        try:
+            continue_enabled = bool(await self._page.evaluate("""() => {
+                for (const b of document.querySelectorAll('button')) {
+                    const t = (b.textContent || '').toLowerCase();
+                    if (!(t.includes('continue') || t.includes('create account'))) continue;
+                    if (b.disabled || b.getAttribute('aria-disabled') === 'true') continue;
+                    return true;
+                }
+                return false;
+            }"""))
+        except Exception:
+            pass
+        self._log(f"[Form] ToS checkboxes: clicked {clicked}, verified {verified}, continue_enabled={continue_enabled}")
+        if verified > 0 or continue_enabled:
+            return max(verified, 1)
+        return 0
 
     async def _fill_missing_fields(self, display_name: str) -> None:
         """Real-keystroke fallback for fields the JS fill didn't keep."""
