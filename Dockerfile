@@ -10,7 +10,7 @@ RUN apt-get update && apt-get install -y \
     libasound2 libcairo2 libpango-1.0-0 libgtk-3-0 libgtk-4-1 \
     libexpat1 libx11-6 libxcb1 libxext6 libvulkan1 libu2f-udev \
     ca-certificates fonts-liberation libatspi2.0-0 \
-    libcurl4 libcurl3-gnutls xdg-utils tor \
+    libcurl4 libcurl3-gnutls xdg-utils tor unzip \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Python dependencies
