@@ -1198,18 +1198,26 @@ class DiscordAutomation:
     async def _widget_rendered(self, iframe) -> bool:
         """True only when the hCaptcha widget iframe has actually painted.
 
-        Same honesty rule as _challenge_rendered: a visible-size iframe with a
-        still-loading document must not count as rendered. Accept the checkbox
-        being interactive, or any visible text content inside the frame.
+        Uses hCaptcha's own readiness signal: the widget body is marked
+        aria-hidden="true" until its JS has finished rendering the UI — a
+        still-hidden body is NOT ready, no matter what's in it. On top of
+        that, a checkbox-like element must be genuinely laid out at real
+        size (painted + interactive) — never a sized-but-blank frame.
         """
         return await self._frame_js_ready(iframe, """() => {
-            // The checkbox being laid out at real size means it is painted
-            // and interactive — that IS the honest bar, and it avoids
-            // waiting on a readyState that may never flip.
-            const cb = document.getElementById('checkbox');
-            if (cb && cb.offsetHeight > 0 && cb.offsetWidth > 0) return true;
+            const body = document.body;
+            if (body && body.getAttribute('aria-hidden') === 'true') return false;
+            const sels = ['#checkbox', '[role="checkbox"]', '.button-submit',
+                          'input[type="checkbox"]', '[aria-checked]'];
+            for (const sel of sels) {
+                const el = document.querySelector(sel);
+                if (el && el.offsetParent !== null) {
+                    const r = el.getBoundingClientRect();
+                    if (r && r.width > 0 && r.height > 0) return true;
+                }
+            }
             if (document.readyState !== 'complete') return false;
-            const t = (document.body && document.body.innerText) || '';
+            const t = (body && body.innerText) || '';
             return t.trim().length >= 3;
         }""")
 
@@ -1236,12 +1244,14 @@ class DiscordAutomation:
         # Inspect what's actually inside the widget frame (ALL LOGS only).
         try:
             probe = await frame.evaluate("""() => {
-                const hasCheckbox = !!document.getElementById('checkbox');
-                const roleCheckbox = !!document.querySelector('[role="checkbox"]');
-                const buttonSubmit = !!document.querySelector('.button-submit');
-                const t = (document.body && document.body.innerText || '').slice(0, 80);
+                const body = document.body;
+                const anyCheckbox = !!document.querySelector(
+                    '#checkbox, [role="checkbox"], .button-submit, input[type="checkbox"], [aria-checked]');
+                const t = (body && body.innerText || '').slice(0, 80);
                 return JSON.stringify({
-                    hasCheckbox, roleCheckbox, buttonSubmit,
+                    ariaHidden: body ? body.getAttribute('aria-hidden') : null,
+                    children: body ? body.children.length : -1,
+                    anyCheckbox,
                     readyState: document.readyState,
                     text: t.replace(/\s+/g, ' ').trim()
                 });
@@ -1253,6 +1263,8 @@ class DiscordAutomation:
         # Strategy 1: real mouse click (human-paced) on the checkbox
         for selector, label in (("#checkbox", "#checkbox"),
                                 ("[role='checkbox']", "[role=checkbox]"),
+                                ("input[type='checkbox']", "input[type=checkbox]"),
+                                ("[aria-checked]", "[aria-checked]"),
                                 (".button-submit", ".button-submit")):
             try:
                 loc = frame.locator(selector).first
@@ -1271,6 +1283,8 @@ class DiscordAutomation:
             clicked = await frame.evaluate("""() => {
                 const el = document.getElementById('checkbox')
                       || document.querySelector('[role="checkbox"]')
+                      || document.querySelector('input[type="checkbox"]')
+                      || document.querySelector('[aria-checked]')
                       || document.querySelector('.button-submit');
                 if (!el) return false;
                 const rect = el.getBoundingClientRect();
@@ -1322,12 +1336,31 @@ class DiscordAutomation:
                     state = await f.evaluate("document.readyState")
                 except Exception:
                     state = "?"
+                # Per-iframe probe: aria-hidden + checkbox presence. The body
+                # is mostly a giant minified loader script, so also dump the
+                # TAIL of the body where the actual UI renders.
+                try:
+                    info = await f.evaluate("""() => {
+                        const b = document.body;
+                        const cb = document.querySelector(
+                            '#checkbox, [role="checkbox"], .button-submit, input[type="checkbox"], [aria-checked]');
+                        return JSON.stringify({
+                            ariaHidden: b ? b.getAttribute('aria-hidden') : null,
+                            children: b ? b.children.length : -1,
+                            checkbox: !!cb,
+                            readyState: document.readyState
+                        });
+                    }""")
+                    self._log(f"[DOM] iframe probe {f.url[:70]}: {info}", level="debug")
+                except Exception:
+                    pass
                 try:
                     fhtml = await f.evaluate(
-                        "() => (document.body ? document.body.outerHTML : '').slice(0, 1500)")
+                        "() => { const b = document.body || document.documentElement;"
+                        " const h = b.outerHTML || ''; return h.slice(-1500); }")
                 except Exception as e:
                     fhtml = f"<dump failed: {e}>"
-                self._log(f"[DOM] iframe {f.url[:100]} readyState={state}:\n{fhtml}",
+                self._log(f"[DOM] iframe {f.url[:100]} readyState={state} (tail):\n{fhtml}",
                           level="debug")
         except Exception as e:
             self._log(f"[DOM] iframe dump failed: {e}", level="debug")
@@ -1494,27 +1527,32 @@ class DiscordAutomation:
                 except Exception:
                     pass
 
-                # 2) Widget present → verify it ACTUALLY rendered, then
-                #    auto-click the checkbox (user request) so hCaptcha spawns
-                #    its challenge. After the click, the loop's challenge check
-                #    catches the spawned challenge iframe (5s budget); if no
-                #    challenge ever appears, fall back to handing the widget
-                #    over so the solver forces the accessibility challenge via
-                #    the 3-dots menu.
+                # 2) Widget present → scan EVERY hCaptcha iframe. Discord
+                #    mounts several (a hidden aria-hidden frame plus the real
+                #    widget), and widget.first is not always the visible one.
+                #    Find the first genuinely-rendered frame, auto-click its
+                #    checkbox (user request) so hCaptcha spawns the challenge.
                 try:
-                    widget = self._page.locator('iframe[src*="newassets.hcaptcha.com"]')
-                    if await widget.count() > 0:
+                    widgets = self._page.locator('iframe[src*="newassets.hcaptcha.com"]')
+                    wcount = await widgets.count()
+                    if wcount > 0:
                         if widget_since is None:
                             widget_since = time.time()
-                            self._log("[Captcha] hCaptcha widget present — waiting for it to initialize...")
+                            self._log(f"[Captcha] hCaptcha widget present ({wcount} iframes) — waiting for it to initialize...")
                         # Checkbox-only pass: token already present, no
                         # challenge needed.
                         if await read_hcaptcha_token(self._page):
                             self._log("[Captcha] [OK] hCaptcha already solved (token present)")
                             return True
-                        if await self._widget_rendered(widget.first):
+                        rendered_widget = None
+                        for wi in range(wcount):
+                            w = widgets.nth(wi)
+                            if await self._widget_rendered(w):
+                                rendered_widget = w
+                                break
+                        if rendered_widget is not None:
                             if not checkbox_clicked:
-                                if await self._click_hcaptcha_checkbox(widget.first):
+                                if await self._click_hcaptcha_checkbox(rendered_widget):
                                     checkbox_clicked = True
                                     checkbox_clicked_at = time.time()
                                     self._log("[Captcha] Checkbox clicked — waiting for challenge to spawn...")
@@ -1523,7 +1561,7 @@ class DiscordAutomation:
                                 # after the click — the next loop iteration
                                 # (0.25s) catches the painted challenge iframe.
                                 continue
-                            iframe = widget.first
+                            iframe = rendered_widget
                             self._log("[Captcha] [READY] hCaptcha widget rendered — opening accessibility challenge")
                             break
                 except Exception:
