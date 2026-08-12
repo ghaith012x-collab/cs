@@ -2104,17 +2104,13 @@ class DiscordAutomation:
             except Exception:
                 pass
 
-            # ── REAL ToS click — React-verified, retried until it sticks ──
-            # The JS fill's forged checkbox state gets wiped by React / the
-            # DOB re-render; without a genuinely checked ToS, "Continue" stays
-            # disabled and the run can fall through to the login link. Click
-            # with real mouse events and confirm before submitting.
-            for _t in range(3):
-                n = await self._click_tos_checkboxes()
-                if n > 0:
-                    self._log("[Form] ToS checkbox(es) verified checked")
-                    break
-                await asyncio.sleep(0.6)
+            # ── REAL ToS click — ONE pass, exactly one click per box ──
+            # Without a genuinely checked ToS, "Continue" stays disabled and
+            # the run can fall through to the login link. Real mouse clicks,
+            # once per checkbox — never re-click (that toggles it back off).
+            n = await self._click_tos_checkboxes()
+            if n > 0:
+                self._log("[Form] ToS checkbox(es) verified checked")
 
             # ── Create Account Button — try multiple strategies ────────
             # Humanization: pause to review the filled form before submitting.
@@ -2285,47 +2281,43 @@ class DiscordAutomation:
         "Continue" disabled (which is how a run ends up clicking "Already
         have an account?"). Real Playwright mouse clicks at each
         checkbox's center generate trusted input React actually processes.
-        Only unchecked boxes are clicked, so retries never uncheck one
-        that already stuck.
+
+        SINGLE pass, no retry loop: re-clicking a checkbox that React
+        already committed toggles it back OFF. The finder only collects
+        unchecked boxes, so each one is clicked exactly once.
         """
-        for _attempt in range(3):
+        try:
+            candidates = await self._page.evaluate("""() => {
+                const out = [];
+                const seen = new Set();
+                const els = document.querySelectorAll(
+                    'input[type="checkbox"], [role="checkbox"], [class*="checkbox"]');
+                for (const cb of els) {
+                    if (seen.has(cb)) continue;
+                    seen.add(cb);
+                    if (cb.checked || cb.getAttribute('aria-checked') === 'true'
+                        || cb.getAttribute('data-state') === 'checked') continue;
+                    const r = cb.getBoundingClientRect();
+                    if (!r || r.width < 5 || r.height < 5) continue;
+                    out.push({ x: r.x + r.width / 2, y: r.y + r.height / 2 });
+                }
+                return out;
+            }""")
+        except Exception:
+            candidates = []
+        for c in (candidates or []):
             try:
-                candidates = await self._page.evaluate("""() => {
-                    const out = [];
-                    const seen = new Set();
-                    const els = document.querySelectorAll(
-                        'input[type="checkbox"], [role="checkbox"], [class*="checkbox"]');
-                    for (const cb of els) {
-                        if (seen.has(cb)) continue;
-                        seen.add(cb);
-                        if (cb.checked || cb.getAttribute('aria-checked') === 'true'
-                            || cb.getAttribute('data-state') === 'checked') continue;
-                        const r = cb.getBoundingClientRect();
-                        if (!r || r.width < 5 || r.height < 5) continue;
-                        out.push({ x: r.x + r.width / 2, y: r.y + r.height / 2 });
-                    }
-                    return out;
-                }""")
+                await self._page.mouse.click(c["x"], c["y"])
+                await asyncio.sleep(0.25)
             except Exception:
-                candidates = []
-            clicked = 0
-            for c in (candidates or []):
-                try:
-                    await self._page.mouse.click(c["x"], c["y"])
-                    clicked += 1
-                    await asyncio.sleep(0.2)
-                except Exception:
-                    pass
-            try:
-                n = await self._page.evaluate("""() => document.querySelectorAll(
-                    'input[type="checkbox"]:checked, [role="checkbox"][aria-checked="true"], [role="checkbox"][data-state="checked"]').length""")
-            except Exception:
-                n = 0
-            self._log(f"[Form] ToS checkboxes: clicked {clicked}, verified {n}")
-            if int(n or 0) > 0:
-                return int(n or 0)
-            await asyncio.sleep(0.5)
-        return 0
+                pass
+        try:
+            n = await self._page.evaluate("""() => document.querySelectorAll(
+                'input[type="checkbox"]:checked, [role="checkbox"][aria-checked="true"], [role="checkbox"][data-state="checked"]').length""")
+        except Exception:
+            n = 0
+        self._log(f"[Form] ToS checkboxes: clicked {len(candidates or [])}, verified {n}")
+        return int(n or 0)
 
     async def _fill_missing_fields(self, display_name: str) -> None:
         """Real-keystroke fallback for fields the JS fill didn't keep."""
