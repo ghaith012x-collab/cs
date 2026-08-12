@@ -119,7 +119,7 @@ USER_AGENTS = [
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36',
 ]
 
-PAST_CAPTCHA_KEYWORDS = ['/channels', '/verify', '/welcome', '/login', '@me', 'discord.com/app']
+PAST_CAPTCHA_KEYWORDS = ['/channels', '/verify', '/welcome', '@me', 'discord.com/app']
 
 _BIO_POOL = [
     "just vibing",
@@ -1428,6 +1428,8 @@ class DiscordAutomation:
                 for (const btn of btns) {
                     if (btn.offsetParent === null) continue;
                     const t = btn.textContent.toLowerCase().trim();
+                    // Never the "Already have an account?" / back-to-login link
+                    if (/already have an account|log in|login|sign in|back to|forgot/.test(t)) continue;
                     if (t.includes('create account') || t.includes('continue') || t.includes('sign up')) {
                         btn.scrollIntoView({block: 'center'});
                         btn.click();
@@ -1435,9 +1437,12 @@ class DiscordAutomation:
                     }
                 }
                 const submit = document.querySelector('[type="submit"]');
-                if (submit && submit.offsetParent !== null) {
-                    submit.click();
-                    return 'submit_btn';
+                if (submit && submit.offsetParent !== null && submit.closest('form')) {
+                    const st = (submit.textContent || '').toLowerCase().trim();
+                    if (!/already have an account|log in|login|sign in|back to|forgot/.test(st)) {
+                        submit.click();
+                        return 'submit_btn';
+                    }
                 }
                 const form = document.querySelector('form');
                 if (form) {
