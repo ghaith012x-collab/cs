@@ -232,7 +232,10 @@ class DiscordAutomation:
         # surfaced in the worker's per-attempt summary so every failure is
         # self-explanatory ("TOR circuit blocked: page unresponsive after 9s").
         self._nav_error: str = ""
-        self._fingerprint = generate_fingerprint(worker_id)
+        # ShardX owns the whole identity — every launch mints a fresh,
+        # engine-randomized profile. The bot-side fingerprint only exists
+        # for legacy engines.
+        self._fingerprint = {} if ENGINE == "shardx" else generate_fingerprint(worker_id)
 
     def _log(self, message: str, level: str = "info") -> None:
         tagged = f"[{self.worker_id}] {message}"
@@ -250,15 +253,17 @@ class DiscordAutomation:
     def get_activity_log(self) -> list:
         return self._activity_log
 
-    def _clearcote_launch_opts(self) -> dict:
-        """Map the current fingerprint onto Clearcote persona options.
+    def _launch_opts(self) -> dict:
+        """Engine launch options.
 
-        fingerprint = the session seed — the identity root. rotate_fingerprint()
-        mints a fresh seed per new proxy session, so the engine derives one
-        coherent machine (UA, GPU, fonts, canvas, TLS) per session and a new,
-        unlinkable one when we rotate. platform follows the fingerprint's UA;
-        timezone/accept_language come from the same fingerprint so the bot's
-        chosen locale stays in charge (explicit values win over the persona)."""
+        shardx: {} — ShardX owns ALL stealth. Every launch mints a fresh
+        profile from its fingerprint library (TLS ClientHello / JA4, UA +
+        Client Hints, WebGL / WebGPU, fonts, WebRTC, headless markers), so no
+        identity override (UA, platform, timezone, locale) is passed from the
+        bot — each session gets a fully engine-randomized identity.
+        Legacy engines: map the bot-side fingerprint onto persona options."""
+        if ENGINE == "shardx":
+            return {}
         opts: dict = {
             "fingerprint": self._fingerprint.get("seed") or int(time.time() * 1000)
         }
@@ -310,7 +315,7 @@ class DiscordAutomation:
         args = launch_args(headless=self.headless)
         self._browser = await self._playwright.chromium.launch(
             headless=self.headless, args=args, proxy=self._launch_proxy(),
-            **self._clearcote_launch_opts())
+            **self._launch_opts())
         await self._build_context()
 
     _PROXY_IP_CACHE: dict = {}
@@ -358,11 +363,18 @@ class DiscordAutomation:
         args = launch_args(headless=self.headless)
         self._log(f"[Engine] {ENGINE} launch args: {len(args)}")
 
-        self._ua = random.choice(USER_AGENTS)
-        self._fingerprint = generate_fingerprint(self.worker_id)
-        # Keep the fingerprint's UA in sync with the one we actually use.
-        self._ua = self._fingerprint.get("ua") or self._ua
-        self._log(f"Fingerprint: font={self._fingerprint['font']}, gpu={self._fingerprint['webgl_renderer'][:40]}..., dpr={self._fingerprint['pixel_ratio']}")
+        if ENGINE == "shardx":
+            # Engine-level identity: ShardX mints a fresh randomized profile
+            # per launch — no bot-side UA / font / GPU / locale selection.
+            self._ua = ""
+            self._fingerprint = {}
+            self._log("[Fingerprint] Identity owned by ShardX engine — fresh randomized profile per launch")
+        else:
+            self._ua = random.choice(USER_AGENTS)
+            self._fingerprint = generate_fingerprint(self.worker_id)
+            # Keep the fingerprint's UA in sync with the one we actually use.
+            self._ua = self._fingerprint.get("ua") or self._ua
+            self._log(f"Fingerprint: font={self._fingerprint['font']}, gpu={self._fingerprint['webgl_renderer'][:40]}..., dpr={self._fingerprint['pixel_ratio']}")
 
         # Launch the browser WITH the proxy. The engine applies it as a
         # --proxy-server launch arg — a proxy passed later to new_context()
@@ -373,7 +385,7 @@ class DiscordAutomation:
             self._tor_enabled = True
         self._browser = await self._playwright.chromium.launch(
             headless=self.headless, args=args, proxy=launch_proxy,
-            **self._clearcote_launch_opts())
+            **self._launch_opts())
 
         # Standard desktop viewport (1920x1080) — most common real resolution
         await self._build_context()
@@ -410,7 +422,10 @@ class DiscordAutomation:
             raise RuntimeError("TOR not available - TOR-only mode requires TOR on 127.0.0.1:9050")
 
         self._context = await self._browser.new_context(**ctx_opts)
-        self._log(f"User-Agent: {self._ua[:60]}...")
+        if self._ua:
+            self._log(f"User-Agent: {self._ua[:60]}...")
+        else:
+            self._log("[Fingerprint] User-Agent: engine-owned (ShardX profile)")
         await self._context.add_init_script(
             build_init_script(self._fingerprint, self._ua)
         )
@@ -468,7 +483,17 @@ class DiscordAutomation:
             return False
 
     def rotate_fingerprint(self) -> None:
-        """Regenerate fingerprint + UA for a brand-new browser identity."""
+        """Rotate to a brand-new browser identity.
+
+        shardx: the engine mints a fresh randomized profile on EVERY launch,
+        so the next relaunch (new proxy session) is automatically a new,
+        unlinkable identity — nothing to rotate here.
+        Legacy engines: regenerate fingerprint + UA."""
+        if ENGINE == "shardx":
+            self._fingerprint = {}
+            self._ua = ""
+            self._log("[Fingerprint] Rotated: fresh ShardX profile on next launch (engine-owned identity)")
+            return
         try:
             self._fingerprint = generate_fingerprint(self.worker_id)
             self._ua = self._fingerprint.get("ua") or self._ua
@@ -523,10 +548,11 @@ class DiscordAutomation:
         circuit is pointless — if Discord blocked that exit node, it won't
         unblock on retry."""
         url = "https://discord.com/register"
-        # 6s cap: a working residential session renders Discord's register in a
-        # few seconds, and the form-poll below waits for the SPA anyway. A dead
-        # session burns 6s instead of 8-30s, so the proxy sweep rotates fast.
-        timeout_ms = 6000
+        # 15s cap: residential vaultproxies sessions commonly take 5-10s just
+        # to reach DOMContentLoaded (verified live: ~5-6s typical, 6s+ common),
+        # so a 6s cap rotated away perfectly healthy sessions. The form-poll
+        # below is the real render gate; this only needs to land the shell.
+        timeout_ms = 15000
 
         self._log(f"[Nav] Navigating to {url} (timeout={timeout_ms}ms)...")
         t0 = time.time()
@@ -636,17 +662,18 @@ class DiscordAutomation:
         # ── Poll for form elements ──
         # Discord uses aria-label on inputs, not name/id — use broad selectors.
         #
-        # TOR budget is long ON PURPOSE: the Discord shell arrives fast (title +
-        # #app-mount) but React needs ~200 JS bundles that Cloudflare gates
-        # behind its managed challenge (/cdn-cgi/challenge-platform) for flagged
-        # IPs, and every asset costs 1-3s per TOR round trip. Both paths take
-        # 20-40s — well past the old 15s poll. So: give TOR the full budget,
-        # watch for the cf_clearance cookie (challenge passed → form follows),
-        # and only rotate when the budget is exhausted. Residential sessions
-        # keep the fast-fail behavior: a live session boots in 1-3s, so 8s of
-        # blankness there is a genuinely dead node.
-        challenge_budget = 40.0 if not self.proxy else 15.0
-        blank_bail = 8.0 if self.proxy else challenge_budget - 4.0
+        # Budget is long ON PURPOSE: the Discord shell arrives fast (title +
+        # #app-mount) but React needs ~200 JS bundles, and through a proxy the
+        # asset delivery is slow — VERIFIED LIVE: a healthy residential session
+        # renders the register form only after ~30s of blank shell (no Cloudflare
+        # challenge involved; the bundles just trickle in). TOR is the same or
+        # slower. So: give both paths a patient budget, watch for the
+        # cf_clearance cookie (challenge passed → form follows) and the form
+        # selectors, and only rotate when the budget is exhausted. Dead sessions
+        # are filtered earlier by the pre-launch probe, so the longer wait only
+        # costs time on sessions that are already proven reachable.
+        challenge_budget = 50.0 if self.proxy else 40.0
+        blank_bail = 34.0 if self.proxy else challenge_budget - 4.0
         self._log(f"[Nav] Waiting for registration form to render (budget={challenge_budget:.0f}s, blank_bail={blank_bail:.0f}s)...")
         blank_since = None       # when the page first looked blank
         login_clicked = False    # already clicked the Register link once
@@ -705,10 +732,11 @@ class DiscordAutomation:
                     self._log(f"[Nav] Age gate detected after {int(elapsed)}s - returning true, form filler handles it")
                     return True
 
-                # BLANK RENDER fast-fail — SPA shell mounted but React painted
-                # nothing (0 inputs, 0 buttons, empty text). Residential
-                # sessions boot Discord in 1-3s, so 10s of sustained blankness
-                # is a genuinely dead/rate-limited node, not a slow boot.
+                # BLANK RENDER bail — SPA shell mounted but React painted
+                # nothing (0 inputs, 0 buttons, empty text). VERIFIED LIVE:
+                # healthy residential sessions stay blank 20-30s while Discord
+                # serves its JS bundles, so only bail after blank_bail seconds
+                # (dead sessions are already filtered by the pre-launch probe).
                 if (state.get("hasAppMount") and not state.get("inputCount")
                         and not state.get("buttonCount")
                         and not (state.get("textPreview") or "").strip()):
