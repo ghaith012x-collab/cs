@@ -17,10 +17,10 @@ RUN apt-get update && apt-get install -y \
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Pre-fetch the ShardX anti-detect engine (patched Chromium 149) + fingerprint
-# library into the image cache so first launch is zero-network. Requires the
-# Chromium system libraries installed above.
-RUN python -c "from shardx import ShardX; ShardX().runtime.install()" && echo 'ShardX engine pre-fetched'
+# Pre-fetch + verify the Clearcote stealth Chromium binary into the image cache
+# (the truedriver driver launches this binary; fingerprint personas are
+# engine-level, derived from a per-session seed).
+RUN python -c "from clearcote import executable_path; print('Clearcote binary:', executable_path(quiet=True))"
 
 # Copy ALL application files
 COPY *.py ./

@@ -1,21 +1,21 @@
 """
-browser_engine.py — ShardX anti-detect browser (ProxyShard, "ShardBrowser").
+browser_engine.py — Clearcote stealth Chromium, driven by the truedriver CDP driver.
 
-Single engine, no fallback. ShardX is a patched Chromium 149 that spoofs the
-whole identity inside the C++ engine — TLS ClientHello / JA4, WebGL / WebGPU,
-Client Hints, fonts, WebRTC, QUIC over SOCKS5 — driven over CDP by patchright
-(stealth Playwright). shardx_engine.py keeps the Playwright-compatible
-``async_playwright`` contract the bot's workers, solver and mail client use.
+Single engine, no fallback. Clearcote's de-Googled Chromium ships engine-level
+fingerprint personas (C++ getters, coherent TLS/JA3, per-seed personas);
+truedriver_engine.py drives that binary over pure CDP through a
+Playwright-compatible API — no Playwright driver involved.
 
-Each session gets a fresh, randomized profile with an isolated user-data-dir
-and runs with --incognito; the profile is deleted on close so no identity or
-cookie state ever carries between accounts.
+Stealth model (same as the ShardX era): the engine owns the whole identity.
+Each launch passes a fresh random fingerprint seed, so the C++ layer mints a
+new, unlinkable persona per session — UA + Client Hints, WebGL/WebGPU, fonts,
+canvas, TLS. The bot only pins the UI locale (en-US) on top so Discord
+renders in English.
 
-Set SHARDX_CACHE_DIR to relocate the engine/fingerprint/profiles cache.
-Requires the standard Chromium system libraries (the Dockerfile installs them).
+Set CLEARCOTE_BINARY to override the Clearcote browser binary location.
 """
 
-from shardx_engine import async_playwright, ENGINE
+from truedriver_engine import async_playwright, ENGINE
 
 CHANNEL = None
 

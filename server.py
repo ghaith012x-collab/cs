@@ -232,10 +232,15 @@ class DiscordAutomation:
         # surfaced in the worker's per-attempt summary so every failure is
         # self-explanatory ("TOR circuit blocked: page unresponsive after 9s").
         self._nav_error: str = ""
-        # ShardX owns the whole identity — every launch mints a fresh,
-        # engine-randomized profile. The bot-side fingerprint only exists
-        # for legacy engines.
-        self._fingerprint = {} if ENGINE == "shardx" else generate_fingerprint(worker_id)
+        # Engine-owned identity: Clearcote / ShardX mint a fresh persona per
+        # launch from a seed — the bot-side fingerprint only exists for
+        # legacy engines.
+        if ENGINE == "shardx":
+            self._fingerprint = {}
+        elif ENGINE == "clearcote":
+            self._fingerprint = {"seed": self._fresh_seed()}
+        else:
+            self._fingerprint = generate_fingerprint(worker_id)
 
     def _log(self, message: str, level: str = "info") -> None:
         tagged = f"[{self.worker_id}] {message}"
@@ -253,17 +258,32 @@ class DiscordAutomation:
     def get_activity_log(self) -> list:
         return self._activity_log
 
+    def _fresh_seed(self) -> str:
+        """A fresh Clearcote persona seed — one seed = one coherent machine
+        identity minted by the engine's C++ layer. New seed per launch means
+        a new, unlinkable persona per session (same model ShardX had)."""
+        return f"cc-{os.getpid()}-{random.getrandbits(64):016x}"
+
     def _launch_opts(self) -> dict:
         """Engine launch options.
 
-        shardx: {} — ShardX owns ALL stealth. Every launch mints a fresh
-        profile from its fingerprint library (TLS ClientHello / JA4, UA +
-        Client Hints, WebGL / WebGPU, fonts, WebRTC, headless markers), so no
-        identity override (UA, platform, timezone, locale) is passed from the
-        bot — each session gets a fully engine-randomized identity.
+        clearcote: the engine owns ALL stealth — one fingerprint seed → one
+        coherent persona (UA + Client Hints, WebGL/WebGPU, fonts, canvas,
+        TLS) minted in the binary. We only pass a fresh random seed (so every
+        launch is a new identity) and pin the UI to English.
+        shardx: {} — ShardX mints its own randomized profile per launch.
         Legacy engines: map the bot-side fingerprint onto persona options."""
         if ENGINE == "shardx":
             return {}
+        if ENGINE == "clearcote":
+            return {
+                "fingerprint": self._fingerprint.get("seed") or self._fresh_seed(),
+                # Plain English UI: Discord follows Accept-Language. The
+                # engine's persona derives its own locale from the seed, so
+                # pin en-US here (language is a product choice, not
+                # fingerprinting — the engine still owns TLS/UA/WebGL/fonts).
+                "accept_language": "en-US,en;q=0.9",
+            }
         opts: dict = {
             "fingerprint": self._fingerprint.get("seed") or int(time.time() * 1000)
         }
@@ -363,12 +383,17 @@ class DiscordAutomation:
         args = launch_args(headless=self.headless)
         self._log(f"[Engine] {ENGINE} launch args: {len(args)}")
 
-        if ENGINE == "shardx":
-            # Engine-level identity: ShardX mints a fresh randomized profile
-            # per launch — no bot-side UA / font / GPU / locale selection.
+        if ENGINE in ("clearcote", "shardx"):
+            # Engine-level identity: a fresh seed per launch mints a fresh
+            # persona in the engine — no bot-side UA / font / GPU / locale
+            # selection.
             self._ua = ""
-            self._fingerprint = {}
-            self._log("[Fingerprint] Identity owned by ShardX engine — fresh randomized profile per launch")
+            if ENGINE == "clearcote":
+                self._fingerprint = {"seed": self._fresh_seed()}
+                self._log("[Fingerprint] Identity owned by Clearcote engine — fresh persona per launch (seed {})".format(self._fingerprint["seed"][:16]))
+            else:
+                self._fingerprint = {}
+                self._log("[Fingerprint] Identity owned by ShardX engine — fresh randomized profile per launch")
         else:
             self._ua = random.choice(USER_AGENTS)
             self._fingerprint = generate_fingerprint(self.worker_id)
@@ -425,7 +450,7 @@ class DiscordAutomation:
         if self._ua:
             self._log(f"User-Agent: {self._ua[:60]}...")
         else:
-            self._log("[Fingerprint] User-Agent: engine-owned (ShardX profile)")
+            self._log("[Fingerprint] User-Agent: engine-owned identity")
         await self._context.add_init_script(
             build_init_script(self._fingerprint, self._ua)
         )
@@ -485,10 +510,16 @@ class DiscordAutomation:
     def rotate_fingerprint(self) -> None:
         """Rotate to a brand-new browser identity.
 
-        shardx: the engine mints a fresh randomized profile on EVERY launch,
-        so the next relaunch (new proxy session) is automatically a new,
-        unlinkable identity — nothing to rotate here.
+        clearcote / shardx: the engine mints a fresh persona on EVERY
+        launch, so the next relaunch (new proxy session) is automatically a
+        new, unlinkable identity — for clearcote that just means a fresh
+        seed.
         Legacy engines: regenerate fingerprint + UA."""
+        if ENGINE == "clearcote":
+            self._fingerprint = {"seed": self._fresh_seed()}
+            self._ua = ""
+            self._log("[Fingerprint] Rotated: fresh Clearcote persona on next launch (engine-owned identity)")
+            return
         if ENGINE == "shardx":
             self._fingerprint = {}
             self._ua = ""

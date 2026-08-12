@@ -18,15 +18,15 @@ beautifulsoup4>=4.12.0
 lxml>=5.0.0
 
 # Existing project deps
-# Stealth engine: ShardX anti-detect browser (patched Chromium 149, engine-level
-# TLS/JA4 + WebGL/WebGPU + Client-Hints + font spoofing), driven over CDP by
-# patchright (stealth Playwright). The engine binary + fingerprint library
-# auto-download on first use (Dockerfile pre-fetches them at build time).
-shardx>=0.1.11
-patchright>=1.60.0
-# Legacy drivers (kept for git history / one-off scripts):
-# truedriver>=0.1.5
-# clearcote>=0.25.0
+# Stealth engine: truedriver driver + Clearcote browser (engine-level
+# fingerprints — one seed per session mints one coherent persona in the
+# binary's C++ layer: TLS/JA3, WebGL/WebGPU, Client Hints, fonts).
+# NOTE: truedriver PyPI package version is 0.1.5 (fork of zendriver 0.13.x).
+truedriver>=0.1.5
+clearcote>=0.25.0
+# Legacy engines (kept for git history / one-off scripts):
+# shardx>=0.1.11
+# patchright>=1.60.0
 Pillow>=10.0.0
 asyncpg>=0.29.0
 flask>=3.0.0
