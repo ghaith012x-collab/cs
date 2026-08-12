@@ -54,28 +54,18 @@ WORKER_IDS = [f"B{i+1}" for i in range(WORKER_COUNT)]
 
 _config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
 
-# Discord-friendly duckmail.sbs mail domains (from their public /api/domains:
-# discord:true and status:active). Shown as the selectable database in the
-# dashboard domain picker. mikerossy.com is the locked default.
-# Domains that already triggered Discord phone verification are removed here
-# (mikerossy.com, blobers.it.com, vibify.cc, vibeify.cc). The worker also
-# burns a domain at runtime when a signup ends in phone verification, so it is
-# never reused. duckmail.sbs is the primary mail source; this list is
-# the discord-friendly domain pool.
-CYBERTEMP_DISCORD_DOMAINS = [
-    "andrewslife.tattoo",
-    "dianeplumber.mom",
-    "mikethe.guru",
-    "philipsllc.lol",
-    "turkinster.us",
-]
+# duckmail.sbs delivers inboxes on the Discord-friendly domain
+# @glasswhitehub.com. Extra inbox domains can be listed in config
+# (mail_domains); a domain is burned at runtime when a signup ends in phone
+# verification so it is never reused.
+DEFAULT_MAIL_DOMAIN = "glasswhitehub.com"
 
 DEFAULT_CONFIG = {
     "headless": True,
     "web_port": 8080,
     "camera_interval": 3,
     "worker_count": WORKER_COUNT,
-    "mail_domains": ["andrewslife.tattoo"],
+    "mail_domains": ["glasswhitehub.com"],
     "custom_email": "",
 }
 
@@ -149,17 +139,17 @@ def _burn_domain(domain: str) -> None:
 
 
 def _pick_domain(cfg: dict) -> str:
-    """Pick a fresh, non-burned domain from the configured list (falls back to
-    the full discord-friendly pool)."""
+    """Pick a fresh, non-burned inbox domain from the configured list (falls
+    back to duckmail's default @glasswhitehub.com)."""
     pools = [
         [str(x).strip().lower() for x in (cfg.get("mail_domains") or []) if str(x).strip()],
-        list(CYBERTEMP_DISCORD_DOMAINS),
+        [DEFAULT_MAIL_DOMAIN],
     ]
     for pool in pools:
         fresh = [d for d in pool if d not in _BURNED_DOMAINS]
         if fresh:
             return random.choice(fresh)
-    return random.choice(pools[1] or ["glasswhitehub.com"])
+    return DEFAULT_MAIL_DOMAIN
 
 
 def _log(msg: str, level: str = "info"):
@@ -901,7 +891,8 @@ def handle_config():
         save_config(cfg)
         return jsonify({"ok": True, "config": cfg})
     cfg = load_config()
-    avail = [d for d in CYBERTEMP_DISCORD_DOMAINS if d not in _BURNED_DOMAINS]
+    avail = [d for d in cfg.get("mail_domains", [DEFAULT_MAIL_DOMAIN])
+             if d not in _BURNED_DOMAINS]
     return jsonify({"headless": cfg.get("headless", True),
                     "worker_count": cfg.get("worker_count", WORKER_COUNT),
                     "mail_domains": cfg.get("mail_domains", ["glasswhitehub.com"]),
@@ -1305,7 +1296,7 @@ function refreshStatus(){
     $('stLine').textContent = x.running ? ('running - '+running+'/'+(x.workers||[]).length+' browsers - '+Math.floor(x.uptime/60)+'m') : 'idle';
     // Show the email actually in use: the configured custom email wins;
     // otherwise fall back to the auto-generated @domain so the header never
-    // lies about "I set my own email but it shows a cybertemp domain".
+    // lies about "I set my own email but it shows a different domain".
     var dom=$('domLine');
     if(dom){
       if(x.custom_email){dom.textContent=x.custom_email;}
@@ -1322,7 +1313,7 @@ var FILTERS=['[Proxy]','Fingerprint','Discord site rendered','is in Discord and 
   'Inbox ready','Verification link found','Challenge iframe fully loaded','[Accessibility] [OK]',
   'solved:','Humanized','[Captcha] [READY]','[Captcha]','[FAIL]','[Form]','[Nav] Page:','[Nav] Navigating','[Nav] Poll','[Mail] No verification',
   'No verification link','No email available','DEAD','BLOCKED','rate limit','Starting worker',
-  '[Phone]','[Fingerprint]','Starting Discord signup','Using configured email','cybertemp.xyz','No email configured'];
+  '[Phone]','[Fingerprint]','Starting Discord signup','Using configured email','No email configured'];
 var showAll=false;
 var OKWORDS=['[ok]','confirmed','solved','ready','rendered','humanized','verification link found'];
 function refreshLogs(){
@@ -1511,13 +1502,13 @@ function copyBtn(btn){
 var DOMAINS=[], AVAIL=[];
 function loadConfig(){
   api('/config').then(function(r){return r.json();}).then(function(x){
-    AVAIL=(x.available_domains&&x.available_domains.length)?x.available_domains:['andrewslife.tattoo'];
-    DOMAINS=(x.mail_domains&&x.mail_domains.length)?x.mail_domains.slice():['andrewslife.tattoo'];
+    AVAIL=(x.available_domains&&x.available_domains.length)?x.available_domains:['glasswhitehub.com'];
+    DOMAINS=(x.mail_domains&&x.mail_domains.length)?x.mail_domains.slice():['glasswhitehub.com'];
     HEADLESS=x.headless!==false;
     $('swHeadless').classList.toggle('on',HEADLESS);
     if(x.custom_email&&$('inpEmail'))$('inpEmail').value=x.custom_email;
     renderDomains();
-  }).catch(function(){AVAIL=['andrewslife.tattoo'];DOMAINS=['andrewslife.tattoo'];renderDomains();});
+  }).catch(function(){AVAIL=['glasswhitehub.com'];DOMAINS=['glasswhitehub.com'];renderDomains();});
 }
 function renderDomains(){
   var html='';
