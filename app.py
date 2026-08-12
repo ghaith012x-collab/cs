@@ -41,7 +41,12 @@ PROXY_FORCE = (
     or _proxies_configured()
 )
 
-from server import DiscordAutomation
+# Fall back to TOR (socks5://127.0.0.1:9050) when the proxy pool is
+# exhausted or every session is dead (e.g. vaultproxies at 0.00 GB quota).
+# Disable with TOR_FALLBACK=0.
+TOR_FALLBACK = (os.environ.get("TOR_FALLBACK") or "").strip().lower() not in ("0", "false", "no", "off")
+
+from server import DiscordAutomation, _tor_check
 
 # ── Global state (Flask thread + asyncio thread) ──
 
@@ -257,6 +262,7 @@ async def _run_worker(wid: str, cfg: dict, proxy=None) -> None:
     bot = None
     consecutive_tunnel_fails = 0  # fast-fail after consecutive dead connections
     backoff = 0.3  # seconds between attempts; doubles after dead-session failures
+    tor_fallback = False  # flipped to True when the proxy pool proves dead → TOR
 
     for attempt in range(max_tries):
         if not _running:
@@ -272,14 +278,18 @@ async def _run_worker(wid: str, cfg: dict, proxy=None) -> None:
         except Exception:
             pass
 
-        # ── Pick a session for this attempt (never TOR in force mode) ──
-        if proxy is None:
+        # ── Pick a session for this attempt ──
+        if proxy is None and not tor_fallback:
             proxy = await _next_proxy(force=PROXY_FORCE)
-        if PROXY_FORCE and proxy is None:
-            _log(f"[{wid}] [Proxy] No proxy sessions (forced mode) — refreshing and waiting...", level="warn")
-            state["proxy"] = "waiting-for-proxy"
-            await asyncio.sleep(5)
-            continue
+        if proxy is None and not tor_fallback:
+            if TOR_FALLBACK and _tor_check():
+                tor_fallback = True
+                _log(f"[{wid}] [Proxy] No usable proxy sessions — falling back to TOR (socks5://127.0.0.1:9050)", level="warn")
+            else:
+                _log(f"[{wid}] [Proxy] No proxy sessions (forced mode) — refreshing and waiting...", level="warn")
+                state["proxy"] = "waiting-for-proxy"
+                await asyncio.sleep(5)
+                continue
         state["proxy"] = proxy.get("key", "tor") if proxy else "tor"
 
         label = state["proxy"]
@@ -304,6 +314,14 @@ async def _run_worker(wid: str, cfg: dict, proxy=None) -> None:
                 consecutive_tunnel_fails += 1
                 backoff = min(backoff * 2, 8)
                 if consecutive_tunnel_fails >= 4:
+                    if TOR_FALLBACK and _tor_check() and not tor_fallback:
+                        tor_fallback = True
+                        proxy = None
+                        consecutive_tunnel_fails = 0
+                        _log(f"[{wid}] [Proxy] All proxy sessions appear dead — falling back to TOR (socks5://127.0.0.1:9050)", level="warn")
+                        _proxy_stats_line(wid)
+                        await asyncio.sleep(1)
+                        continue
                     _log(f"[{wid}] {consecutive_tunnel_fails} consecutive tunnel failures — aborting (all sessions appear dead)", level="error")
                     break
                 _proxy_stats_line(wid)
@@ -346,6 +364,14 @@ async def _run_worker(wid: str, cfg: dict, proxy=None) -> None:
                 consecutive_tunnel_fails += 1
                 backoff = min(backoff * 2, 8)
                 if consecutive_tunnel_fails >= 4:
+                    if TOR_FALLBACK and _tor_check() and not tor_fallback:
+                        tor_fallback = True
+                        proxy = None
+                        consecutive_tunnel_fails = 0
+                        _log(f"[{wid}] [Proxy] All proxy sessions appear dead — falling back to TOR (socks5://127.0.0.1:9050)", level="warn")
+                        _proxy_stats_line(wid)
+                        await asyncio.sleep(1)
+                        continue
                     _log(f"[{wid}] {consecutive_tunnel_fails} consecutive tunnel failures — aborting (all sessions appear dead)", level="error")
                     break
                 await asyncio.sleep(backoff)
@@ -456,9 +482,14 @@ async def _run_worker(wid: str, cfg: dict, proxy=None) -> None:
                     backoff = min(backoff * 2, 8)      # residential: longer cooldown
                     abort_at = 4                       # dry pool → stop fast
                 if consecutive_tunnel_fails >= abort_at:
-                    reason = "all TOR circuits blocked" if using_tor else "all sessions appear dead"
-                    _log(f"[{wid}] {consecutive_tunnel_fails} consecutive tunnel failures — aborting ({reason})", level="error")
-                    break
+                    if (not using_tor and TOR_FALLBACK and _tor_check() and not tor_fallback):
+                        tor_fallback = True
+                        consecutive_tunnel_fails = 0
+                        _log(f"[{wid}] [Proxy] All proxy sessions appear dead — falling back to TOR (socks5://127.0.0.1:9050)", level="warn")
+                    else:
+                        reason = "all TOR circuits blocked" if using_tor else "all sessions appear dead"
+                        _log(f"[{wid}] {consecutive_tunnel_fails} consecutive tunnel failures — aborting ({reason})", level="error")
+                        break
             else:
                 consecutive_tunnel_fails = 0
                 backoff = 0.3

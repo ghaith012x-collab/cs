@@ -13,7 +13,11 @@ ORPort 0
 ExitRelay 0
 BridgeRelay 0
 
-## Performance tuning
+## Performance tuning — sticky exit IP per session
+## A signup takes ~1-2 min; a circuit that rotates mid-session (old 60s)
+## changes the exit IP mid-registration, which Discord flags. Keep one
+## circuit for the whole session; the bot signals NEWNYM between attempts
+## to force a fresh exit node per account.
 NumCPUs 1
-MaxCircuitDirtiness 60 seconds
-NewCircuitPeriod 30 seconds
+MaxCircuitDirtiness 900 seconds
+NewCircuitPeriod 60 seconds
