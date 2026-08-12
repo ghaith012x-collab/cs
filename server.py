@@ -22,6 +22,25 @@ from captcha_solver import (
 from duckmail import TempMail
 
 
+# ── Shared JS: robust login-link / back-to-login detection ──────────────
+# Discord renders the "Already have an account?" control as a REAL
+# <button type="submit"> inside the register form, and its label can carry
+# non-breaking spaces / split spans — plain substring matching on raw
+# textContent fails (that's exactly how runs end up on /login). This helper
+# normalizes ALL whitespace (incl. \u00a0) across textContent + aria-label +
+# title + value and tests the blacklist. Injected INSIDE each evaluate's
+# arrow-function body (the truedriver engine wraps function-looking strings
+# in parens and calls them, so a top-level const would be a syntax error).
+_LOGIN_LINK_GUARD = r"""const __isLoginLink = (el) => {
+    const raw = (el.textContent || '') + ' ' +
+                (el.getAttribute('aria-label') || '') + ' ' +
+                (el.getAttribute('title') || '') + ' ' +
+                (el.value || '');
+    const t = raw.toLowerCase().replace(/\s+/g, ' ').trim();
+    return /(already|have an account|log ?in|sign ?in|signin|back to|forgot|login)/.test(t);
+};"""
+
+
 # ── Log verbosity ─────────────────────────────────────────
 # Normal mode prints ONLY the essential signup events listed below (plus
 # warnings / errors, which always print). Everything else — proxy sweeps,
@@ -866,7 +885,7 @@ class DiscordAutomation:
                         clicked_reg = await self._page.evaluate("""() => {
                             const all = document.querySelectorAll('a, button, [role="link"], [role="button"]');
                             for (const el of all) {
-                                const t = (el.textContent || '').toLowerCase().trim();
+                                const t = (el.textContent || '').toLowerCase().replace(/\s+/g, ' ').trim();
                                 if (t && /register|sign up|create account/i.test(t) && el.offsetParent !== null) {
                                     el.scrollIntoView({block: 'center'});
                                     el.click();
@@ -1424,12 +1443,14 @@ class DiscordAutomation:
         """Click Create Account / Continue after the captcha token is in place."""
         try:
             result = await self._page.evaluate("""() => {
+                __LOGIN_LINK_GUARD__
+                const _norm = (s) => (s || '').toLowerCase().replace(/\s+/g, ' ').trim();
                 const btns = document.querySelectorAll('button');
                 for (const btn of btns) {
                     if (btn.offsetParent === null) continue;
-                    const t = btn.textContent.toLowerCase().trim();
-                    // Never the "Already have an account?" / back-to-login link
-                    if (/already have an account|log in|login|sign in|back to|forgot/.test(t)) continue;
+                    if (btn.disabled || btn.getAttribute('aria-disabled') === 'true') continue;
+                    if (__isLoginLink(btn)) continue;
+                    const t = _norm(btn.textContent);
                     if (t.includes('create account') || t.includes('continue') || t.includes('sign up')) {
                         btn.scrollIntoView({block: 'center'});
                         btn.click();
@@ -1437,21 +1458,28 @@ class DiscordAutomation:
                     }
                 }
                 const submit = document.querySelector('[type="submit"]');
-                if (submit && submit.offsetParent !== null && submit.closest('form')) {
-                    const st = (submit.textContent || '').toLowerCase().trim();
-                    if (!/already have an account|log in|login|sign in|back to|forgot/.test(st)) {
-                        submit.click();
-                        return 'submit_btn';
-                    }
+                if (submit && submit.offsetParent !== null && submit.closest('form')
+                    && !submit.disabled && !__isLoginLink(submit)) {
+                    submit.click();
+                    return 'submit_btn';
                 }
                 const form = document.querySelector('form');
                 if (form) {
-                    if (form.requestSubmit) { form.requestSubmit(); return 'requestSubmit'; }
-                    form.submit();
-                    return 'form_submit';
+                    // requestSubmit() with no arg activates the form's default
+                    // submit button — which is the "Already have an account?"
+                    // login link when the real Continue is disabled. Pick a
+                    // real, enabled, non-login submit button instead.
+                    for (const sb of form.querySelectorAll('button[type="submit"], [type="submit"]')) {
+                        if (sb.disabled || sb.getAttribute('aria-disabled') === 'true') continue;
+                        if (sb.offsetParent === null) continue;
+                        if (__isLoginLink(sb)) continue;
+                        if (form.requestSubmit) { form.requestSubmit(sb); return 'requestSubmit'; }
+                        sb.click();
+                        return 'form_submit_click';
+                    }
                 }
                 return '';
-            }""")
+            }""".replace('__LOGIN_LINK_GUARD__', _LOGIN_LINK_GUARD))
             if result:
                 self._log(f"[Captcha] [OK] Submit clicked: {result}")
                 return True
@@ -2143,16 +2171,21 @@ class DiscordAutomation:
 
                 try:
                     result = await self._page.evaluate("""() => {
+                        __LOGIN_LINK_GUARD__
+                        const _norm = (s) => (s || '').toLowerCase().replace(/\s+/g, ' ').trim();
                         // Strategy 1: Find button by text content (most reliable)
                         const btns = document.querySelectorAll('button, [role="button"], [type="submit"]');
                         for (const btn of btns) {
                             if (btn.offsetParent === null) continue;
                             // Check if disabled
                             if (btn.disabled || btn.getAttribute('aria-disabled') === 'true') continue;
-                            const t = (btn.textContent || '').toLowerCase().trim();
-                            const v = (btn.value || '').toLowerCase().trim();
-                            // Never the "Already have an account?" / back-to-login link
-                            if (/already have an account|log in|login|sign in|back to|forgot/.test(t)) continue;
+                            // Never the "Already have an account?" / back-to-login
+                            // link — Discord labels it with non-breaking spaces /
+                            // split spans, so normalize whitespace and also check
+                            // aria-label / title / value before trusting any text.
+                            if (__isLoginLink(btn)) continue;
+                            const t = _norm(btn.textContent);
+                            const v = _norm(btn.value);
                             if (t.includes('create account') || t.includes('sign up') || t.includes('continue') ||
                                 v.includes('create account') || v.includes('sign up')) {
                                 btn.scrollIntoView({block: 'center'});
@@ -2169,9 +2202,9 @@ class DiscordAutomation:
                         for (const btn of btns) {
                             if (btn.offsetParent === null) continue;
                             if (btn.disabled || btn.getAttribute('aria-disabled') === 'true') continue;
-                            const t = btn.textContent.toLowerCase().trim();
-                            if (/already have an account|log in|login|sign in|back to|forgot/.test(t)) continue;
+                            if (__isLoginLink(btn)) continue;
                             if (btn.getAttribute('type') !== 'submit') continue;
+                            const t = _norm(btn.textContent);
                             if (!btn.closest('form')) continue;
                             if (t.length > 2) {  // has meaningful text
                                 btn.scrollIntoView({block: 'center'});
@@ -2180,20 +2213,30 @@ class DiscordAutomation:
                             }
                         }
 
-                        // Strategy 3: Form submit
+                        // Strategy 3: Form submit — but NEVER let the default
+                        // submit button be the "Already have an account?" login
+                        // link: requestSubmit() with no argument activates the
+                        // form's default submit button, which IS the login link
+                        // whenever the real Continue button is disabled. Pick a
+                        // real, enabled, non-login submit button explicitly.
                         const forms = document.querySelectorAll('form');
                         for (const form of forms) {
                             if (form.offsetParent === null) continue;
-                            if (form.requestSubmit) {
-                                form.requestSubmit();
-                                return 'form_requestSubmit';
+                            for (const sb of form.querySelectorAll('button[type="submit"], [type="submit"]')) {
+                                if (sb.disabled || sb.getAttribute('aria-disabled') === 'true') continue;
+                                if (sb.offsetParent === null) continue;
+                                if (__isLoginLink(sb)) continue;
+                                if (form.requestSubmit) {
+                                    form.requestSubmit(sb);
+                                    return 'form_requestSubmit';
+                                }
+                                sb.click();
+                                return 'form_submit_click';
                             }
-                            form.submit();
-                            return 'form_submit';
                         }
 
                         return 'failed';
-                    }""")
+                    }""".replace('__LOGIN_LINK_GUARD__', _LOGIN_LINK_GUARD))
                     if result and result != 'failed':
                         create_clicked = True
                         self._log(f"[OK] Account button clicked: {result}")
@@ -2223,8 +2266,16 @@ class DiscordAutomation:
                                             _txt = (await btn.inner_text() or "").lower()
                                         except Exception:
                                             _txt = ""
-                                        if any(k in _txt for k in ("already have an account", "log in", "login", "sign in", "back to", "forgot")):
-                                            self._log(f"[Form] Skipping fallback {sel} ({_txt[:24]}) — login link", level="warn")
+                                        try:
+                                            _aria = (await btn.get_attribute("aria-label") or "").lower()
+                                        except Exception:
+                                            _aria = ""
+                                        # Normalize whitespace — Discord labels the
+                                        # login link with non-breaking spaces, so a
+                                        # plain substring match misses it.
+                                        _txt_norm = " ".join((_txt + " " + _aria).split())
+                                        if any(k in _txt_norm for k in ("already have an account", "log in", "login", "sign in", "back to", "forgot")):
+                                            self._log(f"[Form] Skipping fallback {sel} ({_txt_norm[:24]}) — login link", level="warn")
                                             continue
                                         await btn.scroll_into_view_if_needed()
                                         await btn.click()
@@ -2236,14 +2287,35 @@ class DiscordAutomation:
                     except Exception as pw_e:
                         self._log(f"Playwright button click error: {pw_e}", level="warn")
 
-                # Last resort: Enter key on password field
+                # Last resort: Enter key on password field — but ONLY when
+                # the form's default submit button is not the "Already have
+                # an account?" login link (Enter triggers implicit submission
+                # via the default submit button; when the real Continue is
+                # disabled, that default IS the login link and would send the
+                # run to /login).
                 if not create_clicked:
                     try:
-                        await self._page.locator('input[name="password"]').press('Enter')
-                        self._log("Pressed Enter on password field")
-                        create_clicked = True
+                        safe_enter = bool(await self._page.evaluate("""() => {
+                            __LOGIN_LINK_GUARD__
+                            const form = document.querySelector('form');
+                            if (!form) return false;
+                            for (const sb of form.querySelectorAll('button[type="submit"], [type="submit"]')) {
+                                if (sb.disabled || sb.getAttribute('aria-disabled') === 'true') continue;
+                                if (sb.offsetParent === null) continue;
+                                if (__isLoginLink(sb)) continue;
+                                return true;
+                            }
+                            return false;
+                        }""".replace('__LOGIN_LINK_GUARD__', _LOGIN_LINK_GUARD)))
                     except Exception:
-                        pass
+                        safe_enter = False
+                    if safe_enter:
+                        try:
+                            await self._page.locator('input[name="password"]').press('Enter')
+                            self._log("Pressed Enter on password field")
+                            create_clicked = True
+                        except Exception:
+                            pass
 
             if create_clicked:
                 self._log("[OK] Create Account submitted - waiting for response...")
@@ -2331,7 +2403,7 @@ class DiscordAutomation:
         try:
             continue_enabled = bool(await self._page.evaluate("""() => {
                 for (const b of document.querySelectorAll('button')) {
-                    const t = (b.textContent || '').toLowerCase();
+                    const t = (b.textContent || '').toLowerCase().replace(/\s+/g, ' ').trim();
                     if (!(t.includes('continue') || t.includes('create account'))) continue;
                     if (b.disabled || b.getAttribute('aria-disabled') === 'true') continue;
                     return true;
