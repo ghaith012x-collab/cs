@@ -398,10 +398,10 @@ class DiscordAutomation:
             self._log("[TOR] Using TOR SOCKS5 proxy...")
             if _tor_newnym():
                 self._log("[TOR] New identity requested")
-            # Clearcote already rides the TOR proxy from browser launch — a
-            # context-level proxy would be rejected by Playwright when the
-            # browser was launched with one.
-            if ENGINE != "clearcote":
+            # Clearcote / ShardX already ride the TOR proxy from browser
+            # launch — a context-level proxy would be rejected by Playwright
+            # when the browser was launched with one.
+            if ENGINE not in ("clearcote", "shardx"):
                 ctx_opts['proxy'] = {'server': 'socks5://127.0.0.1:9050'}
             await asyncio.sleep(1)
         else:
