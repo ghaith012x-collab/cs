@@ -1174,7 +1174,7 @@ class DiscordAutomation:
             frame = await iframe.content_frame()
             if frame is None:
                 return False
-            val = await frame.evaluate(js, timeout=2500)
+            val = await frame.evaluate(js)
             return bool(val)
         except Exception:
             return False
@@ -1203,9 +1203,12 @@ class DiscordAutomation:
         being interactive, or any visible text content inside the frame.
         """
         return await self._frame_js_ready(iframe, """() => {
-            if (document.readyState !== 'complete') return false;
+            // The checkbox being laid out at real size means it is painted
+            // and interactive — that IS the honest bar, and it avoids
+            // waiting on a readyState that may never flip.
             const cb = document.getElementById('checkbox');
             if (cb && cb.offsetHeight > 0 && cb.offsetWidth > 0) return true;
+            if (document.readyState !== 'complete') return false;
             const t = (document.body && document.body.innerText) || '';
             return t.trim().length >= 3;
         }""")
@@ -1242,7 +1245,7 @@ class DiscordAutomation:
                     readyState: document.readyState,
                     text: t.replace(/\s+/g, ' ').trim()
                 });
-            }""", timeout=2000)
+            }""")
             self._log(f"[Captcha] Widget frame probe: {probe}", level="debug")
         except Exception as e:
             self._log(f"[Captcha] Widget frame probe error: {e}", level="debug")
@@ -1275,7 +1278,7 @@ class DiscordAutomation:
                 ['mousedown', 'mouseup', 'click'].forEach(t =>
                     el.dispatchEvent(new MouseEvent(t, {bubbles: true, cancelable: true, view: window})));
                 return true;
-            }""", timeout=2000)
+            }""")
             if clicked:
                 self._log("[Captcha] Checkbox clicked via JS dispatch")
                 return True
@@ -1287,8 +1290,7 @@ class DiscordAutomation:
         # user can see exactly what hCaptcha rendered inside the widget.
         try:
             html = await frame.evaluate(
-                "() => (document.body ? document.body.outerHTML : '').slice(0, 2000)",
-                timeout=2000)
+                "() => (document.body ? document.body.outerHTML : '').slice(0, 2000)")
             self._log(f"[Captcha] No clickable checkbox found — widget frame DOM:\n{html}",
                       level="debug")
         except Exception as e:
@@ -1308,8 +1310,7 @@ class DiscordAutomation:
         self._log(f"[DOM] Captcha DOM dump ({reason}) — page: {url[:90]}", level="debug")
         try:
             html = await self._page.evaluate(
-                "() => (document.body ? document.body.outerHTML : '').slice(0, 2500)",
-                timeout=2000)
+                "() => (document.body ? document.body.outerHTML : '').slice(0, 2500)")
             self._log(f"[DOM] Page body:\n{html}", level="debug")
         except Exception as e:
             self._log(f"[DOM] Page body dump failed: {e}", level="debug")
@@ -1318,13 +1319,12 @@ class DiscordAutomation:
                 if 'hcaptcha' not in (f.url or ''):
                     continue
                 try:
-                    state = await f.evaluate("document.readyState", timeout=1500)
+                    state = await f.evaluate("document.readyState")
                 except Exception:
                     state = "?"
                 try:
                     fhtml = await f.evaluate(
-                        "() => (document.body ? document.body.outerHTML : '').slice(0, 1500)",
-                        timeout=1500)
+                        "() => (document.body ? document.body.outerHTML : '').slice(0, 1500)")
                 except Exception as e:
                     fhtml = f"<dump failed: {e}>"
                 self._log(f"[DOM] iframe {f.url[:100]} readyState={state}:\n{fhtml}",
@@ -1468,8 +1468,7 @@ class DiscordAutomation:
                 # ── Fast-fail: rate limiting (lightweight text peek) ──
                 try:
                     body = await self._page.evaluate(
-                        "() => (document.body ? document.body.innerText.substring(0, 200) : '').toLowerCase()",
-                        timeout=2000)
+                        "() => (document.body ? document.body.innerText.substring(0, 200) : '').toLowerCase()")
                 except Exception:
                     body = ""
                 if any(k in body for k in ("rate limit", "ratelimited", "too many requests",
@@ -1539,8 +1538,7 @@ class DiscordAutomation:
                     if not any('hcaptcha' in (f.url or '') for f in self._page.frames):
                         try:
                             page_text = await self._page.evaluate(
-                                "() => (document.body ? document.body.innerText.substring(0, 500) : '')",
-                                timeout=2000)
+                                "() => (document.body ? document.body.innerText.substring(0, 500) : '')")
                             low = page_text.lower()
                             if ('captcha' in low or 'security' in low or 'verify' in low):
                                 self._log("[Captcha] No hCaptcha frames — trying FunCAPTCHA solver", level="warn")

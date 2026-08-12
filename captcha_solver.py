@@ -7983,7 +7983,7 @@ async def solve_hcaptcha_accessibility(page, iframe,
                                             if (b && b.offsetHeight >= 40) return true;
                                             const t = (document.body && document.body.innerText) || '';
                                             return t.trim().length >= 5;
-                                        }""", timeout=2500))
+                                        }"""))
                             except Exception:
                                 _painted = False
                             if not _painted:
