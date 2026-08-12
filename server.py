@@ -2104,6 +2104,18 @@ class DiscordAutomation:
             except Exception:
                 pass
 
+            # ── REAL ToS click — React-verified, retried until it sticks ──
+            # The JS fill's forged checkbox state gets wiped by React / the
+            # DOB re-render; without a genuinely checked ToS, "Continue" stays
+            # disabled and the run can fall through to the login link. Click
+            # with real mouse events and confirm before submitting.
+            for _t in range(3):
+                n = await self._click_tos_checkboxes()
+                if n > 0:
+                    self._log("[Form] ToS checkbox(es) verified checked")
+                    break
+                await asyncio.sleep(0.6)
+
             # ── Create Account Button — try multiple strategies ────────
             # Humanization: pause to review the filled form before submitting.
             await asyncio.sleep(random.uniform(0.9, 1.9))
@@ -2216,6 +2228,16 @@ class DiscordAutomation:
                                 if await btn.count() > 0:
                                     is_disabled = await btn.is_disabled()
                                     if not is_disabled:
+                                        # Never the "Already have an account?" /
+                                        # back-to-login link — it navigates to
+                                        # /login and silently kills the run.
+                                        try:
+                                            _txt = (await btn.inner_text() or "").lower()
+                                        except Exception:
+                                            _txt = ""
+                                        if any(k in _txt for k in ("already have an account", "log in", "login", "sign in", "back to", "forgot")):
+                                            self._log(f"[Form] Skipping fallback {sel} ({_txt[:24]}) — login link", level="warn")
+                                            continue
                                         await btn.scroll_into_view_if_needed()
                                         await btn.click()
                                         self._log(f"[OK] Playwright click: {sel}")
@@ -2253,6 +2275,57 @@ class DiscordAutomation:
             import traceback
             traceback.print_exc()
             return False
+
+    async def _click_tos_checkboxes(self) -> int:
+        """Real-mouse-click Discord's ToS + marketing checkboxes and VERIFY
+        React registered them (the check must survive a re-render).
+
+        The JS fill forges cb.checked + aria attributes — React ignores
+        forged events and Discord's DOB re-render wipes them, leaving
+        "Continue" disabled (which is how a run ends up clicking "Already
+        have an account?"). Real Playwright mouse clicks at each
+        checkbox's center generate trusted input React actually processes.
+        Only unchecked boxes are clicked, so retries never uncheck one
+        that already stuck.
+        """
+        for _attempt in range(3):
+            try:
+                candidates = await self._page.evaluate("""() => {
+                    const out = [];
+                    const seen = new Set();
+                    const els = document.querySelectorAll(
+                        'input[type="checkbox"], [role="checkbox"], [class*="checkbox"]');
+                    for (const cb of els) {
+                        if (seen.has(cb)) continue;
+                        seen.add(cb);
+                        if (cb.checked || cb.getAttribute('aria-checked') === 'true'
+                            || cb.getAttribute('data-state') === 'checked') continue;
+                        const r = cb.getBoundingClientRect();
+                        if (!r || r.width < 5 || r.height < 5) continue;
+                        out.push({ x: r.x + r.width / 2, y: r.y + r.height / 2 });
+                    }
+                    return out;
+                }""")
+            except Exception:
+                candidates = []
+            clicked = 0
+            for c in (candidates or []):
+                try:
+                    await self._page.mouse.click(c["x"], c["y"])
+                    clicked += 1
+                    await asyncio.sleep(0.2)
+                except Exception:
+                    pass
+            try:
+                n = await self._page.evaluate("""() => document.querySelectorAll(
+                    'input[type="checkbox"]:checked, [role="checkbox"][aria-checked="true"], [role="checkbox"][data-state="checked"]').length""")
+            except Exception:
+                n = 0
+            self._log(f"[Form] ToS checkboxes: clicked {clicked}, verified {n}")
+            if int(n or 0) > 0:
+                return int(n or 0)
+            await asyncio.sleep(0.5)
+        return 0
 
     async def _fill_missing_fields(self, display_name: str) -> None:
         """Real-keystroke fallback for fields the JS fill didn't keep."""
