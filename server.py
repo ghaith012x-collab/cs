@@ -22,6 +22,47 @@ from captcha_solver import (
 from duckmail import TempMail
 
 
+# ── Log verbosity ─────────────────────────────────────────
+# Normal mode prints ONLY the essential signup events listed below (plus
+# warnings / errors, which always print). Everything else — proxy sweeps,
+# nav polls, fingerprint rotations, captcha retries, mail polling — only
+# appears in the ALL logs: run with LOG_LEVEL=all to see it.
+_LOG_ALL = os.environ.get("LOG_LEVEL", "").strip().lower() \
+    in ("all", "debug", "verbose")
+
+_ESSENTIAL_PREFIXES = (
+    "[Nav] Navigating to ",                 # navigating to Discord
+    "Using configured email:",              # email in use
+    "[Mail] No email configured",           # creating an inbox
+    "[Mail] [OK]",                          # inbox ready / verification link
+    "Email: ",                              # filled email field
+    "Display: ",                            # filled username + password fields
+    "[Form] ToS",                           # ToS checkbox clicked
+    "[Form] All fields + ToS verified OK",
+    "[Form] Form filled - checking for hCaptcha",
+    "Clicking Create Account",
+    "[OK] Account button clicked",
+    "[OK] Create Account submitted",
+    "[Captcha] Checking for hCaptcha",
+    "[Captcha] Waiting for hCaptcha to load",
+    "[Captcha] [READY]",                    # hCaptcha rendered
+    "[Captcha] [OK]",
+    "[Accessibility] Clicked 3-dots",
+    "[Accessibility] Accessibility option clicked",
+    "[Accessibility] Q",                    # question answers — refined below
+)
+
+
+def _log_essential(message: str) -> bool:
+    """True when the message is one of the essential signup events."""
+    if not any(message.startswith(p) for p in _ESSENTIAL_PREFIXES):
+        return False
+    # A Q-line that isn't an actual answer (e.g. "Q1 skipped via JS click")
+    if message.startswith("[Accessibility] Q") and " solved:" not in message:
+        return False
+    return True
+
+
 # ── TOR Control ───────────────────────────────────────────
 
 def _tor_newnym():
@@ -243,6 +284,11 @@ class DiscordAutomation:
             self._fingerprint = generate_fingerprint(worker_id)
 
     def _log(self, message: str, level: str = "info") -> None:
+        # Normal mode: only essential events + warnings/errors. The full
+        # detail lives in the ALL logs (LOG_LEVEL=all).
+        if level not in ("warn", "error") and not _LOG_ALL \
+                and not _log_essential(message):
+            return
         tagged = f"[{self.worker_id}] {message}"
         entry = {
             "time": time.strftime("%H:%M:%S"),
@@ -1741,6 +1787,9 @@ class DiscordAutomation:
             except Exception as e:
                 self._log(f"[Form] JS value-set error: {e}", level="error")
                 tos_checked = False
+
+            if tos_checked:
+                self._log("[Form] ToS checkbox clicked")
 
             # ── Quick verify each field ──
             try:

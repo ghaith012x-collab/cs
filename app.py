@@ -152,7 +152,15 @@ def _pick_domain(cfg: dict) -> str:
     return DEFAULT_MAIL_DOMAIN
 
 
+# App-level logs: proxy sweeps, AI warm-up, worker chatter etc. only appear
+# in the ALL logs (LOG_LEVEL=all). Warnings / errors always print.
+_APP_LOG_ALL = os.environ.get("LOG_LEVEL", "").strip().lower() \
+    in ("all", "debug", "verbose")
+
+
 def _log(msg: str, level: str = "info"):
+    if level not in ("warn", "error") and not _APP_LOG_ALL:
+        return
     entry = {
         "time": time.strftime("%H:%M:%S"),
         "timestamp": time.time(),
