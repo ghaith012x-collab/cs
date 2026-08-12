@@ -809,19 +809,25 @@ class DiscordAutomation:
             return False
 
         # ── Block keywords in title ──
-        blocked_keywords = ["attention required", "just a moment", "blocked",
-                           "cloudflare", "ddos-guard", "captcha",
-                           "checking your browser", "verify you are human",
+        # Cloudflare managed-challenge interstitial is NOT fatal: it auto-
+        # resolves in ~5-15s and drops cf_clearance. Bouncing on the title
+        # was throwing away healthy sessions that just needed a beat. Flow
+        # into the poll loop, which waits for cf_clearance and only rotates
+        # if the challenge persists past its own budget.
+        challenge_title_kws = ["just a moment", "attention required",
+                               "checking your browser", "verify you are human"]
+        fatal_title_kws = ["blocked", "cloudflare", "ddos-guard", "captcha",
                            "forbidden", "403", "access denied",
                            "you do not have permission", "error 1020",
                            "rate limit", "ratelimited", "rate limited",
                            "too many requests", "slowdown", "try again later"]
         title_lower = (page_title or "").lower()
-        if any(kw in title_lower for kw in blocked_keywords):
-            self._nav_error = f"blocked — Cloudflare/firewall challenge (title: {str(page_title)[:60]})"
+        if any(kw in title_lower for kw in fatal_title_kws):
+            self._nav_error = f"blocked - Cloudflare/firewall hard block (title: {str(page_title)[:60]})"
             self._log('[Nav] BLOCKED by Cloudflare/firewall (title: "' + str(page_title)[:60] + '")', level="warn")
             return False
-
+        if any(kw in title_lower for kw in challenge_title_kws):
+            self._log('[Nav] Cloudflare challenge title "' + str(page_title)[:40] + '" - waiting for auto-resolve in poll loop')
         # ── Check if Discord SPA shell loaded ──
         try:
             app_mount = await asyncio.wait_for(
@@ -847,8 +853,13 @@ class DiscordAutomation:
         # costs time on sessions that are already proven reachable.
         challenge_budget = 50.0 if self.proxy else 40.0
         blank_bail = 34.0 if self.proxy else challenge_budget - 4.0
-        self._log(f"[Nav] Waiting for registration form to render (budget={challenge_budget:.0f}s, blank_bail={blank_bail:.0f}s)...")
+        reload_after = 6.0       # blank this long -> reload to re-fetch JS bundles
+        max_reloads = 3          # hard cap on reloads per session
+        challenge_bail = 20.0    # Cloudflare challenge that never resolves -> rotate
+        self._log(f"[Nav] Waiting for registration form to render (budget={challenge_budget:.0f}s, blank_bail={blank_bail:.0f}s, reloads<={max_reloads}, challenge_bail={challenge_bail:.0f}s)...")
         blank_since = None       # when the page first looked blank
+        challenge_since = None   # when a Cloudflare challenge first appeared
+        reload_count = 0         # reloads attempted for a blank/hung SPA
         login_clicked = False    # already clicked the Register link once
         last_log = -1.0
         start_ts = time.time()
@@ -859,6 +870,8 @@ class DiscordAutomation:
                     const body = document.body;
                     if (!body) return JSON.stringify({error: "no-body"});
                     const text = body.innerText || "";
+                    const titleLow = (document.title || "").toLowerCase();
+                    const challenge = /just a moment|checking your browser|verify you are human|attention required/.test(titleLow + " " + text.toLowerCase().substring(0, 800)) || !!document.querySelector('iframe[src*="challenges.cloudflare.com"], #challenge-stage, #cf-challenge-running, #cf-chl');
                     // Broad selectors — Discord uses aria-label, not name
                     const email = document.querySelector('input[name="email"], input[type="email"], input[aria-label*="email" i], input[aria-label*="Email"], input[id*="email" i]');
                     const username = document.querySelector('input[name="username"], input[aria-label*="username" i], input[aria-label*="display" i]');
@@ -882,6 +895,7 @@ class DiscordAutomation:
                         inputCount: allInputs.length,
                         buttonCount: allButtons.length,
                         cfClearance: document.cookie.indexOf('cf_clearance=') !== -1,
+                        challenge: challenge,
                         textPreview: text.substring(0, 250)
                     });
                 }"""), timeout=2.0)
@@ -905,33 +919,63 @@ class DiscordAutomation:
                     self._log(f"[Nav] Age gate detected after {int(elapsed)}s - returning true, form filler handles it")
                     return True
 
-                # BLANK RENDER bail — SPA shell mounted but React painted
-                # nothing (0 inputs, 0 buttons, empty text). VERIFIED LIVE:
-                # healthy residential sessions stay blank 20-30s while Discord
-                # serves its JS bundles, so only bail after blank_bail seconds
-                # (dead sessions are already filtered by the pre-launch probe).
+                # Blank render + Cloudflare challenge handling.
+                # Two very different causes, handled separately:
+                #   1. Cloudflare managed challenge ("Just a moment..."): it
+                #      auto-resolves in ~5-15s and drops cf_clearance. WAIT for
+                #      it; only rotate if it persists past challenge_bail.
+                #   2. React failed to hydrate (a JS bundle dropped/errored): a
+                #      reload re-fetches the bundles and almost always boots.
+                #      Reload up to max_reloads times before giving up.
+                if state.get("challenge"):
+                    if challenge_since is None:
+                        challenge_since = time.time()
+                        self._log("[Nav] Cloudflare 'Just a moment' challenge detected - waiting for auto-resolve (cf_clearance)...")
+                    blank_since = None
+                    if state.get("cfClearance"):
+                        self._log("[Nav] cf_clearance set - challenge passed, waiting for React to boot...")
+                        challenge_since = None
+                    elif time.time() - challenge_since >= challenge_bail:
+                        proxy_label = "proxy session" if self.proxy else "TOR exit"
+                        bail_s = int(challenge_bail)
+                        self._nav_error = f"{proxy_label} Cloudflare challenge never resolved after {bail_s}s"
+                        self._log(f"[Nav] CHALLENGE STUCK for {bail_s}s (no cf_clearance) - {proxy_label} blocked - rotating circuit", level="warn")
+                        return False
+                    await asyncio.sleep(0.5)
+                    continue
+                challenge_since = None
+
                 if (state.get("hasAppMount") and not state.get("inputCount")
                         and not state.get("buttonCount")
                         and not (state.get("textPreview") or "").strip()):
                     if blank_since is None:
                         blank_since = time.time()
-                        if not self.proxy:
-                            self._log("[Nav] SPA mounted but React not booted — Cloudflare managed challenge / TOR-slow path. "
-                                      f"Watching for cf_clearance + form render (bail after {blank_bail:.0f}s blank)...")
-                    # cf_clearance set = challenge passed — assets unblocked, form should follow.
+                        self._log("[Nav] SPA shell mounted but React not booted - waiting for JS bundles (reload if stuck)...")
+                    # cf_clearance set = challenge passed - assets unblocked, form should follow.
                     if state.get("cfClearance"):
                         if blank_since is not None:
-                            self._log("[Nav] cf_clearance cookie appeared — Cloudflare challenge passed, waiting for React...")
+                            self._log("[Nav] cf_clearance cookie appeared - Cloudflare challenge passed, waiting for React...")
                         blank_since = None
+                    elif time.time() - blank_since >= reload_after and reload_count < max_reloads:
+                        reload_count += 1
+                        self._log(f"[Nav] React still blank after {int(reload_after)}s - reloading page (attempt {reload_count}/{max_reloads}) to re-fetch JS bundles...")
+                        try:
+                            await asyncio.wait_for(self._page.reload(), timeout=20.0)
+                        except Exception:
+                            pass
+                        await asyncio.sleep(2.0)
+                        blank_since = None
+                        challenge_since = None
+                        start_ts = time.time()   # fresh full budget for the reloaded page
+                        continue
                     elif time.time() - blank_since >= blank_bail:
                         proxy_label = "proxy session" if self.proxy else "TOR exit"
                         bail_s = int(blank_bail)
-                        self._nav_error = f"{proxy_label} never passed Cloudflare — SPA mounted but painted nothing for {bail_s}s"
-                        self._log(f"[Nav] BLANK RENDER for {bail_s}s (SPA mounted, no content, no cf_clearance) - {proxy_label} blocked/slow - rotating circuit", level="warn")
+                        self._nav_error = f"{proxy_label} never painted the Discord form (blank {bail_s}s after {reload_count} reloads)"
+                        self._log(f"[Nav] BLANK RENDER for {bail_s}s (SPA mounted, no content, no cf_clearance, {reload_count} reloads) - {proxy_label} blocked/slow - rotating circuit", level="warn")
                         return False
                 else:
                     blank_since = None
-
                 if state.get("isLogin") and not login_clicked and elapsed >= 3.0:
                     self._log("[Nav] Login page detected \u2014 clicking Register link...")
                     try:
