@@ -1208,22 +1208,126 @@ class DiscordAutomation:
         }""")
 
     async def _click_hcaptcha_checkbox(self, iframe) -> bool:
-        """Real-mouse click the hCaptcha 'I\'m a human' checkbox.
+        """Real-mouse click the hCaptcha 'Are you human' checkbox.
 
         Only ever called after _widget_rendered() verified the widget has
         genuinely painted, so the click happens on a live, interactive
-        checkbox — never as a blind readiness probe. A real mouse click
-        (not JS) is what hCaptcha's pointer handler trusts.
+        checkbox — never as a blind readiness probe. Tries several
+        strategies (real mouse click first — hCaptcha's pointer handler
+        only trusts those — then JS dispatch) and dumps the widget frame
+        DOM to the ALL LOGS when nothing clickable is found, so failures
+        are visible instead of silent.
         """
         try:
             frame = await iframe.content_frame()
-            if frame is None:
-                return False
-            await asyncio.sleep(random.uniform(0.2, 0.6))  # human pause
-            await frame.locator("#checkbox").first.click(timeout=3000)
-            return True
         except Exception:
+            frame = None
+        if frame is None:
+            self._log("[Captcha] Checkbox click skipped — widget frame not attached",
+                      level="debug")
             return False
+
+        # Inspect what's actually inside the widget frame (ALL LOGS only).
+        try:
+            probe = await frame.evaluate("""() => {
+                const hasCheckbox = !!document.getElementById('checkbox');
+                const roleCheckbox = !!document.querySelector('[role="checkbox"]');
+                const buttonSubmit = !!document.querySelector('.button-submit');
+                const t = (document.body && document.body.innerText || '').slice(0, 80);
+                return JSON.stringify({
+                    hasCheckbox, roleCheckbox, buttonSubmit,
+                    readyState: document.readyState,
+                    text: t.replace(/\s+/g, ' ').trim()
+                });
+            }""", timeout=2000)
+            self._log(f"[Captcha] Widget frame probe: {probe}", level="debug")
+        except Exception as e:
+            self._log(f"[Captcha] Widget frame probe error: {e}", level="debug")
+
+        # Strategy 1: real mouse click (human-paced) on the checkbox
+        for selector, label in (("#checkbox", "#checkbox"),
+                                ("[role='checkbox']", "[role=checkbox]"),
+                                (".button-submit", ".button-submit")):
+            try:
+                loc = frame.locator(selector).first
+                if await loc.count() == 0:
+                    continue
+                await asyncio.sleep(random.uniform(0.2, 0.6))
+                await loc.click(timeout=3000)
+                self._log(f"[Captcha] Checkbox clicked via {label}")
+                return True
+            except Exception as e:
+                self._log(f"[Captcha] Checkbox click via {label} failed: {str(e)[:120]}",
+                          level="debug")
+
+        # Strategy 2: JS mousedown/mouseup/click dispatch (last resort)
+        try:
+            clicked = await frame.evaluate("""() => {
+                const el = document.getElementById('checkbox')
+                      || document.querySelector('[role="checkbox"]')
+                      || document.querySelector('.button-submit');
+                if (!el) return false;
+                const rect = el.getBoundingClientRect();
+                if (!rect || rect.width === 0 || rect.height === 0) return false;
+                ['mousedown', 'mouseup', 'click'].forEach(t =>
+                    el.dispatchEvent(new MouseEvent(t, {bubbles: true, cancelable: true, view: window})));
+                return true;
+            }""", timeout=2000)
+            if clicked:
+                self._log("[Captcha] Checkbox clicked via JS dispatch")
+                return True
+        except Exception as e:
+            self._log(f"[Captcha] Checkbox JS dispatch failed: {str(e)[:120]}",
+                      level="debug")
+
+        # Nothing clickable found — dump the frame DOM to ALL LOGS so the
+        # user can see exactly what hCaptcha rendered inside the widget.
+        try:
+            html = await frame.evaluate(
+                "() => (document.body ? document.body.outerHTML : '').slice(0, 2000)",
+                timeout=2000)
+            self._log(f"[Captcha] No clickable checkbox found — widget frame DOM:\n{html}",
+                      level="debug")
+        except Exception as e:
+            self._log(f"[Captcha] Widget frame DOM dump failed: {e}", level="debug")
+        return False
+
+    async def _dump_captcha_dom(self, reason: str) -> None:
+        """Dump the page + every hCaptcha iframe's DOM to the ALL LOGS.
+
+        Debug-level only: visible with LOG_LEVEL=all or the dashboard ALL
+        LOGS toggle, never in the default console.
+        """
+        try:
+            url = self._page.url
+        except Exception:
+            url = "?"
+        self._log(f"[DOM] Captcha DOM dump ({reason}) — page: {url[:90]}", level="debug")
+        try:
+            html = await self._page.evaluate(
+                "() => (document.body ? document.body.outerHTML : '').slice(0, 2500)",
+                timeout=2000)
+            self._log(f"[DOM] Page body:\n{html}", level="debug")
+        except Exception as e:
+            self._log(f"[DOM] Page body dump failed: {e}", level="debug")
+        try:
+            for f in self._page.frames:
+                if 'hcaptcha' not in (f.url or ''):
+                    continue
+                try:
+                    state = await f.evaluate("document.readyState", timeout=1500)
+                except Exception:
+                    state = "?"
+                try:
+                    fhtml = await f.evaluate(
+                        "() => (document.body ? document.body.outerHTML : '').slice(0, 1500)",
+                        timeout=1500)
+                except Exception as e:
+                    fhtml = f"<dump failed: {e}>"
+                self._log(f"[DOM] iframe {f.url[:100]} readyState={state}:\n{fhtml}",
+                          level="debug")
+        except Exception as e:
+            self._log(f"[DOM] iframe dump failed: {e}", level="debug")
 
     async def _detect_challenge_mode(self, iframe_element) -> str:
         """Identify the hCaptcha state: 'checkbox' or 'drag'.
@@ -1454,6 +1558,7 @@ class DiscordAutomation:
                             self._log(
                                 f"[Captcha] No hCaptcha widget after {int(elapsed)}s — hCaptcha script not loaded yet...",
                                 level="warn")
+                        await self._dump_captcha_dom(f"stuck at {int(elapsed)}s")
 
                 # Watchdog: hCaptcha never loaded — rotate honestly.
                 if time.time() > no_widget_deadline:
@@ -1463,6 +1568,7 @@ class DiscordAutomation:
                     else:
                         self._log("[Captcha] No hCaptcha widget in 45s — script blocked or dead "
                                   "session, rotating", level="warn")
+                    await self._dump_captcha_dom("45s watchdog")
                     return False
 
                 # Fast poll — hCaptcha paints within a few hundred ms of its
