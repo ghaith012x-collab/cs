@@ -40,6 +40,43 @@ _LOGIN_LINK_GUARD = r"""const __isLoginLink = (el) => {
     return /(already|have an account|log ?in|sign ?in|signin|back to|forgot|login)/.test(t);
 };"""
 
+# ── Shared JS: find Discord's REQUIRED ToS checkbox (real controls only) ──
+# Discord's register form has two checkboxes: the required Terms-of-Service
+# agreement and an optional marketing/"email updates" box. Older code
+# matched [class*="checkbox"], which ALSO hit styled container divs (double
+# toggles) and the marketing box (the "wrong checkbox"). This targets ONLY
+# real checkbox controls (native input / role=checkbox / data-state), skips
+# the marketing box by its label, and returns the click point of the first
+# unchecked ToS box (or null when none remains).
+_TOS_TARGET_JS = r"""() => {
+    const els = document.querySelectorAll(
+        'input[type="checkbox"], [role="checkbox"], [data-state]');
+    for (const cb of els) {
+        if (cb.checked || cb.getAttribute('aria-checked') === 'true'
+            || cb.getAttribute('data-state') === 'checked') continue;
+        if (cb.offsetParent === null) continue;
+        const r = cb.getBoundingClientRect();
+        if (!r || r.width < 5 || r.height < 5) continue;
+        let label = '';
+        try {
+            const lab = cb.closest('label') || (cb.id ? document.querySelector('label[for="' + CSS.escape(cb.id) + '"]') : null);
+            if (lab) label = lab.innerText || '';
+        } catch (e) {}
+        if (!label) {
+            try {
+                const wrap = cb.closest('[class*="checkbox"]');
+                if (wrap) label = wrap.innerText || '';
+            } catch (e) {}
+        }
+        const low = label.toLowerCase().replace(/\s+/g, ' ').trim();
+        // Skip the optional marketing / email-updates box — only the ToS
+        // agreement is required to enable Continue.
+        if (/email|marketing|updat|news|promotion|newsletter|exclusive|offers|subscribe/.test(low)) continue;
+        return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
+    }
+    return null;
+}"""
+
 
 # ── Log verbosity ─────────────────────────────────────────
 # Normal mode prints ONLY the essential signup events listed below (plus
@@ -2136,38 +2173,17 @@ class DiscordAutomation:
                     break
                 if click_attempt > 0:
                     self._log(f"Retrying Create Account click (attempt {click_attempt+1}/4)...")
-                    # Re-check ALL unchecked checkboxes on retry (React may have reset them)
+                    # Re-check the REQUIRED ToS checkbox on retry (React may
+                    # have reset it) — real mouse click, never the optional
+                    # marketing box or a styled container div.
                     try:
-                        checkboxes = self._page.locator('input[type="checkbox"]:visible')
-                        cb_count = await checkboxes.count()
-                        rechecked = 0
-                        for i in range(cb_count):
-                            try:
-                                if not await checkboxes.nth(i).is_checked():
-                                    await checkboxes.nth(i).scroll_into_view_if_needed()
-                                    await checkboxes.nth(i).check(force=True)
-                                    rechecked += 1
-                            except Exception:
-                                pass
-                        if rechecked:
-                            self._log(f"Re-checked {rechecked} checkbox(es)")
-                            # Also re-check role checkboxes
-                            try:
-                                await self._page.evaluate("""() => {
-                                    const rcs = document.querySelectorAll('[role="checkbox"]');
-                                    for (const rc of rcs) {
-                                        if (rc.getAttribute('aria-checked') !== 'true') {
-                                            rc.click();
-                                            rc.setAttribute('aria-checked', 'true');
-                                            rc.dispatchEvent(new Event('change', {bubbles: true}));
-                                        }
-                                    }
-                                }""")
-                            except Exception:
-                                pass
+                        target = await self._page.evaluate(_TOS_TARGET_JS)
+                        if target:
+                            await self._page.mouse.click(target["x"], target["y"])
+                            self._log("[Form] Re-checked ToS checkbox on retry")
                     except Exception:
                         pass
-                    await asyncio.sleep(1.5)  # Longer wait for React to process
+                    await asyncio.sleep(1.0)  # Let React process
 
                 try:
                     result = await self._page.evaluate("""() => {
@@ -2337,62 +2353,40 @@ class DiscordAutomation:
             return False
 
     async def _click_tos_checkboxes(self) -> int:
-        """Real-mouse-click Discord's ToS + marketing checkboxes and VERIFY
-        React registered them (the check must survive a re-render).
+        """Real-mouse-click Discord's REQUIRED ToS checkbox and VERIFY React
+        registered it (the check must survive a re-render).
 
         The JS fill forges cb.checked + aria attributes — React ignores
         forged events and Discord's DOB re-render wipes them, leaving
         "Continue" disabled (which is how a run ends up clicking "Already
-        have an account?"). Real Playwright mouse clicks at each
-        checkbox's center generate trusted input React actually processes.
+        have an account?"). Real Playwright mouse clicks at the checkbox's
+        center generate trusted input React actually processes.
 
-        SINGLE pass, no retry loop: re-clicking a checkbox that React
-        already committed toggles it back OFF. Iterates ONE unchecked box
-        at a time — scrolls it into view first (off-screen coords click
-        nothing), real-mouse-clicks its center, and dedupes by on-screen
-        position so a container div and its inner box never both get
-        clicked (that's a double-click = toggle back off). Verifies with
-        the definitive signal: boxes checked, OR the Continue button
-        enabled (a genuinely checked ToS is what enables it).
+        Only the Terms-of-Service box is clicked: real controls only
+        (native input / role=checkbox / data-state), never styled container
+        divs that also match [class*="checkbox"], and never the optional
+        marketing/"email updates" box. Fast — one real click, ~80ms between
+        retries. Verifies with the definitive signal: boxes checked, OR
+        the Continue button enabled (a genuinely checked ToS is what
+        enables it).
         """
         clicked = 0
-        seen = set()
-        for _guard in range(8):  # bounded; one new distinct box per pass
+        # Fast: only the required ToS box, real clicks, ~80ms between
+        # retries. Re-query each pass — an already-checked box is skipped,
+        # so a registered click is never toggled back off.
+        for _attempt in range(3):
             try:
-                target = await self._page.evaluate("""() => {
-                    const els = document.querySelectorAll(
-                        'input[type="checkbox"], [role="checkbox"], .checkbox, [class*="checkbox"]');
-                    for (const cb of els) {
-                        if (cb.checked || cb.getAttribute('aria-checked') === 'true'
-                            || cb.getAttribute('data-state') === 'checked') continue;
-                        cb.scrollIntoView({ block: 'center' });
-                        const r = cb.getBoundingClientRect();
-                        if (!r || r.width < 5 || r.height < 5) continue;
-                        return {
-                            x: r.x + r.width / 2,
-                            y: r.y + r.height / 2,
-                            cx: Math.round(r.x),
-                            cy: Math.round(r.y)
-                        };
-                    }
-                    return null;
-                }""")
+                target = await self._page.evaluate(_TOS_TARGET_JS)
             except Exception:
                 target = None
             if not target:
                 break
-            key = (target["cx"], target["cy"])
-            if key in seen:
-                # Only the same visual box remains — every distinct box got
-                # its one click; do not re-click (toggle-back).
-                break
-            seen.add(key)
             try:
                 await self._page.mouse.click(target["x"], target["y"])
                 clicked += 1
-                await asyncio.sleep(0.3)
+                await asyncio.sleep(0.08)
             except Exception:
-                pass
+                break
         verified = 0
         try:
             verified = int(await self._page.evaluate("""() => document.querySelectorAll(
