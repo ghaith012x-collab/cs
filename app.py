@@ -54,13 +54,13 @@ WORKER_IDS = [f"B{i+1}" for i in range(WORKER_COUNT)]
 
 _config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
 
-# Discord-friendly cybertemp.xyz mail domains (from their public /api/domains:
+# Discord-friendly duckmail.sbs mail domains (from their public /api/domains:
 # discord:true and status:active). Shown as the selectable database in the
 # dashboard domain picker. mikerossy.com is the locked default.
 # Domains that already triggered Discord phone verification are removed here
 # (mikerossy.com, blobers.it.com, vibify.cc, vibeify.cc). The worker also
 # burns a domain at runtime when a signup ends in phone verification, so it is
-# never reused. cybertemp.xyz is the primary mail source; this list is
+# never reused. duckmail.sbs is the primary mail source; this list is
 # the discord-friendly domain pool.
 CYBERTEMP_DISCORD_DOMAINS = [
     "andrewslife.tattoo",
@@ -159,7 +159,7 @@ def _pick_domain(cfg: dict) -> str:
         fresh = [d for d in pool if d not in _BURNED_DOMAINS]
         if fresh:
             return random.choice(fresh)
-    return random.choice(pools[1] or ["andrewslife.tattoo"])
+    return random.choice(pools[1] or ["glasswhitehub.com"])
 
 
 def _log(msg: str, level: str = "info"):
@@ -373,7 +373,7 @@ async def _run_worker(wid: str, cfg: dict, proxy=None) -> None:
 
             # ── Clean up temp-mail session between attempts to prevent
             # aiohttp connector leaks (each failed attempt creates a new
-            # cybertemp inbox that must be closed).
+            # duckmail inbox that must be closed).
             if bot._mail is not None:
                 try:
                     await bot._mail.close()
@@ -895,7 +895,7 @@ def handle_config():
             cfg['worker_count'] = int(data['worker_count'])
         if 'mail_domains' in data:
             domains = [str(d).strip().lower() for d in data['mail_domains'] if str(d).strip()]
-            cfg['mail_domains'] = domains or ["andrewslife.tattoo"]
+            cfg['mail_domains'] = domains or ["glasswhitehub.com"]
         if 'custom_email' in data:
             cfg['custom_email'] = str(data.get('custom_email') or '').strip().lower()
         save_config(cfg)
@@ -904,7 +904,7 @@ def handle_config():
     avail = [d for d in CYBERTEMP_DISCORD_DOMAINS if d not in _BURNED_DOMAINS]
     return jsonify({"headless": cfg.get("headless", True),
                     "worker_count": cfg.get("worker_count", WORKER_COUNT),
-                    "mail_domains": cfg.get("mail_domains", ["andrewslife.tattoo"]),
+                    "mail_domains": cfg.get("mail_domains", ["glasswhitehub.com"]),
                     "custom_email": cfg.get("custom_email", ""),
                     "burned_domains": sorted(_BURNED_DOMAINS),
                     "available_domains": avail})
@@ -1160,7 +1160,7 @@ input:focus{border-color:var(--dim)}
 </style></head><body>
 
 <h1>EY3<span class="tag">TOKEN FORGE</span></h1>
-<div class="sub"><span class="dot" id="dDot"></span> <span id="stLine">idle</span> - discord token gen - cybertemp <span id="domLine">@andrewslife.tattoo</span></div>
+<div class="sub"><span class="dot" id="dDot"></span> <span id="stLine">idle</span> - discord token gen - duckmail <span id="domLine">@glasswhitehub.com</span></div>
 
 <nav>
   <button id="nvMain" class="on" onclick="showTab('Main')">MAIN</button>
@@ -1189,7 +1189,7 @@ input:focus{border-color:var(--dim)}
       <input type="text" id="inpEmail" placeholder="your@email.com">
       <button style="margin-top:6px" onclick="saveCustomEmail()">Save email</button>
     </div>
-    <h3 style="margin-top:14px">Mail domains (discord-friendly on cybertemp)</h3>
+    <h3 style="margin-top:14px">Mail domains (discord-friendly on duckmail)</h3>
     <div id="domPick" class="pick"></div>
     <div class="dom" style="margin-top:10px">
       <input type="text" id="domCustom" placeholder="custom domain e.g. mysite.cc">

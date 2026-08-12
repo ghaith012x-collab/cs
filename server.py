@@ -19,7 +19,7 @@ from captcha_solver import (
     solve_funcaptcha_pixels,
     solve_hcaptcha_accessibility,
 )
-from cybertemp import TempMail
+from duckmail import TempMail
 
 
 # ── TOR Control ───────────────────────────────────────────
@@ -197,7 +197,7 @@ class DiscordAutomation:
                  proxy=None, worker_id: str = "B1", domain: str = "vibify.cc"):
         self.headless = headless
         self.worker_id = worker_id
-        self._domain = (domain or "andrewslife.tattoo").strip().lower() or "andrewslife.tattoo"
+        self._domain = (domain or "glasswhitehub.com").strip().lower() or "glasswhitehub.com"
         # proxy: dict {proto, host, port, username, password, key} or None
         self.proxy = proxy
         self._playwright = None
@@ -824,32 +824,17 @@ class DiscordAutomation:
         self._nav_ok = False
         self._mail_failed = False
 
-        # No hardcoded email — create a cybertemp.xyz inbox on a
-        # discord-friendly domain (the primary mail provider). Reuse the
-        # already-running worker browser so there is no second launch: the
-        # inbox rides the same proxy IP and fingerprint as the Discord
-        # session. Retry fast (2x, no backoff) when cybertemp hiccups.
-        #
-        # Inbox is created FIRST (sequentially), then Discord navigation
-        # runs alone. truedriver's CDP layer serialises commands to the
-        # browser; running inbox creation + page.goto() concurrently on the
-        # SAME browser causes a CDP deadlock when the proxy is dead (the
-        # hung Page.navigate holds the CDP connection, and the concurrent
-        # Target.createTarget waits forever for it).
+        # No hardcoded email — create a duckmail.sbs inbox on the
+        # Discord-friendly domain @glasswhitehub.com (pure REST API, no
+        # browser, no proxy contention). Retry fast (2x, no backoff) when
+        # duckmail hiccups.
         if not self._email:
-            self._log(f"[Mail] No email configured - creating cybertemp.xyz inbox (@{self._domain})...")
+            self._log(f"[Mail] No email configured - creating duckmail.sbs inbox (@{self._domain})...")
             nav_ok = False
             try:
-                self._mail = TempMail(log=self._log, proxy=self.proxy,
-                                      headless=self.headless, domain=self._domain)
-                # Do NOT share the worker browser with TempMail.
-                # truedriver serialises CDP commands on a single websocket
-                # connection. When the worker already has an active context
-                # (from _build_context), any new_context() call on the same
-                # browser hangs because Target.create_target is blocked
-                # behind the existing context's CDP activity.
-                # TempMail launches its own independent browser (same proxy
-                # IP, same fingerprint domain) = no CDP contention, no hang.
+                # duckmail is a pure REST client (api.duckmail.sbs, Hydra
+                # API) — no browser involved. The inbox is created on the
+                # fixed Discord-friendly domain @glasswhitehub.com.
 
                 # Create inbox FIRST (with hard timeout) — never in parallel
                 # with CDP navigation on the same browser.
@@ -861,7 +846,7 @@ class DiscordAutomation:
                     except asyncio.TimeoutError:
                         self._log("[Mail] Inbox creation TIMED OUT after 35s", level="error")
                     except Exception as e:
-                        self._log(f"[Mail] cybertemp inbox error: {e}", level="error")
+                        self._log(f"[Mail] duckmail inbox error: {e}", level="error")
                     if self._email:
                         break
                     self._log(f"[Mail] Inbox creation failed — retrying ({mail_try + 1}/2)...", level="warn")
@@ -869,7 +854,7 @@ class DiscordAutomation:
                 # NOW navigate to Discord — inbox is ready (or we gave up)
                 nav_ok = await self._goto_register()
             except Exception as e:
-                self._log(f"[Mail] cybertemp inbox error: {e}", level="error")
+                self._log(f"[Mail] duckmail inbox error: {e}", level="error")
                 self._email = ""
 
             if not self._email:
