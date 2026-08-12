@@ -227,13 +227,17 @@ def _build_profile(sdk: ShardX, kwargs: dict):
         ua = kwargs.get("user_agent") or ""
         if ua:
             nav["user_agent"] = ua  # engine normalises Chrome/ version
-        accept_language = kwargs.get("accept_language") or ""
-        if accept_language:
-            locale = _locale_from_accept_language(accept_language)
-            nav["accept_language"] = accept_language
-            nav["language"] = locale
-            nav["languages"] = [locale, "en"]
-            cfg["icu_locale"] = locale
+        # Plain English UI: Discord's language follows Accept-Language and
+        # navigator.language. The engine's profile library randomizes locale,
+        # so pin en-US here unless the caller passes an explicit
+        # accept_language. (Language is a product choice, not fingerprinting
+        # — the engine still owns TLS/UA/WebGL/fonts.)
+        accept_language = kwargs.get("accept_language") or "en-US,en;q=0.9"
+        locale = _locale_from_accept_language(accept_language) or "en-US"
+        nav["accept_language"] = accept_language
+        nav["language"] = locale
+        nav["languages"] = [locale, "en"]
+        cfg["icu_locale"] = locale
     tz = kwargs.get("timezone") or ""
     if tz:
         cfg["timezone"] = tz
