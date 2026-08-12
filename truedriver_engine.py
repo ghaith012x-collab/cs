@@ -23,10 +23,137 @@ import random
 import re
 import time
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import urlparse
 
 import truedriver as td
 
 ENGINE = "clearcote"
+
+
+class _AuthRelay:
+    """Local HTTP proxy that injects ``Proxy-Authorization`` for an upstream
+    authenticated proxy (vaultproxies etc.).
+
+    Why this exists: the vaultproxies gateway answers CONNECT with a 407 that
+    Chromium cannot answer itself — inline ``user:pass@`` in ``--proxy-server``
+    is ignored (truedriver strips the credentials) and the gateway rejects CDP
+    Fetch ``authRequired`` responses. The page then hangs forever with
+    ``title="(unknown)" url="(unknown)"`` — the exact error this repo hit with
+    Clearcote. A plain upstream-facing proxy that adds the Basic header on
+    CONNECT works (it is the same path the aiohttp probe, which succeeds,
+    uses): the browser points at 127.0.0.1 with no credentials and the relay
+    authenticates upstream. This is the same relay the ShardX engine used.
+    """
+
+    def __init__(self, host: str, port: int, username: str, password: str):
+        self._host = host
+        self._port = port
+        self._basic = base64.b64encode(
+            f"{username}:{password}".encode()).decode()
+        self._server: Optional[asyncio.AbstractServer] = None
+        self.port: Optional[int] = None
+
+    async def start(self) -> int:
+        self._server = await asyncio.start_server(self._handle, "127.0.0.1", 0)
+        self.port = self._server.sockets[0].getsockname()[1]
+        return self.port
+
+    async def stop(self) -> None:
+        if self._server is not None:
+            self._server.close()
+            try:
+                await self._server.wait_closed()
+            except Exception:
+                pass
+            self._server = None
+
+    async def _handle(self, reader, writer):
+        try:
+            first_line = await reader.readline()
+            if not first_line:
+                writer.close()
+                return
+            headers = []
+            while True:
+                line = await reader.readline()
+                if line in (b"\r\n", b"\n", b""):
+                    break
+                headers.append(line)
+            is_connect = first_line.lstrip().upper().startswith(b"CONNECT ")
+            try:
+                ureader, uwriter = await asyncio.wait_for(
+                    asyncio.open_connection(self._host, self._port), timeout=10)
+            except Exception:
+                writer.close()
+                return
+            out = bytearray(first_line)
+            out += b"Proxy-Authorization: Basic " + self._basic.encode() + b"\r\n"
+            for h in headers:
+                if h.lower().startswith(b"proxy-authorization"):
+                    continue
+                out += h
+            out += b"\r\n"
+            uwriter.write(out)
+            await uwriter.drain()
+            if is_connect:
+                # Bounded: a wedged upstream (TCP accepts but never answers the
+                # CONNECT) must fail the browser's tunnel FAST — an unbounded
+                # readline here hangs the renderer forever, which is the
+                # title="(unknown)" url="(unknown)" error. On timeout we close
+                # both ends so Chromium commits a clean proxy error page and
+                # the worker rotates instead of wedging.
+                try:
+                    resp = await asyncio.wait_for(
+                        ureader.readline(), timeout=10)
+                except asyncio.TimeoutError:
+                    writer.close()
+                    uwriter.close()
+                    return
+                resp_headers = []
+                while True:
+                    line = await ureader.readline()
+                    if line in (b"\r\n", b"\n", b""):
+                        break
+                    resp_headers.append(line)
+                writer.write(resp)
+                for h in resp_headers:
+                    writer.write(h)
+                writer.write(b"\r\n")
+                await writer.drain()
+                if not resp.startswith(b"HTTP/1.1 200"):
+                    writer.close()
+                    uwriter.close()
+                    return
+            await self._pump(reader, writer, ureader, uwriter)
+        except Exception:
+            try:
+                writer.close()
+            except Exception:
+                pass
+
+    async def _pump(self, reader, writer, ureader, uwriter):
+        async def pump(src, dst):
+            try:
+                while True:
+                    data = await src.read(65536)
+                    if not data:
+                        break
+                    dst.write(data)
+                    await dst.drain()
+            except Exception:
+                pass
+            finally:
+                try:
+                    dst.close()
+                except Exception:
+                    pass
+
+        await asyncio.gather(
+            pump(reader, uwriter), pump(ureader, writer), return_exceptions=True)
+        try:
+            writer.close()
+        except Exception:
+            pass
 
 # ─────────────────────────────────────────────────────────────────
 # Helpers
@@ -938,8 +1065,9 @@ class _BrowserContext:
 
 
 class _Browser:
-    def __init__(self, instance: td.Browser):
+    def __init__(self, instance: td.Browser, relay: Optional[_AuthRelay] = None):
         self._instance = instance
+        self._relay = relay
         self.contexts: List[_BrowserContext] = []
 
     async def _get_or_create_tab(self) -> td.Tab:
@@ -1032,6 +1160,12 @@ class _Browser:
             await self._instance.stop()
         except Exception:
             pass
+        if self._relay is not None:
+            try:
+                await self._relay.stop()
+            except Exception:
+                pass
+            self._relay = None
         self.contexts.clear()
 
 
@@ -1055,16 +1189,34 @@ class _BrowserType:
         browser_args = list(args or []) + cc_args
         _apply_browser_fonts(exe)
 
+        # ── Authenticated HTTP(S) proxy → local auth relay ──
+        # vaultproxies' gateway answers CONNECT with a 407 that Chromium
+        # cannot answer itself (inline user:pass@ in --proxy-server is
+        # ignored and the gateway rejects CDP Fetch authRequired) — the
+        # page then hangs with title="(unknown)" url="(unknown)". The
+        # proven fix is a local relay that injects Proxy-Authorization on
+        # CONNECT at the TCP layer: the browser points at 127.0.0.1 with
+        # no credentials, the relay authenticates upstream (exactly the
+        # path the working aiohttp probe uses). Same relay ShardX used.
+        relay = None
         proxy_url = ""
+        use_cdp_auth = False
         if proxy and proxy.get("server"):
-            server = proxy["server"]
-            user = proxy.get("username", "")
-            pwd = proxy.get("password", "")
-            host_part = server.replace("http://", "").replace("https://", "")
-            if user and pwd:
-                proxy_url = f"http://{user}:{pwd}@{host_part}"
+            server = str(proxy["server"])
+            user = proxy.get("username", "") or ""
+            pwd = proxy.get("password", "") or ""
+            if user and server.startswith(("http://", "https://")):
+                u = urlparse(server)
+                relay = _AuthRelay(u.hostname, u.port or 80, user, pwd)
+                await relay.start()
+                proxy_url = f"http://127.0.0.1:{relay.port}"
             else:
-                proxy_url = server
+                host_part = server.replace("http://", "").replace("https://", "")
+                if user and pwd:
+                    proxy_url = f"http://{user}:{pwd}@{host_part}"
+                    use_cdp_auth = True
+                else:
+                    proxy_url = server
 
         ua = ""
         if browser_args:
@@ -1086,24 +1238,24 @@ class _BrowserType:
             browser_connection_max_tries=60,
         )
         if proxy_url:
-            cfg.proxy = proxy_url
+            # Dict form — creds are NEVER inline here. With the relay the
+            # URL is a bare 127.0.0.1; without one truedriver strips the
+            # creds anyway and CDP Fetch auth handles the 407.
+            cfg.proxy = {"server": proxy_url}
         if ua:
             cfg.user_agent = ua
 
         instance = await td.start(cfg)
-        # CRITICAL: store proxy auth so _get_or_create_tab() can wire
-        # CDP Fetch auth on every raw create_target tab. Without this,
-        # the vaultproxies gateway 407-challenges the tab, Chromium
-        # hangs with no credentials, and the page never loads:
-        # title="(unknown)" url="(unknown)".
-        # Must be a DICT with "username"/"password" keys —
-        # Browser.setup_proxy_auth() reads it as self._proxy_auth["username"].
-        if proxy and proxy.get("username"):
+        # Legacy path (no relay — e.g. non-http proxies with creds): store
+        # proxy auth so _get_or_create_tab() can wire CDP Fetch auth on every
+        # raw create_target tab. Must be a DICT with "username"/"password"
+        # keys — Browser.setup_proxy_auth() reads self._proxy_auth["username"].
+        if use_cdp_auth and proxy and proxy.get("username"):
             instance._proxy_auth = {
                 "username": proxy.get("username"),
                 "password": proxy.get("password", ""),
             }
-        return _Browser(instance)
+        return _Browser(instance, relay=relay)
 
     async def launch_persistent_context(self, user_data_dir: str = None, **kwargs) -> _Browser:
         return await self.launch(**kwargs)

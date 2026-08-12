@@ -579,11 +579,15 @@ class DiscordAutomation:
         circuit is pointless — if Discord blocked that exit node, it won't
         unblock on retry."""
         url = "https://discord.com/register"
-        # 15s cap: residential vaultproxies sessions commonly take 5-10s just
-        # to reach DOMContentLoaded (verified live: ~5-6s typical, 6s+ common),
-        # so a 6s cap rotated away perfectly healthy sessions. The form-poll
-        # below is the real render gate; this only needs to land the shell.
-        timeout_ms = 15000
+        # 30s cap: residential vaultproxies sessions are SLOW — the shell
+        # (DOMContentLoaded) commonly commits only after 10-30s (verified
+        # live: 5-30s spread, slow sessions up to ~35s), so a tighter cap
+        # cancels the navigation mid-commit and the tab reads back as
+        # title="(unknown)" url="(unknown)" — a FALSE dead-session signal
+        # that rotated perfectly healthy sessions. The engine's own internal
+        # ready-state wait is 30s; this cap just lets it finish. The form-poll
+        # below remains the real render gate.
+        timeout_ms = 30000
 
         self._log(f"[Nav] Navigating to {url} (timeout={timeout_ms}ms)...")
         t0 = time.time()
@@ -593,13 +597,13 @@ class DiscordAutomation:
             # slow proxies hangs for tens of seconds. The form-poll loop below
             # already waits for the Discord SPA to boot, so we lose nothing.
             #
-            # WRAPPED in asyncio.wait_for: Playwright's timeout is advisory
+            # WRAPPED in asyncio.wait_for: the engine's timeout is advisory
             # only. When the proxy is dead, Chromium's internal TCP retry logic
-            # can hang for 30+ seconds regardless of timeout — asyncio.wait_for
-            # with a hard cap kills the coroutine and forces a fresh proxy.
+            # can hang regardless of timeout — asyncio.wait_for with a hard cap
+            # kills the coroutine and forces a fresh proxy.
             await asyncio.wait_for(
                 self._page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms),
-                timeout=(timeout_ms / 1000.0) + 3.0,  # 9s hard cap (never 38s)
+                timeout=(timeout_ms / 1000.0) + 3.0,  # hard cap (never 38s)
             )
             self._log(f"[Nav] Page DOM ready in {time.time() - t0:.1f}s (not waiting for hCaptcha subresources)")
         except asyncio.TimeoutError:
@@ -613,6 +617,16 @@ class DiscordAutomation:
         except Exception:
             page_title = "(unknown)"
             page_url = "(unknown)"
+        if str(page_title) == "(unknown)" and str(page_url) == "(unknown)":
+            # The hard cap can cancel goto while a slow-but-alive session is
+            # still committing; the tab usually answers within a beat. Retry
+            # the read once before declaring the session dead.
+            await asyncio.sleep(1.5)
+            try:
+                page_title = await asyncio.wait_for(self._page.title(), timeout=3.0)
+                page_url = await asyncio.wait_for(self._page.evaluate("location.href"), timeout=3.0)
+            except Exception:
+                pass
         self._log('[Nav] Page: title="' + str(page_title)[:80] + '" url=' + str(page_url)[:80])
 
         # ── Dead proxy (cannot reach Discord at all) ──
