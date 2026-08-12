@@ -7968,6 +7968,27 @@ async def solve_hcaptcha_accessibility(page, iframe,
                             _box = None
                         _rendered = _box is None or _box.get("height", 0) >= 40
                         if _rendered and (saw_absent or not await _token_present()):
+                            # Honesty: NEVER chain on a sized-but-blank iframe.
+                            # A fresh challenge element is laid out at full size
+                            # before its JS paints — verify it actually painted
+                            # content (same rule server._challenge_rendered uses).
+                            try:
+                                _cf = await _chall.first.content_frame()
+                                _painted = False
+                                if _cf is not None:
+                                    _painted = bool(await _cf.evaluate(
+                                        """() => {
+                                            if (document.readyState !== 'complete') return false;
+                                            const b = document.getElementById('hcaptcha-body');
+                                            if (b && b.offsetHeight >= 40) return true;
+                                            const t = (document.body && document.body.innerText) || '';
+                                            return t.trim().length >= 5;
+                                        }""", timeout=2500))
+                            except Exception:
+                                _painted = False
+                            if not _painted:
+                                await asyncio.sleep(0.5)
+                                continue
                             new_chall_seen = True
                             break
                     await asyncio.sleep(0.5)

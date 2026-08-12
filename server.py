@@ -1164,6 +1164,48 @@ class DiscordAutomation:
         except:
             return False
 
+    async def _frame_js_ready(self, iframe, js) -> bool:
+        """Evaluate `js` inside the iframe's content frame; False on any error."""
+        try:
+            frame = await iframe.content_frame()
+            if frame is None:
+                return False
+            val = await frame.evaluate(js, timeout=2500)
+            return bool(val)
+        except Exception:
+            return False
+
+    async def _challenge_rendered(self, iframe) -> bool:
+        """True only when the hCaptcha challenge iframe has genuinely painted.
+
+        A challenge iframe is laid out at full size (>= 80px tall) the moment
+        it is inserted, BEFORE its JS renders anything - so bounding-box checks
+        alone report 'rendered' for a blank box. Require the frame document to
+        be complete and to contain real challenge content before claiming ready.
+        """
+        return await self._frame_js_ready(iframe, """() => {
+            if (document.readyState !== 'complete') return false;
+            const body = document.getElementById('hcaptcha-body');
+            if (body && body.offsetHeight >= 40) return true;
+            const t = (document.body && document.body.innerText) || '';
+            return t.trim().length >= 5;
+        }""")
+
+    async def _widget_rendered(self, iframe) -> bool:
+        """True only when the hCaptcha widget iframe has actually painted.
+
+        Same honesty rule as _challenge_rendered: a visible-size iframe with a
+        still-loading document must not count as rendered. Accept the checkbox
+        being interactive, or any visible text content inside the frame.
+        """
+        return await self._frame_js_ready(iframe, """() => {
+            if (document.readyState !== 'complete') return false;
+            const cb = document.getElementById('checkbox');
+            if (cb && cb.offsetHeight > 0 && cb.offsetWidth > 0) return true;
+            const t = (document.body && document.body.innerText) || '';
+            return t.trim().length >= 3;
+        }""")
+
     async def _detect_challenge_mode(self, iframe_element) -> str:
         """Identify the hCaptcha state: 'checkbox' or 'drag'.
 
@@ -1307,23 +1349,28 @@ class DiscordAutomation:
                     self._log("[Captcha] RATE LIMITED — rotating circuit", level="warn")
                     return False
 
-                # 1) Challenge iframe already rendered → genuinely ready
-                #    (an active challenge is showing; solve it directly).
+                # 1) Challenge iframe already rendered → genuinely ready.
+                #    NEVER trust size alone: a blank/loading challenge iframe
+                #    is laid out at full size before its JS paints. Only claim
+                #    [READY] when the frame document is complete AND actually
+                #    shows hCaptcha content.
                 try:
                     chall = self._page.locator(
                         'iframe[title*="hCaptcha challenge"], iframe[src*="hcaptcha-challenge"]')
                     if await chall.count() > 0:
                         box = await chall.first.bounding_box()
-                        if box and box.get("height", 0) >= 80:
+                        if (box and box.get("height", 0) >= 80
+                                and await self._challenge_rendered(chall.first)):
                             iframe = chall.first
                             self._log("[Captcha] [READY] hCaptcha challenge already rendered")
                             break
                 except Exception:
                     pass
 
-                # 2) Widget present → wait for its document to actually load
-                #    plus a short settle window so hCaptcha's JS hydrates.
-                #    No checkbox click — the solver verifies interactivity.
+                # 2) Widget present → hand it to the solver as soon as its
+                #    document has ACTUALLY rendered (verified content, not a
+                #    timer). No checkbox click — the solver verifies
+                #    interactivity by opening the 3-dots menu.
                 try:
                     widget = self._page.locator('iframe[src*="newassets.hcaptcha.com"]')
                     if await widget.count() > 0:
@@ -1335,13 +1382,9 @@ class DiscordAutomation:
                         if await read_hcaptcha_token(self._page):
                             self._log("[Captcha] [OK] hCaptcha already solved (token present)")
                             return True
-                        wframe = await widget.first.content_frame()
-                        wbox = await widget.first.bounding_box()
-                        if (wframe is not None and wbox
-                                and wbox.get("height", 0) > 0
-                                and time.time() - widget_since >= 2.0):
+                        if await self._widget_rendered(widget.first):
                             iframe = widget.first
-                            self._log("[Captcha] [READY] hCaptcha widget loaded — starting accessibility challenge")
+                            self._log("[Captcha] [READY] hCaptcha widget rendered — opening accessibility challenge")
                             break
                 except Exception:
                     pass
@@ -1388,7 +1431,9 @@ class DiscordAutomation:
                                   "session, rotating", level="warn")
                     return False
 
-                await asyncio.sleep(0.5)
+                # Fast poll — hCaptcha paints within a few hundred ms of its
+                # document completing, so 0.25s catches it almost immediately.
+                await asyncio.sleep(0.25)
 
             if not iframe:
                 # No hCaptcha iframe - check for FunCAPTCHA (Arkose) instead
