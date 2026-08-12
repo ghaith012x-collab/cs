@@ -35,14 +35,126 @@ Set SHARDX_CACHE_DIR to relocate the engine/fingerprint/profiles cache.
 """
 
 import asyncio
+import base64
 import os
 import threading
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlparse
 
 from patchright.async_api import async_playwright as _patchright_async_playwright
 from shardx import ShardX
 
 ENGINE = "shardx"
+
+
+class _AuthRelay:
+    """Local HTTP proxy that injects ``Proxy-Authorization`` for an upstream
+    authenticated proxy (vaultproxies etc.).
+
+    The ShardX engine ignores inline ``user:pass@`` in ``--proxy-server`` and
+    the gateway rejects CDP Fetch ``authRequired`` responses, but a plain
+    upstream-facing proxy that adds the Basic header on CONNECT works — this
+    is exactly the path the aiohttp probe (which succeeds) uses. The browser
+    points at 127.0.0.1 with no credentials; the relay authenticates upstream.
+    """
+
+    def __init__(self, host: str, port: int, username: str, password: str):
+        self._host = host
+        self._port = port
+        self._basic = base64.b64encode(
+            f"{username}:{password}".encode()).decode()
+        self._server: Optional[asyncio.AbstractServer] = None
+        self.port: Optional[int] = None
+
+    async def start(self) -> int:
+        self._server = await asyncio.start_server(self._handle, "127.0.0.1", 0)
+        self.port = self._server.sockets[0].getsockname()[1]
+        return self.port
+
+    async def stop(self) -> None:
+        if self._server is not None:
+            self._server.close()
+            try:
+                await self._server.wait_closed()
+            except Exception:
+                pass
+            self._server = None
+
+    async def _handle(self, reader, writer):
+        try:
+            first_line = await reader.readline()
+            if not first_line:
+                writer.close()
+                return
+            headers = []
+            while True:
+                line = await reader.readline()
+                if line in (b"\r\n", b"\n", b""):
+                    break
+                headers.append(line)
+            is_connect = first_line.lstrip().upper().startswith(b"CONNECT ")
+            try:
+                ureader, uwriter = await asyncio.wait_for(
+                    asyncio.open_connection(self._host, self._port), timeout=10)
+            except Exception:
+                writer.close()
+                return
+            out = bytearray(first_line)
+            out += b"Proxy-Authorization: Basic " + self._basic.encode() + b"\r\n"
+            for h in headers:
+                if h.lower().startswith(b"proxy-authorization"):
+                    continue
+                out += h
+            out += b"\r\n"
+            uwriter.write(out)
+            await uwriter.drain()
+            if is_connect:
+                resp = await ureader.readline()
+                resp_headers = []
+                while True:
+                    line = await ureader.readline()
+                    if line in (b"\r\n", b"\n", b""):
+                        break
+                    resp_headers.append(line)
+                writer.write(resp)
+                for h in resp_headers:
+                    writer.write(h)
+                writer.write(b"\r\n")
+                await writer.drain()
+                if not resp.startswith(b"HTTP/1.1 200"):
+                    writer.close()
+                    uwriter.close()
+                    return
+            await self._pump(reader, writer, ureader, uwriter)
+        except Exception:
+            try:
+                writer.close()
+            except Exception:
+                pass
+
+    async def _pump(self, reader, writer, ureader, uwriter):
+        async def pump(src, dst):
+            try:
+                while True:
+                    data = await src.read(65536)
+                    if not data:
+                        break
+                    dst.write(data)
+                    await dst.drain()
+            except Exception:
+                pass
+            finally:
+                try:
+                    dst.close()
+                except Exception:
+                    pass
+
+        await asyncio.gather(
+            pump(reader, uwriter), pump(ureader, writer), return_exceptions=True)
+        try:
+            writer.close()
+        except Exception:
+            pass
 
 # ─────────────────────────────────────────────────────────────────
 # SDK singleton
@@ -144,7 +256,12 @@ class _BrowserContext:
         return await self._ctx.add_init_script(script)
 
     async def new_page(self, **kwargs):
-        return await self._ctx.new_page(**kwargs)
+        page = await self._ctx.new_page(**kwargs)
+        try:
+            await self.browser._attach_proxy_auth(self._ctx, page)
+        except Exception:
+            pass
+        return page
 
     async def close(self, **kwargs):
         return await self._ctx.close()
@@ -155,14 +272,64 @@ class _BrowserContext:
 
 
 class _Browser:
-    def __init__(self, pw, browser, session, profile, sdk):
+    def __init__(self, pw, browser, session, profile, sdk, proxy_user="", proxy_pass="", relay=None):
         self._pw = pw
         self._browser = browser
         self._session = session
         self._profile = profile
         self._sdk = sdk
+        self._proxy_user = proxy_user or ""
+        self._proxy_pass = proxy_pass or ""
+        self._relay = relay
         self._contexts: List[_BrowserContext] = []
         self._closed = False
+
+    async def _attach_proxy_auth(self, ctx, page):
+        """Answer HTTP-proxy 407 challenges over CDP Fetch.
+
+        The ShardX fork ignores inline ``user:pass@`` in ``--proxy-server``
+        (the SDK's own comment admits stock Chromium does too), so an
+        authenticated gateway like vaultproxies 407-challenges every request
+        and the page never loads. This is the same mechanism the previous
+        truedriver engine needed: enable Fetch with auth-request handling on
+        the page's CDP session and answer ``authRequired`` with the
+        credentials. Mirrors Playwright's own proxy-auth implementation.
+        """
+        if not self._proxy_user:
+            return
+        try:
+            cdp = await ctx.new_cdp_session(page)
+            await cdp.send("Fetch.enable", {
+                "handleAuthRequests": True,
+                "patterns": [{"urlPattern": "*", "requestStage": "Response"}],
+            })
+
+            async def _continue_response(params):
+                try:
+                    await cdp.send("Fetch.continueResponse",
+                                   {"requestId": params["requestId"]})
+                except Exception:
+                    pass
+
+            async def _provide_credentials(params):
+                try:
+                    await cdp.send("Fetch.continueWithAuth", {
+                        "requestId": params["requestId"],
+                        "authChallengeResponse": {
+                            "response": "ProvideCredentials",
+                            "username": self._proxy_user,
+                            "password": self._proxy_pass,
+                        },
+                    })
+                except Exception:
+                    pass
+
+            cdp.on("Fetch.requestPaused",
+                   lambda p: asyncio.create_task(_continue_response(p)))
+            cdp.on("Fetch.authRequired",
+                   lambda p: asyncio.create_task(_provide_credentials(p)))
+        except Exception as e:
+            print(f"[Engine] CDP Fetch proxy auth FAILED: {e}", flush=True)
 
     async def new_context(self, **kwargs) -> _BrowserContext:
         # Proxy rides at browser launch (--proxy-server); a context-level
@@ -175,7 +342,12 @@ class _Browser:
 
     async def new_page(self, **kwargs):
         # Playwright semantics: new isolated context + page.
-        return await self._browser.new_page(**kwargs)
+        page = await self._browser.new_page(**kwargs)
+        try:
+            await self._attach_proxy_auth(page.context, page)
+        except Exception:
+            pass
+        return page
 
     async def close(self, **kwargs):
         if self._closed:
@@ -199,6 +371,11 @@ class _Browser:
             await self._pw.stop()                # stop the patchright driver
         except Exception:
             pass
+        if self._relay is not None:
+            try:
+                await self._relay.stop()         # stop the auth relay
+            except Exception:
+                pass
         self._contexts.clear()
 
 
@@ -218,6 +395,25 @@ class _BrowserType:
     ) -> _Browser:
         sdk = _get_sdk()
 
+        proxy = proxy or {}
+        proxy_user = proxy.get("username", "") or ""
+        proxy_pass = proxy.get("password", "") or ""
+
+        # Authenticated HTTP(S) proxy → local auth relay. The engine cannot
+        # authenticate against the gateway itself (inline creds in
+        # --proxy-server are ignored; CDP Fetch auth is rejected), so point it
+        # at 127.0.0.1 and let the relay add Proxy-Authorization upstream —
+        # the same path the (working) aiohttp probe uses.
+        relay = None
+        server = proxy.get("server", "") or ""
+        if proxy_user and server.startswith(("http://", "https://")):
+            u = urlparse(server)
+            relay = _AuthRelay(u.hostname, u.port or 80, proxy_user, proxy_pass)
+            await relay.start()
+            proxy_url = f"http://127.0.0.1:{relay.port}"
+        else:
+            proxy_url = _proxy_url(proxy)
+
         def _spawn():
             # Serialize the whole spawn: concurrent workers must never race
             # the runtime install or the per-profile user-data-dir tree.
@@ -230,7 +426,6 @@ class _BrowserType:
                         extra.append(flag)
                 if "--incognito" not in extra:
                     extra.append("--incognito")
-                proxy_url = _proxy_url(proxy)
                 session = sdk.launch(
                     profile,
                     proxy=proxy_url,
@@ -258,7 +453,10 @@ class _BrowserType:
 
         pw = await _patchright_async_playwright().start()
         browser = await pw.chromium.connect_over_cdp(session.cdp_url)
-        wrapper = _Browser(pw, browser, session, profile, sdk)
+        wrapper = _Browser(pw, browser, session, profile, sdk,
+                           proxy_user=proxy_user,
+                           proxy_pass=proxy_pass,
+                           relay=relay)
         if self._owner is not None:
             self._owner._browsers.append(wrapper)
         return wrapper
