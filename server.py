@@ -814,28 +814,26 @@ class DiscordAutomation:
         # ── Poll for form elements ──
         # Discord uses aria-label on inputs, not name/id — use broad selectors.
         #
-        # The render gate is DETECTION-driven, not a fixed timer: the poll loop
-        # below returns the instant the form paints (checks every 0.15s), so
-        # these budgets only bound how long a session may stay blank before we
-        # rotate. Dead sessions were already filtered by the pre-launch probe
-        # + the title/url grace poll above; slow-but-alive sessions get an
-        # automatic reload after reload_after to re-fetch the JS bundles, and
-        # only rotate if they stay blank past blank_bail.
-        challenge_budget = 25.0 if self.proxy else 18.0
-        blank_bail = 12.0 if self.proxy else 10.0
+        # NO RENDER TIMEOUT: this loop waits as long as it takes for the form
+        # to fully render and returns the INSTANT it paints (checks every
+        # 0.15s). There is no wall-clock budget — the only exits are real
+        # signals: a successful render, a hard block (403 / rate-limit / fatal
+        # title, detected above), or the page actually dying (repeatedly
+        # unreadable). A slow-but-alive session is reloaded up to max_reloads
+        # times to re-fetch dropped JS bundles, then simply kept waiting.
         reload_after = 4.0       # blank this long -> reload to re-fetch JS bundles
         max_reloads = 2          # hard cap on reloads per session
-        challenge_bail = 12.0    # Cloudflare challenge that never resolves -> rotate
-        self._log(f"[Nav] Waiting for registration form to render (budget={challenge_budget:.0f}s, blank_bail={blank_bail:.0f}s, reloads<={max_reloads}, challenge_bail={challenge_bail:.0f}s)...")
+        _render_wait_start = time.time()
+        self._log(f"[Nav] Waiting for registration form to render (no timeout - reloads<={max_reloads}, reload_after={reload_after:.0f}s)...")
         blank_since = None       # when the page first looked blank
         challenge_since = None   # when a Cloudflare challenge first appeared
         reload_count = 0         # reloads attempted for a blank/hung SPA
         login_clicked = False    # already clicked the Register link once
         turnstile_tried = False  # already attempted a UC stealth Turnstile bypass
+        dead_reads = 0           # consecutive unreadable polls -> page died
         last_log = -1.0
-        start_ts = time.time()
-        while time.time() - start_ts < challenge_budget:
-            elapsed = time.time() - start_ts
+        while True:
+            elapsed = time.time() - _render_wait_start
             try:
                 checks = await asyncio.wait_for(self._page.evaluate("""() => {
                     const body = document.body;
@@ -874,6 +872,18 @@ class DiscordAutomation:
             except Exception:
                 state = None
 
+            if state is None:
+                # Page gone / unreadable (tab closed or crashed) — a real dead
+                # signal, not a timeout. Bail only after many consecutive
+                # failures so a brief hiccup doesn't rotate a healthy session.
+                dead_reads += 1
+                if dead_reads >= 20:
+                    self._log("[Nav] Page unreadable 20x in a row - page died, rotating circuit", level="warn")
+                    return False
+                await asyncio.sleep(0.15)
+                continue
+            dead_reads = 0
+
             if state:
                 # Log every ~4s with input/button counts for debugging
                 if elapsed >= last_log + 4.0:
@@ -893,11 +903,12 @@ class DiscordAutomation:
                 # Blank render + Cloudflare challenge handling.
                 # Two very different causes, handled separately:
                 #   1. Cloudflare managed challenge ("Just a moment..."): it
-                #      auto-resolves in ~5-15s and drops cf_clearance. WAIT for
-                #      it; only rotate if it persists past challenge_bail.
+                #      auto-resolves and drops cf_clearance. WAIT for it as
+                #      long as it takes — no bail-out (Turnstile widgets get
+                #      re-attempted every ~10s via UC stealth).
                 #   2. React failed to hydrate (a JS bundle dropped/errored): a
                 #      reload re-fetches the bundles and almost always boots.
-                #      Reload up to max_reloads times before giving up.
+                #      Reload up to max_reloads times, then keep waiting.
                 if state.get("challenge"):
                     if challenge_since is None:
                         challenge_since = time.time()
@@ -906,22 +917,19 @@ class DiscordAutomation:
                     if state.get("cfClearance"):
                         self._log("[Nav] cf_clearance set - challenge passed, waiting for React to boot...")
                         challenge_since = None
-                    elif not turnstile_tried and await self._detect_turnstile():
+                    else:
                         # Cloudflare Turnstile widget (not the auto-resolving
                         # managed challenge). Never use plain Selenium clicks —
                         # use SeleniumBase UC stealth (uc_click /
-                        # uc_gui_click_captcha) to press it.
-                        turnstile_tried = True
-                        self._log("[Nav] Cloudflare Turnstile widget detected - bypassing with SeleniumBase UC stealth...")
-                        if await self._solve_turnstile_if_present():
-                            self._log("[Nav] Turnstile bypassed via UC stealth - waiting for React to boot...")
-                            challenge_since = None
-                    elif time.time() - challenge_since >= challenge_bail:
-                        proxy_label = "proxy session" if self.proxy else "TOR exit"
-                        bail_s = int(challenge_bail)
-                        self._nav_error = f"{proxy_label} Cloudflare challenge never resolved after {bail_s}s"
-                        self._log(f"[Nav] CHALLENGE STUCK for {bail_s}s (no cf_clearance) - {proxy_label} blocked - rotating circuit", level="warn")
-                        return False
+                        # uc_gui_click_captcha) to press it. Re-attempt every
+                        # ~10s — no bail-out; wait as long as it takes.
+                        if (not turnstile_tried
+                                or time.time() - challenge_since >= 10.0):
+                            turnstile_tried = True
+                            self._log("[Nav] Cloudflare Turnstile widget detected - bypassing with SeleniumBase UC stealth...")
+                            if await self._solve_turnstile_if_present():
+                                self._log("[Nav] Turnstile bypassed via UC stealth - waiting for React to boot...")
+                                challenge_since = None
                     await asyncio.sleep(0.3)
                     continue
                 challenge_since = None
@@ -947,14 +955,9 @@ class DiscordAutomation:
                         await asyncio.sleep(1.2)
                         blank_since = None
                         challenge_since = None
-                        start_ts = time.time()   # fresh full budget for the reloaded page
                         continue
-                    elif time.time() - blank_since >= blank_bail:
-                        proxy_label = "proxy session" if self.proxy else "TOR exit"
-                        bail_s = int(blank_bail)
-                        self._nav_error = f"{proxy_label} never painted the Discord form (blank {bail_s}s after {reload_count} reloads)"
-                        self._log(f"[Nav] BLANK RENDER for {bail_s}s (SPA mounted, no content, no cf_clearance, {reload_count} reloads) - {proxy_label} blocked/slow - rotating circuit", level="warn")
-                        return False
+                    # max_reloads exhausted — KEEP waiting, no timeout. A slow
+                    # circuit can still paint the form minutes later.
                 else:
                     blank_since = None
                 if state.get("isLogin") and not login_clicked and elapsed >= 3.0:
@@ -1017,8 +1020,8 @@ class DiscordAutomation:
             pass
 
         proxy_label = "fresh proxy session" if self.proxy else "fresh TOR circuit"
-        self._nav_error = f"Discord form never rendered ({int(challenge_budget)}s poll exhausted) — rotating to {proxy_label}"
-        self._log(f"[Nav] Form did not render within {int(challenge_budget)}s - rotating to {proxy_label}", level="warn")
+        self._nav_error = f"Discord form never rendered (loop exited without a render signal) — rotating to {proxy_label}"
+        self._log(f"[Nav] Form never rendered - rotating to {proxy_label}", level="warn")
         return False
 
     async def capture_screenshot(self) -> str:
