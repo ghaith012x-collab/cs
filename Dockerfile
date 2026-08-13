@@ -17,10 +17,10 @@ RUN apt-get update && apt-get install -y \
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Pre-fetch + verify the ShardX stealth Chromium engine into the image cache
-# (the SDK launches this binary; fingerprints are randomized per session from
-# the bundled 170-profile fingerprint library + per-launch hardware/version).
-RUN python -c "from shardx import ShardX; ShardX().runtime.install()" && echo 'ShardX engine pre-fetched'
+# Pre-fetch + verify the Clearcote stealth Chromium engine into the image cache
+# (the SDK downloads/verifies this binary on first use; the truedriver engine
+# launches it with --fingerprint* persona switches minted per session).
+RUN python -c "from clearcote import executable_path; print(executable_path(quiet=True))" && echo 'Clearcote engine pre-fetched'
 
 # Copy ALL application files
 COPY *.py ./
