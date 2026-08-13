@@ -1408,6 +1408,58 @@ class DiscordAutomation:
         except Exception:
             return False
 
+
+    async def _widget_error_state(self, iframe) -> str:
+        """If the hCaptcha widget iframe is showing hCaptcha's OWN error
+        banner ("Rate limited or network error. Please retry.") return the
+        banner text.
+
+        hCaptcha renders this INSIDE the widget when its backend rejects the
+        session (flagged IP, dead circuit, blocked hcaptcha.com API). The
+        checkbox exists but is inert -- no click will ever register, because
+        hCaptcha never initialized the widget. Returns "" when healthy.
+        """
+        frame = await self._hcaptcha_frame_for(iframe)
+        if frame is None:
+            return ""
+        try:
+            text = await frame.evaluate(
+                "() => (document.body ? document.body.innerText : '')")
+        except Exception:
+            return ""
+        low = (text or "").lower()
+        for kw in ("rate limited or network error", "rate limited",
+                   "network error", "please retry", "please try again",
+                   "automated queries"):
+            if kw in low:
+                return (text or "").strip()[:120]
+        return ""
+
+    async def _retry_erroring_widget(self, iframe) -> bool:
+        """Click hCaptcha's own retry/refresh control inside the widget frame
+        so a transient network error gets one honest second chance.
+
+        The refresh button (.refresh.button) reloads the widget; an explicit
+        Retry link also appears in the error state. Returns True if any
+        control was clicked.
+        """
+        frame = await self._hcaptcha_frame_for(iframe)
+        if frame is None:
+            return False
+        try:
+            for sel in (".refresh.button", "[aria-label*='Refresh']",
+                        "button[aria-label*='Refresh']", "a:has-text('Retry')",
+                        "div:has-text('Please try again')"):
+                loc = frame.locator(sel).first
+                try:
+                    await loc.click(timeout=1500, force=True)
+                    return True
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        return False
+
     async def _click_hcaptcha_checkbox(self, iframe) -> bool:
         """CLICK the hCaptcha 'Are you human' checkbox — always attempts.
 
@@ -1893,6 +1945,38 @@ class DiscordAutomation:
                         if await read_hcaptcha_token(self._page):
                             self._log("[Captcha] [OK] hCaptcha already solved (token present)")
                             return True
+                        # ── WIDGET-ERROR FAST-FAIL (root cause) ──
+                        # When the widget itself shows "Rate limited or
+                        # network error. Please retry." the checkbox is
+                        # INERT -- hCaptcha's backend rejected this session
+                        # (flagged IP / dead circuit), so no click will ever
+                        # register. Retry the widget once (transient network
+                        # errors recover), then rotate immediately instead of
+                        # burning the 45s watchdog on a blocked session.
+                        widget_err = ""
+                        err_wi = -1
+                        for wi in range(wcount):
+                            widget_err = await self._widget_error_state(widgets.nth(wi))
+                            if widget_err:
+                                err_wi = wi
+                                break
+                        if widget_err:
+                            self._log(
+                                f"[Captcha] hCaptcha widget error: {widget_err!r}",
+                                level="warn")
+                            retried = await self._retry_erroring_widget(
+                                widgets.nth(err_wi))
+                            await asyncio.sleep(2.5)
+                            still_err = await self._widget_error_state(
+                                widgets.nth(err_wi))
+                            if still_err:
+                                self._log(
+                                    f"[Captcha] Widget still erroring after retry "
+                                    f"(retried={retried}) — rotating circuit NOW",
+                                    level="warn")
+                                return False
+                            self._log(
+                                "[Captcha] Widget recovered after retry — continuing")
                         # ── ALWAYS-CLICK PASS (user request) ──
                         # Click the checkbox UNCONDITIONALLY whenever any
                         # hCaptcha iframe is present — the readiness probes
