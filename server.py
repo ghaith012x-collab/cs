@@ -220,7 +220,9 @@ INIT_SCRIPT = build_init_script(
     USER_AGENTS[0],
 )
 
-NAV_TIMEOUT_MS = 60000
+# Secondary navigations (verification link, token page). Halved from 60s:
+# these pages are light and a hang this long only wastes a dead-session slot.
+NAV_TIMEOUT_MS = 30000
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -672,15 +674,13 @@ class DiscordAutomation:
         circuit is pointless — if Discord blocked that exit node, it won't
         unblock on retry."""
         url = "https://discord.com/register"
-        # 30s cap: residential vaultproxies sessions are SLOW — the shell
-        # (DOMContentLoaded) commonly commits only after 10-30s (verified
-        # live: 5-30s spread, slow sessions up to ~35s), so a tighter cap
-        # cancels the navigation mid-commit and the tab reads back as
-        # title="(unknown)" url="(unknown)" — a FALSE dead-session signal
-        # that rotated perfectly healthy sessions. The engine's own internal
-        # ready-state wait is 30s; this cap just lets it finish. The form-poll
-        # below remains the real render gate.
-        timeout_ms = 30000
+        # 15s cap: the goto is only a warm-up — the form-poll below is the real
+        # render gate and returns the INSTANT the form paints (0.15s polling).
+        # Dead sessions bail here ~2x faster than the old 30s cap. Slow-but-
+        # alive sessions survive: the goto coroutine is cancelled in the
+        # background (the tab keeps committing) and the title/url grace-poll
+        # below lets them catch up before anything is declared dead.
+        timeout_ms = 15000
 
         self._log(f"[Nav] Navigating to {url} (timeout={timeout_ms}ms)...")
         t0 = time.time()
@@ -696,7 +696,7 @@ class DiscordAutomation:
             # kills the coroutine and forces a fresh proxy.
             await asyncio.wait_for(
                 self._page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms),
-                timeout=(timeout_ms / 1000.0) + 3.0,  # hard cap (never 38s)
+                timeout=(timeout_ms / 1000.0) + 3.0,  # hard cap (never 18s)
             )
             self._log(f"[Nav] Page DOM ready in {time.time() - t0:.1f}s (not waiting for hCaptcha subresources)")
         except asyncio.TimeoutError:
@@ -712,14 +712,19 @@ class DiscordAutomation:
             page_url = "(unknown)"
         if str(page_title) == "(unknown)" and str(page_url) == "(unknown)":
             # The hard cap can cancel goto while a slow-but-alive session is
-            # still committing; the tab usually answers within a beat. Retry
-            # the read once before declaring the session dead.
-            await asyncio.sleep(1.5)
-            try:
-                page_title = await asyncio.wait_for(self._page.title(), timeout=3.0)
-                page_url = await asyncio.wait_for(self._page.evaluate("location.href"), timeout=3.0)
-            except Exception:
-                pass
+            # still committing; the tab usually answers within a beat. Grace-
+            # poll up to ~5s before declaring the session dead — this is what
+            # lets the shorter goto cap skip dead sessions fast WITHOUT killing
+            # slow-but-healthy ones.
+            for _grace in range(5):
+                await asyncio.sleep(1.0)
+                try:
+                    page_title = await asyncio.wait_for(self._page.title(), timeout=3.0)
+                    page_url = await asyncio.wait_for(self._page.evaluate("location.href"), timeout=3.0)
+                except Exception:
+                    continue
+                if str(page_title) != "(unknown)" or str(page_url) != "(unknown)":
+                    break
         self._log('[Nav] Page: title="' + str(page_title)[:80] + '" url=' + str(page_url)[:80])
 
         # ── Dead proxy (cannot reach Discord at all) ──
@@ -809,21 +814,18 @@ class DiscordAutomation:
         # ── Poll for form elements ──
         # Discord uses aria-label on inputs, not name/id — use broad selectors.
         #
-        # Budget is long ON PURPOSE: the Discord shell arrives fast (title +
-        # #app-mount) but React needs ~200 JS bundles, and through a proxy the
-        # asset delivery is slow — VERIFIED LIVE: a healthy residential session
-        # renders the register form only after ~30s of blank shell (no Cloudflare
-        # challenge involved; the bundles just trickle in). TOR is the same or
-        # slower. So: give both paths a patient budget, watch for the
-        # cf_clearance cookie (challenge passed → form follows) and the form
-        # selectors, and only rotate when the budget is exhausted. Dead sessions
-        # are filtered earlier by the pre-launch probe, so the longer wait only
-        # costs time on sessions that are already proven reachable.
-        challenge_budget = 50.0 if self.proxy else 40.0
-        blank_bail = 34.0 if self.proxy else challenge_budget - 4.0
-        reload_after = 6.0       # blank this long -> reload to re-fetch JS bundles
-        max_reloads = 3          # hard cap on reloads per session
-        challenge_bail = 20.0    # Cloudflare challenge that never resolves -> rotate
+        # The render gate is DETECTION-driven, not a fixed timer: the poll loop
+        # below returns the instant the form paints (checks every 0.15s), so
+        # these budgets only bound how long a session may stay blank before we
+        # rotate. Dead sessions were already filtered by the pre-launch probe
+        # + the title/url grace poll above; slow-but-alive sessions get an
+        # automatic reload after reload_after to re-fetch the JS bundles, and
+        # only rotate if they stay blank past blank_bail.
+        challenge_budget = 25.0 if self.proxy else 18.0
+        blank_bail = 12.0 if self.proxy else 10.0
+        reload_after = 4.0       # blank this long -> reload to re-fetch JS bundles
+        max_reloads = 2          # hard cap on reloads per session
+        challenge_bail = 12.0    # Cloudflare challenge that never resolves -> rotate
         self._log(f"[Nav] Waiting for registration form to render (budget={challenge_budget:.0f}s, blank_bail={blank_bail:.0f}s, reloads<={max_reloads}, challenge_bail={challenge_bail:.0f}s)...")
         blank_since = None       # when the page first looked blank
         challenge_since = None   # when a Cloudflare challenge first appeared
@@ -920,7 +922,7 @@ class DiscordAutomation:
                         self._nav_error = f"{proxy_label} Cloudflare challenge never resolved after {bail_s}s"
                         self._log(f"[Nav] CHALLENGE STUCK for {bail_s}s (no cf_clearance) - {proxy_label} blocked - rotating circuit", level="warn")
                         return False
-                    await asyncio.sleep(0.5)
+                    await asyncio.sleep(0.3)
                     continue
                 challenge_since = None
 
@@ -939,10 +941,10 @@ class DiscordAutomation:
                         reload_count += 1
                         self._log(f"[Nav] React still blank after {int(reload_after)}s - reloading page (attempt {reload_count}/{max_reloads}) to re-fetch JS bundles...")
                         try:
-                            await asyncio.wait_for(self._page.reload(), timeout=20.0)
+                            await asyncio.wait_for(self._page.reload(), timeout=15.0)
                         except Exception:
                             pass
-                        await asyncio.sleep(2.0)
+                        await asyncio.sleep(1.2)
                         blank_since = None
                         challenge_since = None
                         start_ts = time.time()   # fresh full budget for the reloaded page
@@ -976,7 +978,7 @@ class DiscordAutomation:
                         self._log("[Nav] Clicked Register link \u2014 continuing poll for register form...")
                         login_clicked = True
                         blank_since = None
-                        await asyncio.sleep(0.5)
+                        await asyncio.sleep(0.3)
                         continue
                     self._log("[Nav] Login page, no Register link clickable \u2014 rotating circuit", level="warn")
                     break
@@ -989,7 +991,7 @@ class DiscordAutomation:
                     return True
             except Exception:
                 pass
-            await asyncio.sleep(0.25)
+            await asyncio.sleep(0.15)
 
         # ── Form never rendered — dump page state for debugging ──
         try:
@@ -1048,6 +1050,14 @@ class DiscordAutomation:
         self._nav_ok = False
         self._mail_failed = False
 
+        # app.py closes + nulls self._mail between attempts (prevents aiohttp
+        # connector leaks) while REUSING this bot object for the next attempt —
+        # re-create the duckmail client here or the next inbox creation crashes
+        # with "'NoneType' object has no attribute 'create_inbox'" and the
+        # worker spins forever on the same dead mail path.
+        if self._mail is None:
+            self._mail = TempMail(log=self._log)
+
         # No hardcoded email — create a duckmail.sbs inbox on the
         # Discord-friendly domain @glasswhitehub.com (pure REST API, no
         # browser, no proxy contention). Retry fast (2x, no backoff) when
@@ -1066,9 +1076,9 @@ class DiscordAutomation:
                 for mail_try in range(2):
                     try:
                         self._email = await asyncio.wait_for(
-                            self._mail.create_inbox(), timeout=35.0)
+                            self._mail.create_inbox(), timeout=20.0)
                     except asyncio.TimeoutError:
-                        self._log("[Mail] Inbox creation TIMED OUT after 35s", level="error")
+                        self._log("[Mail] Inbox creation TIMED OUT after 20s", level="error")
                     except Exception as e:
                         self._log(f"[Mail] duckmail inbox error: {e}", level="error")
                     if self._email:
@@ -1127,11 +1137,11 @@ class DiscordAutomation:
                 # renders instead of after a fixed 5s sleep (cap ~6s so the
                 # happy path to email verification isn't delayed).
                 phone_detected = False
-                for _ in range(6):
+                for _ in range(10):
                     if await self._detect_phone_verification():
                         phone_detected = True
                         break
-                    await asyncio.sleep(1.0)
+                    await asyncio.sleep(0.5)
                 if phone_detected:
                     self.phone_verify_detected = True
                     self._log("[Phone] [DETECTED] Phone verification required - rotating proxy+fingerprint+domain", level="warn")
@@ -1267,7 +1277,7 @@ class DiscordAutomation:
                 self._log("[Turnstile] No checkbox found to click", level="warn")
                 return False
             # 3) Confirm the challenge cleared (cf_clearance or widget gone).
-            for _ in range(12):
+            for _ in range(10):
                 try:
                     raw = await self._page.evaluate(
                         "() => document.cookie")
@@ -1279,7 +1289,7 @@ class DiscordAutomation:
                 if not await self._detect_turnstile():
                     self._log("[Turnstile] [OK] widget resolved")
                     return True
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(0.4)
             self._log("[Turnstile] Click sent but no clearance yet", level="warn")
             return False
         except Exception as e:
