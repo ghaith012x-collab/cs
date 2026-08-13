@@ -739,15 +739,13 @@ class DiscordAutomation:
             self._log(f"[Nav] {proxy_label} DEAD (url={page_url[:60]}) - rotating to fresh circuit", level="warn")
             return False
 
-        # ── Page never ran JS at all (title + url both unreadable) → dead. ──
-        # Through a live session document.title resolves in ms of DOM; if it is
-        # still unreadable after the goto timeout the session is dead, so bail
-        # here instead of burning the whole form-poll window on it.
+        # ── Page still loading (title + url unreadable) — do NOT bail. ──
+        # A slow TOR/residential circuit can keep the page unreadable for
+        # minutes while the navigation commits and React downloads. The
+        # render-wait loop below is the only gate; real dead proxies were
+        # already caught by the chrome-error / about:blank check above.
         if str(page_title) == "(unknown)" and str(page_url) == "(unknown)":
-            proxy_label = "PROXY SESSION" if self.proxy else "TOR CIRCUIT"
-            self._nav_error = f"{proxy_label.lower()} unresponsive — page never loaded (title+url both unknown after {timeout_ms}ms)"
-            self._log(f"[Nav] Page unresponsive after {timeout_ms}ms ({proxy_label}) - rotating", level="warn")
-            return False
+            self._log("[Nav] Page not readable yet - waiting for it to load (no timeout)...", level="warn")
 
         # ── Quick body text check (403/Forbidden/Cloudflare) ──
         try:
@@ -817,10 +815,10 @@ class DiscordAutomation:
         # NO RENDER TIMEOUT: this loop waits as long as it takes for the form
         # to fully render and returns the INSTANT it paints (checks every
         # 0.15s). There is no wall-clock budget — the only exits are real
-        # signals: a successful render, a hard block (403 / rate-limit / fatal
-        # title, detected above), or the page actually dying (repeatedly
-        # unreadable). A slow-but-alive session is reloaded up to max_reloads
-        # times to re-fetch dropped JS bundles, then simply kept waiting.
+        # signals: a successful render or a hard block (403 / rate-limit /
+        # fatal title, detected above). An unreadable or blank page is still
+        # loading — keep waiting; reload it up to max_reloads times to
+        # re-fetch dropped JS bundles, then keep waiting.
         reload_after = 4.0       # blank this long -> reload to re-fetch JS bundles
         max_reloads = 2          # hard cap on reloads per session
         _render_wait_start = time.time()
@@ -830,7 +828,6 @@ class DiscordAutomation:
         reload_count = 0         # reloads attempted for a blank/hung SPA
         login_clicked = False    # already clicked the Register link once
         turnstile_tried = False  # already attempted a UC stealth Turnstile bypass
-        dead_reads = 0           # consecutive unreadable polls -> page died
         last_log = -1.0
         while True:
             elapsed = time.time() - _render_wait_start
@@ -873,16 +870,17 @@ class DiscordAutomation:
                 state = None
 
             if state is None:
-                # Page gone / unreadable (tab closed or crashed) — a real dead
-                # signal, not a timeout. Bail only after many consecutive
-                # failures so a brief hiccup doesn't rotate a healthy session.
-                dead_reads += 1
-                if dead_reads >= 20:
-                    self._log("[Nav] Page unreadable 20x in a row - page died, rotating circuit", level="warn")
-                    return False
-                await asyncio.sleep(0.15)
+                # Page still loading — the JS execution context isn't ready
+                # yet (navigation committing, React bundles downloading). This
+                # can last MINUTES on a slow TOR/residential circuit, so KEEP
+                # WAITING — no bail, no timeout. Only the render checks below
+                # gate success; real dead proxies were already caught by the
+                # chrome-error / block checks above.
+                if elapsed >= last_log + 5.0:
+                    last_log = elapsed
+                    self._log(f"[Nav] Page still loading - waiting for render ({int(elapsed)}s)...")
+                await asyncio.sleep(0.3)
                 continue
-            dead_reads = 0
 
             if state:
                 # Log every ~4s with input/button counts for debugging
