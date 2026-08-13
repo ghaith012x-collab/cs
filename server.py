@@ -1252,12 +1252,66 @@ class DiscordAutomation:
         except:
             return False
 
-    async def _frame_js_ready(self, iframe, js) -> bool:
-        """Evaluate `js` inside the iframe's content frame; False on any error."""
+    async def _hcaptcha_frame_for(self, iframe):
+        """Resolve the live Playwright Frame for an hCaptcha iframe element.
+
+        Locator.content_frame() returns None for attached cross-origin
+        iframes on the patched engine - even though the frames are live and
+        evaluable (the DOM-dump path proves it by iterating page.frames).
+        So fall back to the page's frame tree, preferring the VISIBLE widget
+        frame: body not aria-hidden AND containing a checkbox node. hCaptcha
+        mounts a hidden twin (body aria-hidden=true, same URL) - never pick
+        it when a visible one exists.
+        """
+        # 1) Direct content_frame() first (works on stock engines).
         try:
             frame = await iframe.content_frame()
-            if frame is None:
-                return False
+            if frame is not None:
+                return frame
+        except Exception:
+            pass
+        # 2) Frame-tree fallback: match by src, then by content.
+        src = ""
+        try:
+            src = await iframe.get_attribute("src") or ""
+        except Exception:
+            src = ""
+        probe_js = """() => {
+            const b = document.body;
+            return JSON.stringify({
+                cb: !!document.querySelector('#checkbox, [role="checkbox"], .checkbox, input[type="checkbox"], [aria-checked], .button-submit'),
+                hidden: b ? b.getAttribute('aria-hidden') : null
+            });
+        }"""
+        best = None
+        for f in self._page.frames:
+            try:
+                furl = f.url or ""
+            except Exception:
+                continue
+            if "hcaptcha" not in furl:
+                continue
+            info = None
+            try:
+                raw = await f.evaluate(probe_js)
+                info = json.loads(raw) if raw else None
+            except Exception:
+                info = None
+            if src and src in furl:
+                best = best or f
+            if info and info.get("cb"):
+                if info.get("hidden") != "true":
+                    return f
+                if best is None:
+                    best = f
+        return best
+
+    async def _frame_js_ready(self, iframe, js) -> bool:
+        """Evaluate `js` inside the iframe's content frame; False on any error."""
+        frame = await self._hcaptcha_frame_for(iframe)
+        if frame is None:
+            return False
+        try:
             val = await frame.evaluate(js)
             return bool(val)
         except Exception:
@@ -1375,33 +1429,18 @@ class DiscordAutomation:
         (aria-checked=true flip, challenge iframe spawn, or token) and the
         whole sequence retries up to 5 times.
         """
-        frame = None
-        try:
-            frame = await iframe.content_frame()
-        except Exception:
-            frame = None
+        frame = await self._hcaptcha_frame_for(iframe)
         if frame is None:
-            # Fall back: match the frame by src from the page's frame tree.
-            try:
-                src = await iframe.get_attribute("src") or ""
-            except Exception:
-                src = ""
-            for f in self._page.frames:
-                try:
-                    if src and src in (f.url or ""):
-                        frame = f
-                        break
-                except Exception:
-                    continue
-        if frame is None:
-            self._log("[Captcha] Checkbox click skipped — widget frame not attached",
+            self._log("[Captcha] Checkbox click skipped — no live hCaptcha frame attached",
                       level="debug")
             return False
 
+        full_src = ""
         try:
-            iframe_src = (await iframe.get_attribute("src") or "?")[:80]
+            full_src = await iframe.get_attribute("src") or ""
         except Exception:
-            iframe_src = "?"
+            full_src = ""
+        iframe_src = full_src[:80] or "?"
         self._log(f"[Captcha] Clicking hCaptcha checkbox (iframe: {iframe_src})")
 
         # Inspect what's actually inside the widget frame (ALL LOGS only).
@@ -1519,6 +1558,30 @@ class DiscordAutomation:
             if attempt > 1:
                 await asyncio.sleep(0.4)
 
+            # Strategy 0: frame_locator click — the engine's reliable
+            # cross-origin mechanism (the same one the accessibility solver
+            # uses). Playwright resolves the frame lazily and clicks the
+            # checkbox center with trusted input, computing all iframe
+            # offsets internally. hCaptcha mounts a hidden twin sharing the
+            # same src — non-actionable elements just time out and we move
+            # to the next checkbox, so the visible widget always gets hit.
+            if full_src and "hcaptcha" in full_src:
+                try:
+                    fl = self._page.frame_locator(f'iframe[src="{full_src}"]')
+                    fl_cb = fl.locator(
+                        '#checkbox, [role="checkbox"], .checkbox, '
+                        'input[type="checkbox"], [aria-checked], .button-submit')
+                    for ci in range(min(4, await fl_cb.count())):
+                        try:
+                            await fl_cb.nth(ci).click(timeout=3000)
+                            if await _confirm(f"frame click #{ci} (attempt {attempt})"):
+                                return True
+                        except Exception:
+                            continue
+                except Exception as e:
+                    self._log(f"[Captcha] frame_locator click failed: {str(e)[:120]}",
+                              level="debug")
+
             # Strategy 1: real mouse click at the computed page point.
             if page_point:
                 try:
@@ -1635,15 +1698,12 @@ class DiscordAutomation:
         it as a drag puzzle so the in-browser solver gets a chance (it
         self-verifies and fast-fails back to the API if nothing is found).
         """
+        frame = await self._hcaptcha_frame_for(iframe_element)
+        if frame is None:
+            return "drag"
         try:
-            frame = await iframe_element.content_frame()
-            if not frame:
-                return "drag"
-            try:
-                await frame.wait_for_selector('#checkbox', state='visible', timeout=1500)
-                return "checkbox"
-            except Exception:
-                return "drag"
+            await frame.wait_for_selector('#checkbox', state='visible', timeout=1500)
+            return "checkbox"
         except Exception:
             return "drag"
 
@@ -1872,6 +1932,16 @@ class DiscordAutomation:
                             if await self._widget_rendered(w):
                                 rendered_widget = w
                                 break
+                        if rendered_widget is None and checkbox_passes >= 2:
+                            # Both click passes ran without confirmation and
+                            # the readiness probe still fails — hand the
+                            # widget off anyway: the accessibility solver
+                            # locates the frame itself via frame_locator and
+                            # does not need the checkbox clicked.
+                            self._log(
+                                "[Captcha] Readiness probe failed after 2 click passes — handing widget to accessibility solver anyway",
+                                level="warn")
+                            rendered_widget = widgets.nth(0)
                         if rendered_widget is not None:
                             iframe = rendered_widget
                             self._log("[Captcha] [READY] hCaptcha widget rendered — opening accessibility challenge")
