@@ -22,7 +22,7 @@ lxml>=5.0.0
 # de-Googled Chromium — the C++ fingerprint machinery is driven by command-line
 # switches minted from a fresh fingerprint seed per launch (one seed = one
 # coherent, unlinkable machine identity).
-truedriver>=0.13.1
+truedriver>=0.1.5
 clearcote>=0.25.0
 # Legacy engines (kept for git history / one-off scripts):
 # shardx>=0.1.11
