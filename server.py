@@ -1312,19 +1312,30 @@ class DiscordAutomation:
         }""")
 
     async def _widget_rendered(self, iframe) -> bool:
-        """True only when the hCaptcha widget iframe has actually painted.
+        """True when the hCaptcha widget iframe is genuinely ready to click.
 
-        Uses hCaptcha's own readiness signal: the widget body is marked
-        aria-hidden="true" until its JS has finished rendering the UI — a
-        still-hidden body is NOT ready, no matter what's in it. On top of
-        that, a checkbox-like element must be genuinely laid out at real
-        size (painted + interactive) — never a sized-but-blank frame.
+        Readiness is hCaptcha's own signal: the widget body is marked
+        aria-hidden="true" until its JS has finished rendering the UI, then
+        drops it once painted. A still-hidden body is NOT ready. Once that
+        signal is satisfied, the presence of any real widget node (checkbox,
+        toolbar trigger, refresh button or logo) is enough — the new widget
+        lays its checkbox out in a way getBoundingClientRect() reports as
+        0-sized, so geometry must never gate readiness.
         """
         return await self._frame_js_ready(iframe, """() => {
             const body = document.body;
             if (!body) return false;
             if (body.getAttribute('aria-hidden') === 'true') return false;
             if (document.readyState !== 'complete') return false;
+            // hCaptcha's own readiness signal is satisfied (aria-hidden
+            // unset + document complete). Presence of any widget UI node is
+            // enough - the new widget lays its checkbox/toolbar out in a way
+            // getBoundingClientRect() reports as 0-sized, so geometry must
+            // never gate readiness.
+            if (document.querySelector(
+                    '#checkbox, .checkbox, [role="checkbox"], input[type="checkbox"], ' +
+                    '[aria-checked], .button-submit, #menu-info, .display-menu-btn, ' +
+                    '.refresh.button, .hcaptcha-logo')) return true;
             const laidOut = (el) => {
                 if (!el) return false;
                 const cs = getComputedStyle(el);
@@ -1406,7 +1417,10 @@ class DiscordAutomation:
                 if await loc.count() == 0:
                     continue
                 await asyncio.sleep(random.uniform(0.2, 0.6))
-                await loc.click(timeout=3000)
+                try:
+                    await loc.click(timeout=3000)
+                except Exception:
+                    await loc.click(timeout=3000, force=True)
                 self._log(f"[Captcha] Checkbox clicked via {label}")
                 return True
             except Exception as e:
@@ -1452,6 +1466,42 @@ class DiscordAutomation:
                 return True
         except Exception as e:
             self._log(f"[Captcha] Checkbox JS dispatch failed: {str(e)[:120]}",
+                      level="debug")
+
+        # Strategy 3: trusted coordinate mouse click at the checkbox's real
+        # page position. Translate the checkbox rect inside the frame to page
+        # coordinates via the iframe's bounding box, then click with the real
+        # mouse (hCaptcha only trusts real CDP pointer input). If the checkbox
+        # rect is 0-sized, aim at the widget's left-center where the checkbox
+        # renders.
+        try:
+            iframe_box = await iframe.bounding_box()
+            rect = await frame.evaluate("""() => {
+                const el = document.getElementById('checkbox')
+                    || document.querySelector('.checkbox')
+                    || document.querySelector('[role="checkbox"]')
+                    || document.querySelector('input[type="checkbox"]')
+                    || document.querySelector('[aria-checked]')
+                    || document.querySelector('.button-submit');
+                if (!el) return null;
+                const r = el.getBoundingClientRect();
+                return {left: r.left, top: r.top, width: r.width, height: r.height};
+            }""")
+            if iframe_box and (iframe_box.get("width", 0) > 1
+                               or (rect and rect.get("width", 0) > 1)):
+                if rect and rect.get("width", 0) > 1 and rect.get("height", 0) > 1:
+                    cx = iframe_box["x"] + rect["left"] + rect["width"] / 2
+                    cy = iframe_box["y"] + rect["top"] + rect["height"] / 2
+                else:
+                    cx = iframe_box["x"] + iframe_box.get("width", 0) * 0.3
+                    cy = iframe_box["y"] + iframe_box.get("height", 0) * 0.5
+                await self._page.mouse.move(cx, cy)
+                await asyncio.sleep(random.uniform(0.1, 0.3))
+                await self._page.mouse.click(cx, cy)
+                self._log("[Captcha] Checkbox clicked via coordinate mouse click")
+                return True
+        except Exception as e:
+            self._log(f"[Captcha] Coordinate checkbox click failed: {str(e)[:120]}",
                       level="debug")
 
         # Nothing clickable found — dump the frame DOM to ALL LOGS so the
