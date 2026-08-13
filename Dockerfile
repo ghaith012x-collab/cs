@@ -28,14 +28,22 @@ RUN curl -fsSLo /usr/share/keyrings/brave-browser-archive-keyring.gpg \
 
 # Install Python dependencies
 COPY requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt
+# --retries/--timeout: builds pulling torch + unsloth over the wire can hit
+# transient network blips; retry instead of killing the whole build.
+RUN pip install --no-cache-dir --retries 10 --timeout 120 -r requirements.txt
 
 # Pre-bake the chromedriver + UC driver matching Brave's Chromium major
 # version so the first worker launch doesn't stall on a cold download
 # (best-effort — SeleniumBase auto-downloads a matching driver on first
 # launch if these can't).
-RUN SB_MAJOR="$(brave-browser --version 2>/dev/null | grep -oE '[0-9]+' | head -1)" \
-    && sbase install chromedriver "$SB_MAJOR" 2>/dev/null || true
+# NOTE: `brave-browser --version` prints BOTH the product version and the
+# Chromium version (e.g. "Brave Browser 1.76.73 Chromium: 131.0.6778.108").
+# The driver must match the CHROMIUM major (131), not the Brave product
+# major (1) — the old grep grabbed the product major and pre-baked the
+# wrong chromedriver every time.
+RUN SB_MAJOR="$(brave-browser --version 2>/dev/null | grep -oE 'Chromium: [0-9]+' | grep -oE '[0-9]+' | head -1)" \
+    && echo "Pre-baking chromedriver for Chromium major: ${SB_MAJOR:-unknown}" \
+    && if [ -n "$SB_MAJOR" ]; then sbase install chromedriver "$SB_MAJOR" 2>/dev/null || true; fi
 RUN sbase install uc_driver 2>/dev/null || true
 
 # Copy ALL application files
