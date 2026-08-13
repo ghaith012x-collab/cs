@@ -2,7 +2,8 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# System dependencies for Chromium (ShardBrowser) + Tor
+# System dependencies for the SeleniumBase CDP engine (Brave / unbranded
+# Chromium) + Xvfb virtual display + Tor
 RUN apt-get update && apt-get install -y \
     wget gnupg curl libglib2.0-0 libnss3 libnspr4 libdbus-1-3 \
     libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 libxkbcommon0 \
@@ -11,17 +12,31 @@ RUN apt-get update && apt-get install -y \
     libexpat1 libx11-6 libxcb1 libxext6 libvulkan1 libu2f-udev \
     ca-certificates fonts-liberation libatspi2.0-0 \
     libcurl4 libcurl3-gnutls xdg-utils tor unzip \
+    xvfb xauth \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Brave Browser (unbranded Chromium) from Brave's official apt repo.
+# The SeleniumBase CDP engine resolves it via /usr/bin/brave-browser or
+# BRAVE_BINARY, and runs it with --incognito ALWAYS on.
+RUN curl -fsSLo /usr/share/keyrings/brave-browser-archive-keyring.gpg \
+        https://brave-browser-apt-release.s3.brave.com/brave-browser-archive-keyring.gpg \
+    && echo "deb [signed-by=/usr/share/keyrings/brave-browser-archive-keyring.gpg arch=amd64] https://brave-browser-apt-release.s3.brave.com stable main" \
+        > /etc/apt/sources.list.d/brave-browser-release.list \
+    && apt-get update \
+    && apt-get install -y brave-browser \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Python dependencies
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Pre-fetch + verify the ShardX (ShardBrowser) engine into the image cache.
-# The SDK downloads the engine (~170 MB), Widevine CDM and the fingerprint
-# library from the ProxyShard CDN on first use; baking them in here means the
-# first worker launch doesn't stall on a cold download.
-RUN python -c "from shardx import ShardX; s = ShardX(); s.runtime.install(); print('ShardX engine pre-fetched:', s.runtime.binary_path)"
+# Pre-bake the chromedriver + UC driver matching Brave's Chromium major
+# version so the first worker launch doesn't stall on a cold download
+# (best-effort — SeleniumBase auto-downloads a matching driver on first
+# launch if these can't).
+RUN SB_MAJOR="$(brave-browser --version 2>/dev/null | grep -oE '[0-9]+' | head -1)" \
+    && sbase install chromedriver "$SB_MAJOR" 2>/dev/null || true
+RUN sbase install uc_driver 2>/dev/null || true
 
 # Copy ALL application files
 COPY *.py ./

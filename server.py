@@ -1198,6 +1198,94 @@ class DiscordAutomation:
         except Exception as e:
             self._log(f"[Humanize] Error: {e}", level="warn")
 
+    # ── Cloudflare Turnstile (SeleniumBase UC stealth) ───────────────────
+    # Discord sits behind Cloudflare, and a Turnstile captcha can gate
+    # navigation / form submit / mail verification. Turnstile must NEVER be
+    # pressed with plain Selenium/JS clicks — Cloudflare fingerprints
+    # synthetic event triggers. Use SeleniumBase's CDP-native stealth
+    # (page.uc_click / page.uc_gui_click_captcha), which run with WebDriver
+    # detached over the raw CDP channel.
+    _TURNSTILE_SELECTORS = (
+        'iframe[src*="challenges.cloudflare.com"]',
+        'iframe[src*="turnstile"]',
+        'div.cf-turnstile iframe',
+    )
+
+    async def _detect_turnstile(self) -> bool:
+        """True when a Cloudflare Turnstile widget is on the page.
+
+        Turnstile is a separate anti-bot layer from hCaptcha: Cloudflare
+        mounts it inside a challenges.cloudflare.com iframe (a div with the
+        ``cf-turnstile`` class in the page DOM)."""
+        try:
+            for sel in self._TURNSTILE_SELECTORS:
+                loc = self._page.locator(sel)
+                if await loc.count() > 0:
+                    return True
+        except Exception:
+            pass
+        # Frame-tree fallback: any live frame on challenges.cloudflare.com.
+        try:
+            for f in self._page.frames:
+                if "challenges.cloudflare.com" in (f.url or ""):
+                    return True
+        except Exception:
+            pass
+        return False
+
+    async def _solve_turnstile_if_present(self) -> bool:
+        """Bypass a Cloudflare Turnstile widget via SeleniumBase UC stealth.
+
+        Clicks the widget checkbox with page.uc_click() (CDP-native, no
+        WebDriver attached) or uc_gui_click_captcha() (OS-level PyAutoGUI
+        click) for iframe widgets, then confirms the challenge cleared via
+        the cf_clearance cookie or the widget frame disappearing."""
+        try:
+            if not await self._detect_turnstile():
+                return False
+            self._log("[Turnstile] Widget present - bypassing with UC stealth...")
+            # 1) CDP-native stealth click on the widget checkbox.
+            clicked = False
+            for sel in self._TURNSTILE_SELECTORS:
+                try:
+                    loc = self._page.locator(sel)
+                    if await loc.count() > 0:
+                        await self._page.uc_click(sel, timeout=4000)
+                        clicked = True
+                        break
+                except Exception:
+                    continue
+            # 2) OS-level GUI click fallback (PyAutoGUI) for iframe widgets.
+            if not clicked:
+                try:
+                    await self._page.uc_gui_click_captcha(frame="iframe",
+                                                          retry=True)
+                    clicked = True
+                except Exception:
+                    pass
+            if not clicked:
+                self._log("[Turnstile] No checkbox found to click", level="warn")
+                return False
+            # 3) Confirm the challenge cleared (cf_clearance or widget gone).
+            for _ in range(12):
+                try:
+                    raw = await self._page.evaluate(
+                        "() => document.cookie")
+                    if "cf_clearance=" in (raw or ""):
+                        self._log("[Turnstile] [OK] cf_clearance issued")
+                        return True
+                except Exception:
+                    pass
+                if not await self._detect_turnstile():
+                    self._log("[Turnstile] [OK] widget resolved")
+                    return True
+                await asyncio.sleep(0.5)
+            self._log("[Turnstile] Click sent but no clearance yet", level="warn")
+            return False
+        except Exception as e:
+            self._log(f"[Turnstile] Error: {e}", level="warn")
+            return False
+
     async def _detect_phone_verification(self) -> bool:
         """Check the current page for Discord's phone-verification screen.
 

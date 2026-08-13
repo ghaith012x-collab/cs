@@ -14,7 +14,8 @@ This module is a thin adapter that preserves the bot's
 The engine itself is SeleniumBase. What this swap buys the bot:
 
   · CDP Mode is the stealth successor to UC Mode: the browser is launched
-    with the UC (undetected-chromedriver) driver, then ``activate_cdp_mode()``
+    with the UC (undetected-chromedriver) driver, then
+    ``uc_activate_cdp_mode()`` (module-level, SeleniumBase >= 4.51)
     disconnects chromedriver entirely and re-drives the same browser over a
     raw CDP websocket — no WebDriver is attached while navigating or while
     clicking Cloudflare Turnstile / hCaptcha widgets, so there is nothing
@@ -28,9 +29,11 @@ The engine itself is SeleniumBase. What this swap buys the bot:
     so no cookies / cache / IndexedDB ever touch disk, every session is a
     clean disk-less identity, and closing the browser wipes the ephemeral
     user-data-dir.
-  · Headless runs use ``xvfb=True`` (headed browser under a virtual display —
-    needed for PyAutoGUI GUI clicks; falls back to ``headless2`` when the
-    xvfb binary is absent).
+  · Headless runs use a self-managed virtual display (``sbvirtualdisplay``
+    — headed browser under Xvfb, needed for PyAutoGUI GUI clicks; falls back
+    to ``headless2`` when the xvfb binary is absent). The display is started
+    by this engine because SeleniumBase's standalone ``Driver()`` only
+    auto-starts Xvfb from its pytest layer.
 
 Because Selenium is synchronous, every blocking driver call runs inside
 ``asyncio.to_thread`` so the async callers (and their asyncio.wait_for caps)
@@ -1194,23 +1197,31 @@ class _Page:
 
     async def uc_click(self, selector, by="css selector", timeout=6000,
                        reconnect_time=None, **kwargs):
-        """SeleniumBase UC stealth click: driver.uc_click(selector). With
+        """SeleniumBase UC stealth click: uc_click(driver, selector). With
         CDP Mode active it auto-redirects to the CDP click while WebDriver
         is detached (via _stealth_do); otherwise it disconnects
         chromedriver for the click itself."""
+        from seleniumbase.core.browser_launcher import (
+            uc_click as _sb_uc_click)
+        # Playwright-style timeout is in ms; SeleniumBase's uc_click() takes
+        # SECONDS (it forwards to wait_for_selector).
+        sb_timeout = (timeout or 6000) / 1000.0
         return await asyncio.to_thread(
             self._browser._stealth_do,
-            lambda: self.driver.uc_click(selector, by=by, timeout=timeout,
-                                         reconnect_time=reconnect_time))
+            lambda: _sb_uc_click(self.driver, selector, by=by,
+                                 timeout=sb_timeout,
+                                 reconnect_time=reconnect_time))
 
     async def uc_gui_click_captcha(self, frame="iframe", retry=False,
                                    blind=False, **kwargs):
         """SeleniumBase UC OS-level captcha click (PyAutoGUI). Auto-detects
         Cloudflare Turnstile vs Google reCAPTCHA; use for iframe widgets:
-        driver.uc_gui_click_captcha()."""
+        uc_gui_click_captcha(driver)."""
+        from seleniumbase.core.browser_launcher import (
+            uc_gui_click_captcha as _sb_uc_gui_click_captcha)
         return await asyncio.to_thread(
-            self.driver.uc_gui_click_captcha, frame=frame, retry=retry,
-            blind=blind)
+            _sb_uc_gui_click_captcha, self.driver, frame=frame,
+            retry=retry, blind=blind)
 
     async def click(self, sel, **kwargs):
         await self.locator(sel).click(**kwargs)
@@ -1331,17 +1342,20 @@ class _Browser:
     # ── CDP Mode bridge ────────────────────────────────────────────
     # The engine boots into SeleniumBase CDP Mode (raw Chrome DevTools
     # Protocol): the browser is launched with the UC driver, then
-    # ``driver.activate_cdp_mode()`` disconnects chromedriver and hands
-    # control to a raw CDP websocket. WebDriver is reattached right after
-    # launch so the rest of this adapter (raw DOM calls) keeps working
-    # unchanged; navigation and stealth clicks detach it again so those
-    # sensitive moments happen with NO WebDriver attached.
+    # ``uc_activate_cdp_mode()`` (module-level, SeleniumBase >= 4.51)
+    # disconnects chromedriver and hands control to a raw CDP websocket.
+    # WebDriver is reattached right after launch so the rest of this adapter
+    # (raw DOM calls) keeps working unchanged; navigation and stealth clicks
+    # detach it again so those sensitive moments happen with NO WebDriver
+    # attached.
     def _cdp_active(self) -> bool:
-        """True when CDP Mode is on and WebDriver is currently detached."""
+        """True when CDP Mode is on (raw CDP websocket available).
+        driver.cdp.* works over the raw websocket whether or not WebDriver is
+        currently attached; _ensure_stealth()/_ensure_connected() manage the
+        attach state around each sensitive op."""
         d = self._driver
         try:
-            return bool(getattr(d, "_is_using_cdp", False)) and not bool(
-                getattr(d, "_is_connected", True))
+            return bool(getattr(d, "_is_using_cdp", False))
         except Exception:
             return False
 
@@ -1428,6 +1442,14 @@ class _Browser:
             await asyncio.to_thread(self._driver.quit)
         except Exception:
             pass
+        # Stop the virtual display this engine started for headed-under-xvfb
+        # runs (if any).
+        try:
+            display = getattr(self._driver, "_sb_display", None)
+            if display is not None and hasattr(display, "stop"):
+                await asyncio.to_thread(display.stop)
+        except Exception:
+            pass
         if self._data_dir:
             try:
                 await asyncio.to_thread(shutil.rmtree, self._data_dir, ignore_errors=True)
@@ -1470,6 +1492,12 @@ class _BrowserType:
         for flag in ("--no-sandbox", "--disable-dev-shm-usage", "--incognito"):
             if flag not in extra:
                 extra.append(flag)
+        if tz:
+            # SeleniumBase's Driver() has no timezone kwarg — pass it as the
+            # Chromium switch instead (the same flag Playwright uses).
+            tz_flag = f"--timezone={tz}"
+            if tz_flag not in extra:
+                extra.append(tz_flag)
 
         data_dir = tempfile.mkdtemp(prefix="sb-brave-")
         launch_kw = {
@@ -1482,27 +1510,46 @@ class _BrowserType:
         if binary:
             launch_kw["binary_location"] = binary
         if ua:
-            launch_kw["user_agent"] = ua
-        if tz:
-            launch_kw["timezone"] = tz
+            # SeleniumBase's Driver() user-agent kwarg is ``agent`` (not
+            # ``user_agent`` — that raised a TypeError on every launch).
+            launch_kw["agent"] = ua
         if locale:
             launch_kw["locale"] = locale
         proxy_str = _proxy_to_sb(proxy)
         if proxy_str:
             launch_kw["proxy"] = proxy_str
         if extra:
-            launch_kw["chromium_arg"] = " ".join(extra)
+            # chromium_arg is COMMA-separated ("ARG1,ARG2"), not space-joined
+            # — SeleniumBase splits on "," and would treat a space-joined
+            # string as ONE bogus flag.
+            launch_kw["chromium_arg"] = ",".join(extra)
 
         driver = None
+        display = None
         if headless:
             # Preferred: headed browser under a virtual display (UC stealth
-            # works; docs: "UC Mode is detectable in Headless Mode").
+            # works; docs: "UC Mode is detectable in Headless Mode"). The
+            # standalone Driver() does NOT auto-start Xvfb — that's the pytest
+            # layer's job — so start the display here and keep it alive for
+            # the browser's lifetime. If Xvfb is absent, fall back to
+            # Chromium's new headless mode.
             try:
-                launch_kw["xvfb"] = True
+                from sbvirtualdisplay import Display as SBDisplay
+                display = SBDisplay(backend="xvfb", visible=True,
+                                    size=(1920, 1080), use_xauth=True)
+                display.start()
+            except Exception:
+                display = None
+            try:
                 driver = Driver(**launch_kw)
             except Exception as e1:
+                if display is not None:
+                    try:
+                        display.stop()
+                    except Exception:
+                        pass
+                    display = None
                 # Fallback: Chrome's new headless mode.
-                launch_kw.pop("xvfb", None)
                 launch_kw["headless2"] = True
                 try:
                     driver = Driver(**launch_kw)
@@ -1517,6 +1564,13 @@ class _BrowserType:
                         "version mismatch: `sbase install chromedriver <Brave's "
                         "Chromium major version>`."
                     ) from e2
+            if display is not None and driver is not None:
+                # Keep the virtual display alive for the browser's lifetime;
+                # _Browser.close() stops it.
+                try:
+                    driver._sb_display = display
+                except Exception:
+                    pass
         else:
             driver = Driver(**launch_kw)
 
@@ -1526,7 +1580,7 @@ class _BrowserType:
             pass
 
         # ── Upgrade: SeleniumBase CDP Mode (raw Chrome DevTools Protocol) ──
-        # CDP Mode is the stealth successor to UC Mode. activate_cdp_mode()
+        # CDP Mode is the stealth successor to UC Mode. uc_activate_cdp_mode()
         # disconnects chromedriver and re-drives the already-running Brave
         # browser over a raw CDP websocket — no WebDriver attached while
         # navigating or clicking CAPTCHA widgets (the moments anti-bot
@@ -1534,7 +1588,9 @@ class _BrowserType:
         # so the adapter's DOM calls keep working; goto()/uc_click()/
         # cdp_click() detach it again on demand via _stealth_do().
         try:
-            driver.activate_cdp_mode()
+            from seleniumbase.core.browser_launcher import (
+                uc_activate_cdp_mode as _sb_activate_cdp_mode)
+            _sb_activate_cdp_mode(driver)
             driver.connect()
         except Exception as e:
             if data_dir:
