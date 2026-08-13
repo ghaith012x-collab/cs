@@ -1416,6 +1416,19 @@ class DiscordAutomation:
                 loc = frame.locator(selector).first
                 if await loc.count() == 0:
                     continue
+                try:
+                    box = await loc.bounding_box()
+                except Exception:
+                    box = None
+                if box and box.get("width", 0) > 1 and box.get("height", 0) > 1:
+                    _cx = box["x"] + box["width"] / 2
+                    _cy = box["y"] + box["height"] / 2
+                    self._log(
+                        f"[Captcha] Checkbox ({label}) exact coords: "
+                        f"x={box['x']:.1f} y={box['y']:.1f} "
+                        f"w={box['width']:.1f} h={box['height']:.1f} "
+                        f"— click center ({_cx:.1f}, {_cy:.1f})",
+                        level="debug")
                 await asyncio.sleep(random.uniform(0.2, 0.6))
                 try:
                     await loc.click(timeout=3000)
@@ -1498,7 +1511,8 @@ class DiscordAutomation:
                 await self._page.mouse.move(cx, cy)
                 await asyncio.sleep(random.uniform(0.1, 0.3))
                 await self._page.mouse.click(cx, cy)
-                self._log("[Captcha] Checkbox clicked via coordinate mouse click")
+                self._log(f"[Captcha] Checkbox clicked via coordinate mouse click "
+                          f"at ({cx:.1f}, {cy:.1f})")
                 return True
         except Exception as e:
             self._log(f"[Captcha] Coordinate checkbox click failed: {str(e)[:120]}",
