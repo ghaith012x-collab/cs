@@ -1322,19 +1322,34 @@ class DiscordAutomation:
         """
         return await self._frame_js_ready(iframe, """() => {
             const body = document.body;
-            if (body && body.getAttribute('aria-hidden') === 'true') return false;
-            const sels = ['#checkbox', '[role="checkbox"]', '.button-submit',
-                          'input[type="checkbox"]', '[aria-checked]'];
-            for (const sel of sels) {
-                const el = document.querySelector(sel);
-                if (el && el.offsetParent !== null) {
-                    const r = el.getBoundingClientRect();
-                    if (r && r.width > 0 && r.height > 0) return true;
+            if (!body) return false;
+            if (body.getAttribute('aria-hidden') === 'true') return false;
+            if (document.readyState !== 'complete') return false;
+            const laidOut = (el) => {
+                if (!el) return false;
+                const cs = getComputedStyle(el);
+                if (cs.display === 'none' || cs.visibility === 'hidden') return false;
+                const r = el.getBoundingClientRect();
+                return !!r && r.width > 1 && r.height > 1;
+            };
+            // 1) The checkbox itself - the real click target.
+            for (const sel of ['#checkbox', '.checkbox', '[role="checkbox"]',
+                               'input[type="checkbox"]', '[aria-checked]',
+                               '.button-submit']) {
+                const els = document.querySelectorAll(sel);
+                for (const el of els) {
+                    if (laidOut(el)) return true;
                 }
             }
-            if (document.readyState !== 'complete') return false;
-            const t = (body && body.innerText) || '';
-            return t.trim().length >= 3;
+            // 2) The widget toolbar (menu trigger / refresh / logo) proves
+            //    the widget painted even while the checkbox is mid-render.
+            for (const sel of ['#menu-info', '.display-menu-btn',
+                               '.refresh.button', '.hcaptcha-logo']) {
+                if (laidOut(document.querySelector(sel))) return true;
+            }
+            // 3) Any rendered text (e.g. the "I am human" label).
+            const t = (body.innerText || '').trim();
+            return t.length >= 3;
         }""")
 
     async def _click_hcaptcha_checkbox(self, iframe) -> bool:
@@ -1376,8 +1391,12 @@ class DiscordAutomation:
         except Exception as e:
             self._log(f"[Captcha] Widget frame probe error: {e}", level="debug")
 
-        # Strategy 1: real mouse click (human-paced) on the checkbox
+        # Strategy 1: real mouse click (human-paced) on the checkbox.
+        # Playwright/patchright clicks via CDP at real coordinates, so this
+        # works for the fixed/absolute-positioned hCaptcha checkbox that made
+        # the old offsetParent-based render check fail.
         for selector, label in (("#checkbox", "#checkbox"),
+                                (".checkbox", ".checkbox"),
                                 ("[role='checkbox']", "[role=checkbox]"),
                                 ("input[type='checkbox']", "input[type=checkbox]"),
                                 ("[aria-checked]", "[aria-checked]"),
@@ -1394,19 +1413,38 @@ class DiscordAutomation:
                 self._log(f"[Captcha] Checkbox click via {label} failed: {str(e)[:120]}",
                           level="debug")
 
-        # Strategy 2: JS mousedown/mouseup/click dispatch (last resort)
+        # Strategy 2: JS pointer/mouse event sequence at the checkbox center
+        # (last resort - dispatched events are untrusted, but some hCaptcha
+        # builds still honor a full pointerdown->mousedown->pointerup->mouseup->
+        # click sequence with coordinates).
         try:
             clicked = await frame.evaluate("""() => {
-                const el = document.getElementById('checkbox')
-                      || document.querySelector('[role="checkbox"]')
-                      || document.querySelector('input[type="checkbox"]')
-                      || document.querySelector('[aria-checked]')
-                      || document.querySelector('.button-submit');
+                const candidates = [
+                    document.getElementById('checkbox'),
+                    document.querySelector('.checkbox'),
+                    document.querySelector('[role="checkbox"]'),
+                    document.querySelector('input[type="checkbox"]'),
+                    document.querySelector('[aria-checked]'),
+                    document.querySelector('.button-submit')
+                ];
+                const el = candidates.find(e => {
+                    if (!e) return false;
+                    const cs = getComputedStyle(e);
+                    if (cs.display === 'none' || cs.visibility === 'hidden') return false;
+                    const r = e.getBoundingClientRect();
+                    return r && r.width > 1 && r.height > 1;
+                });
                 if (!el) return false;
-                const rect = el.getBoundingClientRect();
-                if (!rect || rect.width === 0 || rect.height === 0) return false;
-                ['mousedown', 'mouseup', 'click'].forEach(t =>
-                    el.dispatchEvent(new MouseEvent(t, {bubbles: true, cancelable: true, view: window})));
+                const r = el.getBoundingClientRect();
+                const x = r.left + r.width / 2;
+                const y = r.top + r.height / 2;
+                const opts = {bubbles: true, cancelable: true, view: window,
+                              clientX: x, clientY: y, button: 0, buttons: 1};
+                el.dispatchEvent(new PointerEvent('pointerdown', opts));
+                el.dispatchEvent(new MouseEvent('mousedown', opts));
+                el.dispatchEvent(new PointerEvent('pointerup', opts));
+                el.dispatchEvent(new MouseEvent('mouseup', opts));
+                el.dispatchEvent(new MouseEvent('click', opts));
                 return true;
             }""")
             if clicked:
