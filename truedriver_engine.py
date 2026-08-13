@@ -295,16 +295,55 @@ class _Locator:
         selector: str,
         *,
         frame_url: str = "",
+        frame_title: str = "",
         nth_index: Optional[int] = None,
     ):
         self._tab = tab
         self._raw_sel = selector
         self._frame_url = frame_url
+        self._frame_title = frame_title
         self._nth = nth_index
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    async def _find_frame_element(self) -> Optional[td.Element]:
+        """Return the IFRAME element (in the MAIN document) that this
+        locator's frame context refers to, matching by src URL or title
+        attribute.
+
+        truedriver 0.1.5's switch_to_frame() is broken (it calls
+        cdp.runtime.get_execution_contexts, which does not exist), so
+        frame-scoped queries cannot rely on it. Instead locate the iframe
+        element in the main document and pierce into its content document
+        via CDP DOM, which works across origins (hCaptcha widget frames
+        live on newassets.hcaptcha.com while the page is discord.com).
+        """
+        try:
+            # Always query the MAIN document: a stale _current_frame_id
+            # from an earlier switch_to_frame would otherwise scope
+            # query_selector_all to the wrong frame's document.
+            await self._tab.switch_to_main_frame()
+            iframes = await self._tab.query_selector_all("iframe")
+        except Exception:
+            return None
+        for f in iframes:
+            if self._frame_url:
+                try:
+                    src = f.get("src") or ""
+                except Exception:
+                    src = ""
+                if src and (self._frame_url in src or src in self._frame_url):
+                    return f
+            if self._frame_title:
+                try:
+                    title = f.get("title") or ""
+                except Exception:
+                    title = ""
+                if title and title.strip() == self._frame_title.strip():
+                    return f
+        return None
 
     async def _find_all_matches(self, timeout: float = 5) -> List[td.Element]:
         """All DOM matches of the raw selector, frame-aware.
@@ -319,16 +358,29 @@ class _Locator:
         the Playwright contract server.py / captcha_solver.py are written
         against (the hCaptcha widget scan uses ``widgets.nth(i)`` and the
         checkbox code uses ``locator(...).first`` inside the widget frame).
+
+        Frame-scoped locators (frame_url / frame_title) resolve the iframe
+        element in the main document and query its content document
+        (element.query_selector_all) — that pierces into cross-origin
+        iframe DOM via CDP, which switch_to_frame-based find_all never
+        reached. Like find_all, poll up to `timeout` so the inner document
+        (which mounts a moment after the iframe element) is caught.
         """
         try:
-            if self._frame_url:
-                frame_obj = await self._tab.find_frame_by_url(self._frame_url)
-                if frame_obj:
-                    await self._tab.switch_to_frame(frame_obj)
-                    try:
-                        return await self._tab.find_all(self._raw_sel, timeout)
-                    finally:
-                        await self._tab.switch_to_main_frame()
+            if self._frame_url or self._frame_title:
+                deadline = time.monotonic() + max(float(timeout), 2.0)
+                while True:
+                    frame_el = await self._find_frame_element()
+                    if frame_el is not None:
+                        try:
+                            matches = await frame_el.query_selector_all(self._raw_sel)
+                        except Exception:
+                            matches = []
+                        if matches:
+                            return matches
+                    if time.monotonic() >= deadline:
+                        return []
+                    await asyncio.sleep(0.25)
             return await self._tab.find_all(self._raw_sel, timeout)
         except Exception:
             return []
@@ -445,7 +497,7 @@ class _Locator:
         if el is None:
             return None
         try:
-            return el.get("textContent") or ""
+            return (await el.apply("(el) => (el.textContent || '')")) or ""
         except Exception:
             return ""
 
@@ -454,7 +506,7 @@ class _Locator:
         if el is None:
             return ""
         try:
-            return el.get("innerText") or ""
+            return (await el.apply("(el) => (el.innerText || '')")) or ""
         except Exception:
             return ""
 
@@ -502,6 +554,7 @@ class _Locator:
             self._tab,
             self._raw_sel,
             frame_url=self._frame_url,
+            frame_title=self._frame_title,
             nth_index=index,
         )
 
@@ -511,13 +564,17 @@ class _Locator:
 
     @property
     def last(self) -> "_Locator":
-        return _Locator(self._tab, self._raw_sel, frame_url=self._frame_url, nth_index=-1)
+        return _Locator(self._tab, self._raw_sel,
+                        frame_url=self._frame_url,
+                        frame_title=self._frame_title,
+                        nth_index=-1)
 
     def locator(self, selector: str) -> "_Locator":
         return _Locator(
             self._tab,
             f"{self._raw_sel} {selector}",
             frame_url=self._frame_url,
+            frame_title=self._frame_title,
         )
 
     async def screenshot(self, path: str = None, type: str = "png", **kwargs) -> Optional[bytes]:
@@ -595,12 +652,22 @@ class _FrameLocator:
         self._tab = tab
         self._selector = selector
         self._frame_url = ""
+        self._frame_title = ""
         m = re.search(r'src[*^]?=["\']?([^"\'\]\s]+)', selector)
         if m:
             self._frame_url = m.group(1)
+        else:
+            # The accessibility solver locates the challenge iframe by
+            # title (iframe[title="hCaptcha challenge"]) — match that too.
+            # Capture the WHOLE quoted value: the title contains a space.
+            m = re.search(r'title=["\']([^"\']+)["\']', selector)
+            if m:
+                self._frame_title = m.group(1)
 
     def locator(self, selector: str) -> _Locator:
-        return _Locator(self._tab, selector, frame_url=self._frame_url)
+        return _Locator(self._tab, selector,
+                        frame_url=self._frame_url,
+                        frame_title=self._frame_title)
 
     def nth(self, index: int) -> "_FrameLocator":
         return self
@@ -609,13 +676,16 @@ class _FrameLocator:
         sel = f'[role="{role}"], {role}'
         if name:
             sel = f'{role}:has-text("{name}"), [role="{role}"]:has-text("{name}"), [aria-label="{name}"]'
-        return _Locator(self._tab, sel, frame_url=self._frame_url)
+        return _Locator(self._tab, sel, frame_url=self._frame_url,
+                        frame_title=self._frame_title)
 
     def get_by_label(self, text: str, **kwargs) -> _Locator:
-        return _Locator(self._tab, f'[aria-label="{text}"], [aria-labelledby*="{text}"]', frame_url=self._frame_url)
+        return _Locator(self._tab, f'[aria-label="{text}"], [aria-labelledby*="{text}"]',
+                        frame_url=self._frame_url, frame_title=self._frame_title)
 
     def get_by_text(self, text: str, **kwargs) -> _Locator:
-        return _Locator(self._tab, f'text="{text}"', frame_url=self._frame_url)
+        return _Locator(self._tab, f'text="{text}"', frame_url=self._frame_url,
+                        frame_title=self._frame_title)
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -624,25 +694,52 @@ class _FrameLocator:
 
 
 class _Frame:
-    __slots__ = ("_tab", "_cdp_frame", "url")
+    __slots__ = ("_tab", "_cdp_frame", "url", "_ctx_id")
 
     def __init__(self, tab: td.Tab, cdp_frame):
         self._tab = tab
         self._cdp_frame = cdp_frame
         self.url: str = getattr(cdp_frame, "url", "") or ""
+        self._ctx_id = None
 
     def locator(self, selector: str) -> _Locator:
         return _Locator(self._tab, selector, frame_url=self.url)
 
+    async def _context_id(self):
+        """A REAL execution context id for this frame.
+
+        truedriver 0.1.5's switch_to_frame() fails to resolve the frame's
+        execution context (it calls cdp.runtime.get_execution_contexts,
+        which does not exist in this version), so tab.evaluate() after a
+        switch silently runs in the MAIN frame — every hCaptcha readiness
+        check and checkbox probe then inspected discord.com instead of the
+        widget, and the checkbox was never clicked. Page.createIsolatedWorld
+        returns a genuine context id for the frame and works for cross-
+        origin / OOPIF frames (newassets.hcaptcha.com inside discord.com).
+        """
+        if self._ctx_id is None:
+            try:
+                from truedriver import cdp
+                self._ctx_id = await self._tab.send(
+                    cdp.page.create_isolated_world(self._cdp_frame.id_)
+                )
+            except Exception:
+                self._ctx_id = None
+        return self._ctx_id
+
     async def evaluate(self, expression: str, *args, **kwargs) -> Any:
         expr, await_promise = _build_eval_expr(expression, args)
-        await self._tab.switch_to_frame(self._cdp_frame)
+        prev_ctx = getattr(self._tab, "_current_execution_context_id", None)
         try:
+            # tab.evaluate() honors _current_execution_context_id; set it to
+            # this frame's isolated world so Runtime.evaluate targets the
+            # frame, then restore whatever context was active before.
+            self._tab._current_execution_context_id = await self._context_id()
             return _unwrap_evaluate(
                 await self._tab.evaluate(expr, await_promise=await_promise)
             )
         finally:
-            await self._tab.switch_to_main_frame()
+            self._tab._current_execution_context_id = prev_ctx
 
     async def content(self) -> str:
         return await self.evaluate("document.documentElement.outerHTML") or ""
