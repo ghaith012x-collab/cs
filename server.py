@@ -1325,17 +1325,21 @@ class DiscordAutomation:
         return await self._frame_js_ready(iframe, """() => {
             const body = document.body;
             if (!body) return false;
-            if (body.getAttribute('aria-hidden') === 'true') return false;
             if (document.readyState !== 'complete') return false;
-            // hCaptcha's own readiness signal is satisfied (aria-hidden
-            // unset + document complete). Presence of any widget UI node is
-            // enough - the new widget lays its checkbox/toolbar out in a way
-            // getBoundingClientRect() reports as 0-sized, so geometry must
-            // never gate readiness.
+            // Ground truth for readiness: a real widget UI node (checkbox,
+            // toolbar trigger, refresh button or logo) proves hCaptcha
+            // painted the widget. Some widget builds keep the body
+            // aria-hidden="true" even after painting (field probe showed
+            // ariaHidden:"true", children:2, checkbox:true,
+            // readyState:"complete" with the full widget DOM present), so
+            // aria-hidden must never block readiness once a node exists.
             if (document.querySelector(
                     '#checkbox, .checkbox, [role="checkbox"], input[type="checkbox"], ' +
                     '[aria-checked], .button-submit, #menu-info, .display-menu-btn, ' +
                     '.refresh.button, .hcaptcha-logo')) return true;
+            // No widget node yet — only now does body aria-hidden mean the
+            // widget is still on the loader stage.
+            if (body.getAttribute('aria-hidden') === 'true') return false;
             const laidOut = (el) => {
                 if (!el) return false;
                 const cs = getComputedStyle(el);
@@ -1412,8 +1416,7 @@ class DiscordAutomation:
             for _ in range(3):
                 try:
                     flipped = await frame.evaluate(
-                        "() => { const el = document.querySelector("
-                        "'#checkbox, .checkbox, [role=\"checkbox\"], [aria-checked], .button-submit');"
+                        "() => { const el = document.querySelector('[aria-checked]');"
                         " return !!el && el.getAttribute('aria-checked') === 'true'; }")
                     if flipped:
                         self._log(f"[Captcha] Checkbox {attempt} — "

@@ -306,25 +306,43 @@ class _Locator:
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _final_selector(self) -> str:
-        if self._nth is not None:
-            return f"{self._raw_sel}:nth-child({self._nth + 1})"
-        return self._raw_sel
+    async def _find_all_matches(self, timeout: float = 5) -> List[td.Element]:
+        """All DOM matches of the raw selector, frame-aware.
 
-    async def _try_find(self, timeout: float = 5) -> Optional[td.Element]:
-        sel = self._final_selector()
+        Playwright resolves ``.first`` / ``.nth(i)`` / ``.last`` by INDEX
+        AMONG ALL MATCHES of the selector. The old implementation rewrote
+        the selector into CSS ``:nth-child(n)`` (position among siblings),
+        which silently matched nothing for most real elements — ``body`` is
+        the 2nd child of <html>, an id'd checkbox is rarely its parent's
+        first child, and ``[role="checkbox"]`` matches several nodes. Keep
+        the raw selector and index into the result list instead, preserving
+        the Playwright contract server.py / captcha_solver.py are written
+        against (the hCaptcha widget scan uses ``widgets.nth(i)`` and the
+        checkbox code uses ``locator(...).first`` inside the widget frame).
+        """
         try:
             if self._frame_url:
                 frame_obj = await self._tab.find_frame_by_url(self._frame_url)
                 if frame_obj:
                     await self._tab.switch_to_frame(frame_obj)
                     try:
-                        return await self._tab.find(sel, True, True, timeout)
+                        return await self._tab.find_all(self._raw_sel, timeout)
                     finally:
                         await self._tab.switch_to_main_frame()
-            return await self._tab.find(sel, True, True, timeout)
+            return await self._tab.find_all(self._raw_sel, timeout)
         except Exception:
+            return []
+
+    async def _try_find(self, timeout: float = 5) -> Optional[td.Element]:
+        els = await self._find_all_matches(timeout)
+        if not els:
             return None
+        if self._nth is None or self._nth == 0:
+            return els[0]
+        if self._nth > 0:
+            return els[self._nth] if self._nth < len(els) else None
+        idx = len(els) + self._nth  # negative index: .last == nth(-1)
+        return els[idx] if 0 <= idx < len(els) else None
 
     async def _require(self, timeout: float = 10) -> td.Element:
         el = await self._try_find(timeout)
@@ -477,11 +495,7 @@ class _Locator:
             return True
 
     async def count(self) -> int:
-        try:
-            els = await self._tab.find_all(self._raw_sel, 3)
-            return len(els)
-        except Exception:
-            return 0
+        return len(await self._find_all_matches(timeout=3))
 
     def nth(self, index: int) -> "_Locator":
         return _Locator(
@@ -536,6 +550,21 @@ class _Locator:
         if el is None:
             return None
         return _ElementHandle(self._tab, el)
+
+    async def content_frame(self, timeout: float = 10) -> Optional["_Frame"]:
+        """Playwright-compatible: the content frame of the iframe this
+        locator resolves to (None when it isn't an attached iframe).
+
+        server.py's hCaptcha helpers (``_widget_rendered``,
+        ``_challenge_rendered``, ``_detect_challenge_mode``) and the
+        accessibility solver all call ``locator.content_frame()``; without
+        it every readiness check threw AttributeError and the widget was
+        never considered ready, so the checkbox was never clicked.
+        """
+        el = await self._try_find(timeout)
+        if el is None:
+            return None
+        return await _ElementHandle(self._tab, el).content_frame()
 
     async def evaluate(self, expression: str, *args, **kwargs):
         expr, await_promise = _build_eval_expr(expression, args)
@@ -620,6 +649,17 @@ class _Frame:
 
     async def title(self) -> str:
         return await self.evaluate("document.title") or ""
+
+    async def wait_for_selector(
+        self, selector: str, timeout: float = 30, state: str = "visible", **kwargs
+    ) -> Optional["_ElementHandle"]:
+        """Playwright-compatible frame.wait_for_selector()."""
+        loc = _Locator(self._tab, selector, frame_url=self.url)
+        await loc.wait_for(state=state, timeout=timeout)
+        el = await loc._try_find(timeout=4)
+        if el:
+            return _ElementHandle(self._tab, el)
+        return None
 
 
 # ─────────────────────────────────────────────────────────────────
