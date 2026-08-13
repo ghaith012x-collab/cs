@@ -1911,6 +1911,65 @@ ANIMAL_WORDS = frozenset([
     "mammal","marsupial","mollusk","primate","raptor","reptile",
     "rodent","serpent","ungulate","vertebrate",
 ])
+
+# --- Country knowledge: "choose the country" accessibility challenges ---
+# hCaptcha shows 3 words (one is a country) and asks to pick the country.
+COUNTRY_WORDS = frozenset([
+    "afghanistan","albania","algeria","andorra","angola","antigua",
+    "argentina","armenia","australia","austria","azerbaijan",
+    "bahamas","bahrain","bangladesh","barbados","belarus","belgium",
+    "belize","benin","bhutan","bolivia","botswana","brazil","brunei",
+    "bulgaria","burundi",
+    "cambodia","cameroon","canada","chad","chile","china","colombia",
+    "comoros","congo","croatia","cuba","cyprus","czechia",
+    "denmark","djibouti","dominica",
+    "ecuador","egypt","eritrea","estonia","eswatini","ethiopia",
+    "fiji","finland","france",
+    "gabon","gambia","georgia","germany","ghana","greece","grenada",
+    "guatemala","guinea","guyana",
+    "haiti","honduras","hungary",
+    "iceland","india","indonesia","iran","iraq","ireland","israel","italy",
+    "jamaica","japan","jordan",
+    "kazakhstan","kenya","kiribati","kuwait","kyrgyzstan",
+    "laos","latvia","lebanon","lesotho","liberia","libya","liechtenstein",
+    "lithuania","luxembourg",
+    "madagascar","malawi","malaysia","maldives","mali","malta",
+    "mauritania","mauritius","mexico","micronesia","moldova","monaco",
+    "mongolia","montenegro","morocco","mozambique","myanmar",
+    "namibia","nauru","nepal","netherlands","nicaragua","niger","nigeria",
+    "norway",
+    "oman",
+    "pakistan","palau","palestine","panama","paraguay","peru",
+    "philippines","poland","portugal",
+    "qatar",
+    "romania","russia","rwanda",
+    "samoa","senegal","serbia","seychelles","singapore","slovakia",
+    "slovenia","somalia","spain","sudan","suriname","sweden",
+    "switzerland","syria",
+    "taiwan","tajikistan","tanzania","thailand","togo","tonga","tunisia",
+    "turkey","turkmenistan","tuvalu",
+    "uganda","ukraine","uruguay","uzbekistan",
+    "vanuatu","venezuela","vietnam",
+    "yemen",
+    "zambia","zimbabwe",
+    # Common short / alternate names captchas sometimes use
+    "america","britain","burma","czech","england","holland","korea",
+    "scotland","swaziland","usa","wales",
+])
+
+# Multi-word country names (matched as full phrases).
+COUNTRY_PHRASES = frozenset([
+    "united states", "united states of america", "united kingdom",
+    "south africa", "south korea", "north korea", "south sudan",
+    "new zealand", "sri lanka", "costa rica", "saudi arabia",
+    "united arab emirates", "papua new guinea", "san marino",
+    "saint lucia", "saint kitts", "saint vincent", "east timor",
+    "ivory coast", "trinidad and tobago", "dominican republic",
+    "central african republic", "czech republic", "vatican city",
+    "cape verde", "el salvador", "equatorial guinea",
+    "bosnia and herzegovina", "marshall islands", "solomon islands",
+    "sierra leone", "burkina faso", "guinea bissau",
+])
 # ── Knowledge-base solver for hCaptcha accessibility NL questions ──
 # Covers: rooms, colors, animal sounds, counting/legs, calendar, nature,
 # object function, opposites, and "which of these is a/an X" pickers.
@@ -5648,6 +5707,10 @@ async def solve_hcaptcha_accessibility(page, iframe,
                 # Animal challenge: "pick the word that is an animal"
                 if re.search(r'\banimal\b|\bcreature\b|\bbeast\b|\bliving\b.*\bthing\b|\bwhich\b.*\banimal\b', line, re.IGNORECASE):
                     score += 5
+
+                # Country challenge: "choose the country" / "pick the country"
+                if re.search(r'\bcountry\b|\bcountries\b|\bnation\b|\bnations\b', line, re.IGNORECASE):
+                    score += 5
                 # Knowledge questions (rooms, colors, counting, calendar...)
                 if re.search(r'\broom\b|\bsink\b|\bkitchen\b|\bbedroom\b|\bbathroom\b', line, re.IGNORECASE):
                     score += 4
@@ -5688,7 +5751,7 @@ async def solve_hcaptcha_accessibility(page, iframe,
             # Picker questions ("pick the one that represents an animal") render
             # the candidate words on a SEPARATE line ("oar, glass, piglet").
             # Append that options line so the solver sees the candidates.
-            if re.search(r'pick the one|pick the word|words below|represents|which of these|which one', best_line, re.IGNORECASE):
+            if re.search(r'pick the one|pick the word|words below|represents|which of these|which one|choose the|pick the country', best_line, re.IGNORECASE):
                 extra = _find_options_line(best_source, all_texts, best_line)
                 if extra:
                     best_line = best_line + ' : ' + extra
@@ -5884,6 +5947,39 @@ async def solve_hcaptcha_accessibility(page, iframe,
             for w in words:
                 if w.lower() in ANIMAL_WORDS and w.lower() not in generic:
                     return w
+
+        # COUNTRY WORD puzzle: given 3 words, pick the country
+        # "Choose the country: France, potato, chair" -> France is the country
+        country_pat = re.search(
+            r'\b(?:country|countries|nation|nations)\b',
+            t, re.IGNORECASE
+        )
+        if country_pat:
+            # Multi-word countries first (full phrase match)
+            for phrase in sorted(COUNTRY_PHRASES, key=len, reverse=True):
+                if re.search(r'\b' + re.escape(phrase) + r'\b', t):
+                    log(f"[Accessibility] Country challenge: multi-word '{phrase}'")
+                    return phrase
+            # Single-word countries (the "3 words" option-list case)
+            words = re.findall(r'\b([a-zA-Z]{3,})\b', orig)
+            generic = {'country', 'countries', 'nation', 'nations', 'choose',
+                       'pick', 'select', 'which', 'one', 'word', 'words', 'the',
+                       'that', 'from', 'below', 'represents', 'an', 'a', 'and',
+                       'are', 'is', 'not', 'of', 'these', 'them', 'with', 'you',
+                       'your', 'following', 'any', 'answer', 'question'}
+            negated = bool(re.search(r'\bnot\b', t))
+            if negated:
+                # "Which of these is NOT a country" -> pick a non-country word
+                for w in words:
+                    lw = w.lower()
+                    if lw not in generic and lw not in COUNTRY_WORDS:
+                        log(f"[Accessibility] Country challenge (NOT): {w} from {words}")
+                        return w
+            else:
+                candidates = [w for w in words if w.lower() in COUNTRY_WORDS and w.lower() not in generic]
+                if candidates:
+                    log(f"[Accessibility] Country challenge: candidates={candidates} from {words}")
+                    return candidates[0]
 
         # ── KNOWLEDGE QUESTIONS (rooms, colors, animal sounds, counting...) ──
         # Runs before number extraction so "how many legs" etc. hit the KB.
