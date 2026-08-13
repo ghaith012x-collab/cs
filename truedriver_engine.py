@@ -30,6 +30,97 @@ import truedriver as td
 ENGINE = "clearcote"
 
 
+# ─────────────────────────────────────────────────────────────────
+# Playwright-style selector translation
+# ─────────────────────────────────────────────────────────────────
+#
+# truedriver's ``tab.find_all(text)`` is a DOM TEXT search
+# (``DOM.perform_search``) — it never matches CSS selectors. Every locator
+# query that went through it (widget iframe scan, checkbox locators,
+# ``:has-text`` buttons) silently returned 0 matches, which is exactly why
+# the hCaptcha widget was never found and its checkbox was never clicked.
+# All ``_Locator`` queries now go through ``querySelectorAll`` (CSS), and
+# the Playwright pseudo-classes server.py / captcha_solver.py rely on are
+# translated into CSS + text-content filters here.
+
+_HAS_TEXT_RE = re.compile(r':has-text\(\s*(["\'])(.*?)\1\s*\)', re.DOTALL)
+_TEXT_SEL_RE = re.compile(r"^\s*text\s*=\s*([\"'])(.*?)\1\s*$", re.DOTALL)
+
+
+def _split_selector(selector: str) -> List[Tuple[str, List[str], bool]]:
+    """Split a (possibly comma-separated) Playwright-ish selector into
+    ``(css_selector, [substring_filters], text_only)`` segments.
+
+    - ``button:has-text("Next")``  → ("button", ["Next"], False)
+    - ``iframe[src="…"]``          → ("iframe[src=…]", [], False)
+    - ``text="Accessibility"``     → ("*", ["Accessibility"], True)
+    """
+    segments: List[Tuple[str, List[str], bool]] = []
+    for raw in selector.split(","):
+        item = raw.strip()
+        if not item:
+            continue
+        m = _TEXT_SEL_RE.match(item)
+        if m:
+            segments.append(("*", [m.group(2)], True))
+            continue
+        parts = _HAS_TEXT_RE.split(item)
+        # re.split with two capture groups → [pre, quote, text, post] per
+        # :has-text, so the quoted texts sit at parts[2::2].
+        css = (parts[0] or "*").strip()
+        texts = [p for p in parts[2::2] if p != ""]
+        segments.append((css, texts, False))
+    return segments or [("*", [], False)]
+
+
+async def _query_css_once(tab, base_el, selector: str) -> List[td.Element]:
+    """One-pass querySelectorAll with ``:has-text()`` / ``text=`` support.
+
+    ``base_el`` is the iframe Element for frame-scoped queries (queries the
+    iframe's content document cross-origin via CDP); None queries the main
+    document. ``text=`` selectors are sorted innermost-first (shortest
+    textContent) so ``.first`` targets the menu item / label element, not
+    its ``<body>`` ancestor.
+    """
+    found: List[td.Element] = []
+    text_only = False
+    for css, texts, is_text_only in _split_selector(selector):
+        if is_text_only:
+            text_only = True
+        try:
+            if base_el is not None:
+                els = await base_el.query_selector_all(css)
+            else:
+                els = await tab.query_selector_all(css)
+        except Exception:
+            els = []
+        if not texts:
+            found.extend(els)
+            continue
+        for el in els:
+            try:
+                txt = (await el.apply("(el) => (el.textContent || '')")) or ""
+            except Exception:
+                txt = ""
+            low = txt.lower()
+            if all(t.lower() in low for t in texts):
+                found.append(el)
+    if text_only and found:
+        try:
+            lengths = []
+            for el in found:
+                try:
+                    t = (await el.apply("(el) => (el.textContent || '')")) or ""
+                except Exception:
+                    t = ""
+                lengths.append((len(t), el))
+            lengths.sort(key=lambda x: x[0])
+            found = [el for _, el in lengths]
+        except Exception:
+            pass
+    return found
+
+
 class _AuthRelay:
     """Local HTTP proxy that injects ``Proxy-Authorization`` for an upstream
     authenticated proxy (vaultproxies etc.).
@@ -363,25 +454,42 @@ class _Locator:
         element in the main document and query its content document
         (element.query_selector_all) — that pierces into cross-origin
         iframe DOM via CDP, which switch_to_frame-based find_all never
-        reached. Like find_all, poll up to `timeout` so the inner document
-        (which mounts a moment after the iframe element) is caught.
+        reached.
+
+        ROOT CAUSE FIX: truedriver's ``tab.find_all(text)`` is a DOM TEXT
+        search (``DOM.perform_search``) — it never matches CSS selectors,
+        so ``page.locator('iframe[src*=…]').count()`` returned 0, the
+        hCaptcha widget was never found, and the checkbox was never
+        clicked. All queries now use ``querySelectorAll`` with Playwright
+        ``:has-text()`` / ``text=`` translated by ``_query_css_once``.
         """
+        deadline = time.monotonic() + max(float(timeout), 2.0)
         try:
             if self._frame_url or self._frame_title:
-                deadline = time.monotonic() + max(float(timeout), 2.0)
                 while True:
                     frame_el = await self._find_frame_element()
                     if frame_el is not None:
-                        try:
-                            matches = await frame_el.query_selector_all(self._raw_sel)
-                        except Exception:
-                            matches = []
+                        matches = await _query_css_once(
+                            self._tab, frame_el, self._raw_sel)
                         if matches:
                             return matches
                     if time.monotonic() >= deadline:
                         return []
                     await asyncio.sleep(0.25)
-            return await self._tab.find_all(self._raw_sel, timeout)
+            # Main-frame CSS query. Reset to the main frame first: a stale
+            # _current_frame_id left by an earlier (broken) switch_to_frame
+            # would scope query_selector_all to the wrong document.
+            try:
+                await self._tab.switch_to_main_frame()
+            except Exception:
+                pass
+            while True:
+                matches = await _query_css_once(self._tab, None, self._raw_sel)
+                if matches:
+                    return matches
+                if time.monotonic() >= deadline:
+                    return []
+                await asyncio.sleep(0.2)
         except Exception:
             return []
 
@@ -1128,7 +1236,9 @@ class _Page:
 
     async def query_selector(self, selector: str) -> Optional[_ElementHandle]:
         try:
-            el = await self._tab.find(selector, True, True, 4)
+            # tab.select() is the CSS-selector single match (find() is a
+            # DOM TEXT search and never matches CSS selectors).
+            el = await self._tab.select(selector, 4)
             return _ElementHandle(self._tab, el)
         except Exception:
             return None
