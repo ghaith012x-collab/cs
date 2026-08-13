@@ -2,7 +2,7 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# System dependencies for Chromium (Clearcote) + Tor
+# System dependencies for Chromium (ShardBrowser) + Tor
 RUN apt-get update && apt-get install -y \
     wget gnupg curl libglib2.0-0 libnss3 libnspr4 libdbus-1-3 \
     libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 libxkbcommon0 \
@@ -17,10 +17,11 @@ RUN apt-get update && apt-get install -y \
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Pre-fetch + verify the Clearcote stealth Chromium engine into the image cache
-# (the SDK downloads/verifies this binary on first use; the truedriver engine
-# launches it with --fingerprint* persona switches minted per session).
-RUN python -c "from clearcote import executable_path; print(executable_path(quiet=True))" && echo 'Clearcote engine pre-fetched'
+# Pre-fetch + verify the ShardX (ShardBrowser) engine into the image cache.
+# The SDK downloads the engine (~170 MB), Widevine CDM and the fingerprint
+# library from the ProxyShard CDN on first use; baking them in here means the
+# first worker launch doesn't stall on a cold download.
+RUN python -c "from shardx import ShardX; s = ShardX(); s.runtime.install(); print('ShardX engine pre-fetched:', s.runtime.binary_path)"
 
 # Copy ALL application files
 COPY *.py ./
