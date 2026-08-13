@@ -1402,10 +1402,50 @@ class DiscordAutomation:
         except Exception as e:
             self._log(f"[Captcha] Widget frame probe error: {e}", level="debug")
 
+        # ── Verification: only a click hCaptcha actually reacted to counts ──
+        # hCaptcha confirms a registered click by flipping the checkbox's
+        # aria-checked to "true", spawning the challenge iframe, or writing a
+        # token. A locator/force click on a 0-sized or covered element can
+        # "succeed" without hCaptcha ever reacting — never claim victory on
+        # that. Poll the three signals for up to ~1.5s after each attempt.
+        async def _confirm(attempt: str) -> bool:
+            for _ in range(3):
+                try:
+                    flipped = await frame.evaluate(
+                        "() => { const el = document.querySelector("
+                        "'#checkbox, .checkbox, [role=\"checkbox\"], [aria-checked], .button-submit');"
+                        " return !!el && el.getAttribute('aria-checked') === 'true'; }")
+                    if flipped:
+                        self._log(f"[Captcha] Checkbox {attempt} — "
+                                  "hCaptcha confirmed (aria-checked=true)")
+                        return True
+                except Exception:
+                    pass
+                try:
+                    chall = self._page.locator(
+                        'iframe[title*="hCaptcha challenge"], '
+                        'iframe[src*="hcaptcha-challenge"]')
+                    if await chall.count() > 0:
+                        self._log(f"[Captcha] Checkbox {attempt} — "
+                                  "hCaptcha confirmed (challenge spawned)")
+                        return True
+                except Exception:
+                    pass
+                try:
+                    if await read_hcaptcha_token(self._page):
+                        self._log(f"[Captcha] Checkbox {attempt} — "
+                                  "hCaptcha confirmed (token present)")
+                        return True
+                except Exception:
+                    pass
+                await asyncio.sleep(0.5)
+            return False
+
         # Strategy 1: real mouse click (human-paced) on the checkbox.
         # Playwright/patchright clicks via CDP at real coordinates, so this
         # works for the fixed/absolute-positioned hCaptcha checkbox that made
         # the old offsetParent-based render check fail.
+        clicked_through = False  # S1 delivered a click (exception-free)
         for selector, label in (("#checkbox", "#checkbox"),
                                 (".checkbox", ".checkbox"),
                                 ("[role='checkbox']", "[role=checkbox]"),
@@ -1434,8 +1474,16 @@ class DiscordAutomation:
                     await loc.click(timeout=3000)
                 except Exception:
                     await loc.click(timeout=3000, force=True)
-                self._log(f"[Captcha] Checkbox clicked via {label}")
-                return True
+                clicked_through = True
+                if await _confirm(f"via {label}"):
+                    return True
+                # A real CDP click at the checkbox didn't register — the rest
+                # of the selectors target the same element, so go straight to
+                # the trusted coordinate click instead of burning time.
+                self._log(f"[Captcha] Checkbox click via {label} not confirmed "
+                          "— falling back to coordinate mouse click",
+                          level="debug")
+                break
             except Exception as e:
                 self._log(f"[Captcha] Checkbox click via {label} failed: {str(e)[:120]}",
                           level="debug")
@@ -1474,9 +1522,12 @@ class DiscordAutomation:
                 el.dispatchEvent(new MouseEvent('click', opts));
                 return true;
             }""")
-            if clicked:
-                self._log("[Captcha] Checkbox clicked via JS dispatch")
+            if clicked and not clicked_through and await _confirm("via JS dispatch"):
                 return True
+            if clicked:
+                self._log("[Captcha] Checkbox JS dispatch not confirmed "
+                          "— falling back to coordinate mouse click",
+                          level="debug")
         except Exception as e:
             self._log(f"[Captcha] Checkbox JS dispatch failed: {str(e)[:120]}",
                       level="debug")
@@ -1505,15 +1556,25 @@ class DiscordAutomation:
                 if rect and rect.get("width", 0) > 1 and rect.get("height", 0) > 1:
                     cx = iframe_box["x"] + rect["left"] + rect["width"] / 2
                     cy = iframe_box["y"] + rect["top"] + rect["height"] / 2
+                elif rect:
+                    # 0-sized rect but a real layout position — aim at the
+                    # checkbox's own spot (half a standard checkbox out from
+                    # its top-left corner).
+                    cx = iframe_box["x"] + rect["left"] + 14
+                    cy = iframe_box["y"] + rect["top"] + 14
                 else:
-                    cx = iframe_box["x"] + iframe_box.get("width", 0) * 0.3
+                    # No checkbox rect at all: the checkbox always renders at
+                    # the widget's left edge, vertically centered. Aim there,
+                    # not at a mid-widget shot that can land on the toolbar.
+                    cx = iframe_box["x"] + iframe_box.get("width", 0) * 0.12
                     cy = iframe_box["y"] + iframe_box.get("height", 0) * 0.5
                 await self._page.mouse.move(cx, cy)
                 await asyncio.sleep(random.uniform(0.1, 0.3))
                 await self._page.mouse.click(cx, cy)
-                self._log(f"[Captcha] Checkbox clicked via coordinate mouse click "
-                          f"at ({cx:.1f}, {cy:.1f})")
-                return True
+                if await _confirm("via coordinate mouse click"):
+                    return True
+                self._log(f"[Captcha] Coordinate checkbox click at ({cx:.1f}, {cy:.1f}) "
+                          "not confirmed by hCaptcha", level="debug")
         except Exception as e:
             self._log(f"[Captcha] Coordinate checkbox click failed: {str(e)[:120]}",
                       level="debug")
