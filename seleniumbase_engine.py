@@ -42,8 +42,7 @@ keep working.
 Set BRAVE_BINARY to point at a Brave binary explicitly if it is not at a
 standard install path. If the chromedriver version doesn't match Brave's
 Chromium major version, run ``sbase install chromedriver <major-version>``
-(or set ``uc_driver_version`` in this file); CDP Mode also wants the CDP
-binary, installed with ``sbase install cdp``.
+(or set ``uc_driver_version`` in this file).
 """
 
 import asyncio
@@ -1588,6 +1587,15 @@ class _BrowserType:
         # so the adapter's DOM calls keep working; goto()/uc_click()/
         # cdp_click() detach it again on demand via _stealth_do().
         try:
+            # CDP Mode resolves the browser executable from
+            # ``seleniumbase.config.binary_location``; when that is unset it
+            # falls back to Chrome-only path probing and raises "Could not
+            # find a valid chrome browser binary" even though Driver() just
+            # launched Brave fine (browser="brave"). Point it at the
+            # resolved Brave binary BEFORE activating CDP Mode.
+            from seleniumbase import config as _sb_config
+            if binary:
+                _sb_config.binary_location = binary
             from seleniumbase.core.browser_launcher import (
                 uc_activate_cdp_mode as _sb_activate_cdp_mode)
             _sb_activate_cdp_mode(driver)
@@ -1598,9 +1606,9 @@ class _BrowserType:
             raise RuntimeError(
                 "SeleniumBase engine failed to activate CDP Mode "
                 f"({str(e)[:200]}). Install Brave (see Dockerfile) or "
-                "point BRAVE_BINARY at the binary; run `sbase install cdp` "
-                "for the CDP binary and `sbase install chromedriver <Brave's "
-                "Chromium major version>` if the driver version mismatches."
+                "point BRAVE_BINARY at the binary; if the chromedriver "
+                "version mismatches run `sbase install chromedriver <Brave's "
+                "Chromium major version>`."
             ) from e
 
         try:
