@@ -1761,6 +1761,7 @@ class DiscordAutomation:
             widget_since = None  # when the widget iframe first appeared
             checkbox_clicked = False    # auto-clicked the hCaptcha checkbox
             checkbox_clicked_at = 0.0   # when the checkbox was clicked
+            checkbox_passes = 0         # unconditional click passes run (max 2)
             funcaptcha_checked = False
             honest_logged = {8: False, 20: False}
             # If hCaptcha never loads (dead session / blocked scripts), do
@@ -1832,20 +1833,32 @@ class DiscordAutomation:
                         if await read_hcaptcha_token(self._page):
                             self._log("[Captcha] [OK] hCaptcha already solved (token present)")
                             return True
-                        # ALWAYS-CLICK pass: try EVERY widget frame that is
-                        # rendered OR merely contains a checkbox node until
-                        # one click actually registers. Readiness probes
-                        # never gate the attempt.
-                        if not checkbox_clicked:
+                        # ── ALWAYS-CLICK PASS (user request) ──
+                        # Click the checkbox UNCONDITIONALLY whenever any
+                        # hCaptcha iframe is present — the readiness probes
+                        # are informational only and must NEVER gate the
+                        # attempt (they can report False via
+                        # Locator.content_frame() even when the widget is
+                        # interactive; the click helper itself falls back to
+                        # matching the frame from the page's frame tree).
+                        # `_click_hcaptcha_checkbox` is self-verifying: it
+                        # tries mouse → keyboard → JS click and only reports
+                        # success on hCaptcha's own signals (aria-checked
+                        # flip, challenge spawn, or token). Run 2 full
+                        # passes right after "Waiting for hCaptcha to
+                        # load..." so a mid-init widget still gets clicked
+                        # once it becomes interactive.
+                        if not checkbox_clicked and checkbox_passes < 2:
+                            checkbox_passes += 1
+                            self._log(
+                                f"[Captcha] Checkbox click pass {checkbox_passes}/2 (unconditional — widget present)")
                             for wi in range(wcount):
                                 w = widgets.nth(wi)
-                                if (await self._widget_rendered(w)
-                                        or await self._widget_has_checkbox(w)):
-                                    if await self._click_hcaptcha_checkbox(w):
-                                        checkbox_clicked = True
-                                        checkbox_clicked_at = time.time()
-                                        self._log("[Captcha] Checkbox clicked — waiting for challenge to spawn...")
-                                        break
+                                if await self._click_hcaptcha_checkbox(w):
+                                    checkbox_clicked = True
+                                    checkbox_clicked_at = time.time()
+                                    self._log("[Captcha] Checkbox clicked — waiting for challenge to spawn...")
+                                    break
                         if checkbox_clicked and (time.time() - checkbox_clicked_at) < 5.0:
                             # hCaptcha swaps to the challenge a moment
                             # after the click — the next loop iteration
