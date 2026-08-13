@@ -829,6 +829,7 @@ class DiscordAutomation:
         challenge_since = None   # when a Cloudflare challenge first appeared
         reload_count = 0         # reloads attempted for a blank/hung SPA
         login_clicked = False    # already clicked the Register link once
+        turnstile_tried = False  # already attempted a UC stealth Turnstile bypass
         last_log = -1.0
         start_ts = time.time()
         while time.time() - start_ts < challenge_budget:
@@ -903,6 +904,16 @@ class DiscordAutomation:
                     if state.get("cfClearance"):
                         self._log("[Nav] cf_clearance set - challenge passed, waiting for React to boot...")
                         challenge_since = None
+                    elif not turnstile_tried and await self._detect_turnstile():
+                        # Cloudflare Turnstile widget (not the auto-resolving
+                        # managed challenge). Never use plain Selenium clicks —
+                        # use SeleniumBase UC stealth (uc_click /
+                        # uc_gui_click_captcha) to press it.
+                        turnstile_tried = True
+                        self._log("[Nav] Cloudflare Turnstile widget detected - bypassing with SeleniumBase UC stealth...")
+                        if await self._solve_turnstile_if_present():
+                            self._log("[Nav] Turnstile bypassed via UC stealth - waiting for React to boot...")
+                            challenge_since = None
                     elif time.time() - challenge_since >= challenge_bail:
                         proxy_label = "proxy session" if self.proxy else "TOR exit"
                         bail_s = int(challenge_bail)
@@ -1097,6 +1108,11 @@ class DiscordAutomation:
             success = False
             if form_ok:
                 self._log("[Form] Form filled - checking for hCaptcha...")
+                # Cloudflare Turnstile can gate the form submit. Bypass it
+                # with SeleniumBase UC stealth (never plain Selenium clicks)
+                # before the hCaptcha solver runs.
+                if await self._solve_turnstile_if_present():
+                    self._log("[Captcha] [OK] Turnstile bypassed via UC stealth")
                 success = await self._solve_hcaptcha_if_present()
             else:
                 self._log("[FAIL] Form filling failed", level="error")
@@ -1228,6 +1244,10 @@ class DiscordAutomation:
             self._log(f"[Mail] Opening verification link: {link[:80]}...")
             await self._page.goto(link, wait_until='domcontentloaded', timeout=NAV_TIMEOUT_MS)
             await asyncio.sleep(2)
+            # Cloudflare Turnstile may gate the verification page - bypass it
+            # with SeleniumBase UC stealth if present.
+            if await self._solve_turnstile_if_present():
+                self._log("[Mail] [OK] Turnstile bypassed on verification page")
             # Discord shows a verification success page (or redirects to login)
             try:
                 page_text = await self._page.evaluate(
