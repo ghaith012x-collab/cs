@@ -29,8 +29,8 @@ from duckmail import TempMail
 # textContent fails (that's exactly how runs end up on /login). This helper
 # normalizes ALL whitespace (incl. \u00a0) across textContent + aria-label +
 # title + value and tests the blacklist. Injected INSIDE each evaluate's
-# arrow-function body (the truedriver engine wraps function-looking strings
-# in parens and calls them, so a top-level const would be a syntax error).
+# arrow-function body (the engine wraps function-looking strings in parens
+# and calls them, so a top-level const would be a syntax error).
 _LOGIN_LINK_GUARD = r"""const __isLoginLink = (el) => {
     const raw = (el.textContent || '') + ' ' +
                 (el.getAttribute('aria-label') || '') + ' ' +
@@ -115,6 +115,7 @@ _ESSENTIAL_PREFIXES = (
     "[Captcha] Checking for hCaptcha",
     "[Captcha] Waiting for hCaptcha to load",
     "[Captcha] Checkbox clicked",           # auto-clicked the hCaptcha checkbox
+    "[Captcha] Clicking hCaptcha checkbox", # about to click the widget checkbox
     "[Captcha] [READY]",                    # hCaptcha rendered
     "[Captcha] [OK]",
     "[Accessibility] Clicked 3-dots",
@@ -349,13 +350,10 @@ class DiscordAutomation:
         # surfaced in the worker's per-attempt summary so every failure is
         # self-explanatory ("TOR circuit blocked: page unresponsive after 9s").
         self._nav_error: str = ""
-        # Engine-owned identity: Clearcote / ShardX mint a fresh persona per
-        # launch from a seed — the bot-side fingerprint only exists for
-        # legacy engines.
+        # Engine-owned identity: ShardX mints a fresh randomized profile per
+        # launch — the bot-side fingerprint only exists for legacy engines.
         if ENGINE == "shardx":
             self._fingerprint = {}
-        elif ENGINE == "clearcote":
-            self._fingerprint = {"seed": self._fresh_seed()}
         else:
             self._fingerprint = generate_fingerprint(worker_id)
 
@@ -382,32 +380,13 @@ class DiscordAutomation:
     def get_activity_log(self) -> list:
         return self._activity_log
 
-    def _fresh_seed(self) -> str:
-        """A fresh Clearcote persona seed — one seed = one coherent machine
-        identity minted by the engine's C++ layer. New seed per launch means
-        a new, unlinkable persona per session (same model ShardX had)."""
-        return f"cc-{os.getpid()}-{random.getrandbits(64):016x}"
-
     def _launch_opts(self) -> dict:
         """Engine launch options.
 
-        clearcote: the engine owns ALL stealth — one fingerprint seed → one
-        coherent persona (UA + Client Hints, WebGL/WebGPU, fonts, canvas,
-        TLS) minted in the binary. We only pass a fresh random seed (so every
-        launch is a new identity) and pin the UI to English.
         shardx: {} — ShardX mints its own randomized profile per launch.
         Legacy engines: map the bot-side fingerprint onto persona options."""
         if ENGINE == "shardx":
             return {}
-        if ENGINE == "clearcote":
-            return {
-                "fingerprint": self._fingerprint.get("seed") or self._fresh_seed(),
-                # Plain English UI: Discord follows Accept-Language. The
-                # engine's persona derives its own locale from the seed, so
-                # pin en-US here (language is a product choice, not
-                # fingerprinting — the engine still owns TLS/UA/WebGL/fonts).
-                "accept_language": "en-US,en;q=0.9",
-            }
         opts: dict = {
             "fingerprint": self._fingerprint.get("seed") or int(time.time() * 1000)
         }
@@ -419,7 +398,7 @@ class DiscordAutomation:
                 opts["platform"] = platform
         except Exception:
             pass
-        # Pass the bot-chosen UA so clearcote's persona uses it instead of
+        # Pass the bot-chosen UA so the legacy persona uses it instead of
         # deriving its own from the seed (which wouldn't match self._ua).
         if self._ua:
             opts["user_agent"] = self._ua
@@ -432,7 +411,7 @@ class DiscordAutomation:
         return opts
 
     def _launch_proxy(self) -> Optional[dict]:
-        """The proxy rides on browser launch (Clearcote/Playwright apply it as
+        """The proxy rides on browser launch (ShardX/Playwright apply it as
         a --proxy-server launch argument — a context-level proxy would either
         be ignored or rejected). Returns the Playwright-style
         {server, username, password} dict (or None for TOR/direct)."""
@@ -447,7 +426,7 @@ class DiscordAutomation:
         return lp
 
     async def _relaunch_browser(self) -> None:
-        """Close and relaunch the browser bound to self.proxy. truedriver
+        """Close and relaunch the browser bound to self.proxy. The engine
         cannot change a running browser's proxy (it is a launch flag), so a
         proxy change requires a full relaunch."""
         if self._browser:
@@ -508,17 +487,12 @@ class DiscordAutomation:
         args = launch_args(headless=self.headless)
         self._log(f"[Engine] {ENGINE} launch args: {len(args)}")
 
-        if ENGINE in ("clearcote", "shardx"):
-            # Engine-level identity: a fresh seed per launch mints a fresh
-            # persona in the engine — no bot-side UA / font / GPU / locale
-            # selection.
+        if ENGINE == "shardx":
+            # Engine-level identity: ShardX mints a fresh randomized profile
+            # per launch — no bot-side UA / font / GPU / locale selection.
             self._ua = ""
-            if ENGINE == "clearcote":
-                self._fingerprint = {"seed": self._fresh_seed()}
-                self._log("[Fingerprint] Identity owned by Clearcote engine — fresh persona per launch (seed {})".format(self._fingerprint["seed"][:16]))
-            else:
-                self._fingerprint = {}
-                self._log("[Fingerprint] Identity owned by ShardX engine — fresh randomized profile per launch")
+            self._fingerprint = {}
+            self._log("[Fingerprint] Identity owned by ShardX engine — fresh randomized profile per launch")
         else:
             self._ua = random.choice(USER_AGENTS)
             self._fingerprint = generate_fingerprint(self.worker_id)
@@ -560,10 +534,10 @@ class DiscordAutomation:
             self._log("[TOR] Using TOR SOCKS5 proxy...")
             if _tor_newnym():
                 self._log("[TOR] New identity requested")
-            # Clearcote / ShardX already ride the TOR proxy from browser
-            # launch — a context-level proxy would be rejected by Playwright
-            # when the browser was launched with one.
-            if ENGINE not in ("clearcote", "shardx"):
+            # ShardX already rides the TOR proxy from browser launch — a
+            # context-level proxy would be rejected by Playwright when the
+            # browser was launched with one.
+            if ENGINE != "shardx":
                 ctx_opts['proxy'] = {'server': 'socks5://127.0.0.1:9050'}
             await asyncio.sleep(1)
         else:
@@ -590,7 +564,7 @@ class DiscordAutomation:
     async def switch_proxy(self, new_proxy=None) -> bool:
         """Swap to a new proxy AND a fresh fingerprint. Returns True on success.
 
-        truedriver pins the proxy at browser launch, so switching to a
+        The engine pins the proxy at browser launch, so switching to a
         DIFFERENT session relaunches the browser; reusing the same session
         only rebuilds the context (and keeps the fingerprint — rotating an
         identity on an unchanged IP just churns fingerprints)."""
@@ -635,16 +609,10 @@ class DiscordAutomation:
     def rotate_fingerprint(self) -> None:
         """Rotate to a brand-new browser identity.
 
-        clearcote / shardx: the engine mints a fresh persona on EVERY
-        launch, so the next relaunch (new proxy session) is automatically a
-        new, unlinkable identity — for clearcote that just means a fresh
-        seed.
+        shardx: the engine mints a fresh persona on EVERY launch, so the
+        next relaunch (new proxy session) is automatically a new, unlinkable
+        identity.
         Legacy engines: regenerate fingerprint + UA."""
-        if ENGINE == "clearcote":
-            self._fingerprint = {"seed": self._fresh_seed()}
-            self._ua = ""
-            self._log("[Fingerprint] Rotated: fresh Clearcote persona on next launch (engine-owned identity)")
-            return
         if ENGINE == "shardx":
             self._fingerprint = {}
             self._ua = ""
@@ -1367,32 +1335,81 @@ class DiscordAutomation:
             return t.length >= 3;
         }""")
 
-    async def _click_hcaptcha_checkbox(self, iframe) -> bool:
-        """Real-mouse click the hCaptcha 'Are you human' checkbox.
+    async def _widget_has_checkbox(self, iframe) -> bool:
+        """Cheap probe: does the widget frame contain a checkbox node at all?
 
-        Only ever called after _widget_rendered() verified the widget has
-        genuinely painted, so the click happens on a live, interactive
-        checkbox — never as a blind readiness probe. Tries several
-        strategies (real mouse click first — hCaptcha's pointer handler
-        only trusts those — then JS dispatch) and dumps the widget frame
-        DOM to the ALL LOGS when nothing clickable is found, so failures
-        are visible instead of silent.
+        Used to ALWAYS attempt the click even when the strict readiness
+        probe (_widget_rendered) hasn't flipped yet — hCaptcha keeps some
+        widget builds aria-hidden="true" while the checkbox is already
+        painted and interactive, so readiness must never gate the attempt.
         """
+        try:
+            frame = await iframe.content_frame()
+            if frame is None:
+                return False
+            return bool(await frame.evaluate(
+                "() => !!document.querySelector("
+                "'#checkbox, [role=\"checkbox\"], .checkbox, "
+                "input[type=\"checkbox\"], [aria-checked], .button-submit')"))
+        except Exception:
+            return False
+
+    async def _click_hcaptcha_checkbox(self, iframe) -> bool:
+        """CLICK the hCaptcha 'Are you human' checkbox — always attempts.
+
+        Never gated on the strict readiness probe: if the widget frame
+        contains a checkbox node we click it, period. The current hCaptcha
+        widget lays the checkbox out in a way getBoundingClientRect()
+        reports as 0-sized, so geometry never gates the attempt either —
+        the real click point is computed in-page (walking the checkbox's
+        subtree, then ancestors, for the first sized element) and translated
+        to page coordinates via the iframe's bounding box. Click order:
+
+          1. Real mouse click (CDP input at the point — hCaptcha trusts it)
+          2. Keyboard activation (focus the checkbox + Enter/Space — a
+             role=checkbox is natively keyboard-activatable, so this works
+             with zero coordinate math)
+          3. JS el.click() dispatch
+
+        Every attempt is verified against hCaptcha's own signals
+        (aria-checked=true flip, challenge iframe spawn, or token) and the
+        whole sequence retries up to 5 times.
+        """
+        frame = None
         try:
             frame = await iframe.content_frame()
         except Exception:
             frame = None
         if frame is None:
+            # Fall back: match the frame by src from the page's frame tree.
+            try:
+                src = await iframe.get_attribute("src") or ""
+            except Exception:
+                src = ""
+            for f in self._page.frames:
+                try:
+                    if src and src in (f.url or ""):
+                        frame = f
+                        break
+                except Exception:
+                    continue
+        if frame is None:
             self._log("[Captcha] Checkbox click skipped — widget frame not attached",
                       level="debug")
             return False
+
+        try:
+            iframe_src = (await iframe.get_attribute("src") or "?")[:80]
+        except Exception:
+            iframe_src = "?"
+        self._log(f"[Captcha] Clicking hCaptcha checkbox (iframe: {iframe_src})")
 
         # Inspect what's actually inside the widget frame (ALL LOGS only).
         try:
             probe = await frame.evaluate("""() => {
                 const body = document.body;
                 const anyCheckbox = !!document.querySelector(
-                    '#checkbox, [role="checkbox"], .button-submit, input[type="checkbox"], [aria-checked]');
+                    '#checkbox, [role="checkbox"], .checkbox, input[type="checkbox"], [aria-checked], .button-submit');
                 const t = (body && body.innerText || '').slice(0, 80);
                 return JSON.stringify({
                     ariaHidden: body ? body.getAttribute('aria-hidden') : null,
@@ -1411,16 +1428,15 @@ class DiscordAutomation:
         # aria-checked to "true", spawning the challenge iframe, or writing a
         # token. A locator/force click on a 0-sized or covered element can
         # "succeed" without hCaptcha ever reacting — never claim victory on
-        # that. Poll the three signals for up to ~1.5s after each attempt.
+        # that. Poll the three signals for ~2s after each attempt.
         async def _confirm(attempt: str) -> bool:
-            for _ in range(3):
+            for _ in range(5):
                 try:
                     flipped = await frame.evaluate(
                         "() => { const el = document.querySelector('[aria-checked]');"
                         " return !!el && el.getAttribute('aria-checked') === 'true'; }")
                     if flipped:
-                        self._log(f"[Captcha] Checkbox {attempt} — "
-                                  "hCaptcha confirmed (aria-checked=true)")
+                        self._log(f"[Captcha] [OK] Checkbox {attempt} — hCaptcha confirmed (aria-checked=true)")
                         return True
                 except Exception:
                     pass
@@ -1429,165 +1445,128 @@ class DiscordAutomation:
                         'iframe[title*="hCaptcha challenge"], '
                         'iframe[src*="hcaptcha-challenge"]')
                     if await chall.count() > 0:
-                        self._log(f"[Captcha] Checkbox {attempt} — "
-                                  "hCaptcha confirmed (challenge spawned)")
+                        self._log(f"[Captcha] [OK] Checkbox {attempt} — hCaptcha confirmed (challenge spawned)")
                         return True
                 except Exception:
                     pass
                 try:
                     if await read_hcaptcha_token(self._page):
-                        self._log(f"[Captcha] Checkbox {attempt} — "
-                                  "hCaptcha confirmed (token present)")
+                        self._log(f"[Captcha] [OK] Checkbox {attempt} — hCaptcha confirmed (token present)")
                         return True
                 except Exception:
                     pass
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(0.4)
             return False
 
-        # Strategy 1: real mouse click (human-paced) on the checkbox.
-        # Playwright/patchright clicks via CDP at real coordinates, so this
-        # works for the fixed/absolute-positioned hCaptcha checkbox that made
-        # the old offsetParent-based render check fail.
-        clicked_through = False  # S1 delivered a click (exception-free)
-        for selector, label in (("#checkbox", "#checkbox"),
-                                (".checkbox", ".checkbox"),
-                                ("[role='checkbox']", "[role=checkbox]"),
-                                ("input[type='checkbox']", "input[type=checkbox]"),
-                                ("[aria-checked]", "[aria-checked]"),
-                                (".button-submit", ".button-submit")):
-            try:
-                loc = frame.locator(selector).first
-                if await loc.count() == 0:
-                    continue
-                try:
-                    box = await loc.bounding_box()
-                except Exception:
-                    box = None
-                if box and box.get("width", 0) > 1 and box.get("height", 0) > 1:
-                    _cx = box["x"] + box["width"] / 2
-                    _cy = box["y"] + box["height"] / 2
-                    self._log(
-                        f"[Captcha] Checkbox ({label}) exact coords: "
-                        f"x={box['x']:.1f} y={box['y']:.1f} "
-                        f"w={box['width']:.1f} h={box['height']:.1f} "
-                        f"— click center ({_cx:.1f}, {_cy:.1f})",
-                        level="debug")
-                await asyncio.sleep(random.uniform(0.2, 0.6))
-                try:
-                    await loc.click(timeout=3000)
-                except Exception:
-                    await loc.click(timeout=3000, force=True)
-                clicked_through = True
-                if await _confirm(f"via {label}"):
-                    return True
-                # A real CDP click at the checkbox didn't register — the rest
-                # of the selectors target the same element, so go straight to
-                # the trusted coordinate click instead of burning time.
-                self._log(f"[Captcha] Checkbox click via {label} not confirmed "
-                          "— falling back to coordinate mouse click",
-                          level="debug")
-                break
-            except Exception as e:
-                self._log(f"[Captcha] Checkbox click via {label} failed: {str(e)[:120]}",
-                          level="debug")
-
-        # Strategy 2: JS pointer/mouse event sequence at the checkbox center
-        # (last resort - dispatched events are untrusted, but some hCaptcha
-        # builds still honor a full pointerdown->mousedown->pointerup->mouseup->
-        # click sequence with coordinates).
+        # ── Real click point inside the frame (frame-relative coords) ──
+        # getBoundingClientRect() can report 0x0 for the checkbox node even
+        # when it is painted and interactive; walk the subtree (then the
+        # ancestors) for the first sized element and click its center.
+        point = None
         try:
-            clicked = await frame.evaluate("""() => {
-                const candidates = [
-                    document.getElementById('checkbox'),
-                    document.querySelector('.checkbox'),
-                    document.querySelector('[role="checkbox"]'),
-                    document.querySelector('input[type="checkbox"]'),
-                    document.querySelector('[aria-checked]'),
-                    document.querySelector('.button-submit')
-                ];
-                const el = candidates.find(e => {
-                    if (!e) return false;
-                    const cs = getComputedStyle(e);
-                    if (cs.display === 'none' || cs.visibility === 'hidden') return false;
-                    const r = e.getBoundingClientRect();
-                    return r && r.width > 1 && r.height > 1;
-                });
-                if (!el) return false;
-                const r = el.getBoundingClientRect();
-                const x = r.left + r.width / 2;
-                const y = r.top + r.height / 2;
-                const opts = {bubbles: true, cancelable: true, view: window,
-                              clientX: x, clientY: y, button: 0, buttons: 1};
-                el.dispatchEvent(new PointerEvent('pointerdown', opts));
-                el.dispatchEvent(new MouseEvent('mousedown', opts));
-                el.dispatchEvent(new PointerEvent('pointerup', opts));
-                el.dispatchEvent(new MouseEvent('mouseup', opts));
-                el.dispatchEvent(new MouseEvent('click', opts));
-                return true;
+            point = await frame.evaluate("""() => {
+                const sels = ['[role="checkbox"]', '#checkbox', '.checkbox',
+                              'input[type="checkbox"]', '[aria-checked]', '.button-submit'];
+                let el = null;
+                for (const s of sels) { el = document.querySelector(s); if (el) break; }
+                if (!el) return null;
+                const sized = (n) => {
+                    if (!n) return null;
+                    const r = n.getBoundingClientRect();
+                    return (r && r.width > 0 && r.height > 0)
+                        ? {left: r.left, top: r.top, width: r.width, height: r.height} : null;
+                };
+                let rect = sized(el);
+                if (!rect) {
+                    let best = null, bestArea = 0;
+                    const walk = (n) => {
+                        const r = sized(n);
+                        if (r) { const a = r.width * r.height; if (a > bestArea) { best = r; bestArea = a; } }
+                        for (const c of n.children) walk(c);
+                    };
+                    for (const c of el.children) walk(c);
+                    if (best) rect = best;
+                }
+                if (!rect) {
+                    let p = el.parentElement;
+                    while (p) { const r = sized(p); if (r) { rect = r; break; } p = p.parentElement; }
+                }
+                if (!rect) return null;
+                return {x: rect.left + rect.width / 2, y: rect.top + rect.height / 2,
+                        w: rect.width, h: rect.height};
             }""")
-            if clicked and not clicked_through and await _confirm("via JS dispatch"):
-                return True
-            if clicked:
-                self._log("[Captcha] Checkbox JS dispatch not confirmed "
-                          "— falling back to coordinate mouse click",
-                          level="debug")
-        except Exception as e:
-            self._log(f"[Captcha] Checkbox JS dispatch failed: {str(e)[:120]}",
-                      level="debug")
+        except Exception:
+            point = None
+        if point:
+            self._log(f"[Captcha] Checkbox center (frame coords): ({point['x']:.1f}, {point['y']:.1f}) "
+                      f"size {point['w']:.1f}x{point['h']:.1f}", level="debug")
 
-        # Strategy 3: trusted coordinate mouse click at the checkbox's real
-        # page position. Translate the checkbox rect inside the frame to page
-        # coordinates via the iframe's bounding box, then click with the real
-        # mouse (hCaptcha only trusts real CDP pointer input). If the checkbox
-        # rect is 0-sized, aim at the widget's left-center where the checkbox
-        # renders.
+        # Translate frame coords → page coords via the iframe's bounding box.
+        page_point = None
         try:
             iframe_box = await iframe.bounding_box()
-            rect = await frame.evaluate("""() => {
-                const el = document.getElementById('checkbox')
-                    || document.querySelector('.checkbox')
-                    || document.querySelector('[role="checkbox"]')
-                    || document.querySelector('input[type="checkbox"]')
-                    || document.querySelector('[aria-checked]')
-                    || document.querySelector('.button-submit');
-                if (!el) return null;
-                const r = el.getBoundingClientRect();
-                return {left: r.left, top: r.top, width: r.width, height: r.height};
-            }""")
-            if iframe_box and (iframe_box.get("width", 0) > 1
-                               or (rect and rect.get("width", 0) > 1)):
-                if rect and rect.get("width", 0) > 1 and rect.get("height", 0) > 1:
-                    cx = iframe_box["x"] + rect["left"] + rect["width"] / 2
-                    cy = iframe_box["y"] + rect["top"] + rect["height"] / 2
-                elif rect:
-                    # 0-sized rect but a real layout position — aim at the
-                    # checkbox's own spot (half a standard checkbox out from
-                    # its top-left corner).
-                    cx = iframe_box["x"] + rect["left"] + 14
-                    cy = iframe_box["y"] + rect["top"] + 14
-                else:
-                    # No checkbox rect at all: the checkbox always renders at
-                    # the widget's left edge, vertically centered. Aim there,
-                    # not at a mid-widget shot that can land on the toolbar.
-                    cx = iframe_box["x"] + iframe_box.get("width", 0) * 0.12
-                    cy = iframe_box["y"] + iframe_box.get("height", 0) * 0.5
-                await self._page.mouse.move(cx, cy)
-                await asyncio.sleep(random.uniform(0.1, 0.3))
-                await self._page.mouse.click(cx, cy)
-                if await _confirm("via coordinate mouse click"):
-                    return True
-                self._log(f"[Captcha] Coordinate checkbox click at ({cx:.1f}, {cy:.1f}) "
-                          "not confirmed by hCaptcha", level="debug")
-        except Exception as e:
-            self._log(f"[Captcha] Coordinate checkbox click failed: {str(e)[:120]}",
-                      level="debug")
+        except Exception:
+            iframe_box = None
+        if point and iframe_box and iframe_box.get("width", 0) > 1:
+            page_point = (iframe_box["x"] + point["x"], iframe_box["y"] + point["y"])
+        elif iframe_box and iframe_box.get("width", 0) > 1:
+            # No measurable checkbox rect — hCaptcha renders the checkbox at
+            # the widget's left edge, vertically centered. Aim there.
+            page_point = (iframe_box["x"] + iframe_box.get("width", 0) * 0.12,
+                          iframe_box["y"] + iframe_box.get("height", 0) * 0.5)
 
-        # Nothing clickable found — dump the frame DOM to ALL LOGS so the
-        # user can see exactly what hCaptcha rendered inside the widget.
+        for attempt in range(1, 6):
+            if attempt > 1:
+                await asyncio.sleep(0.4)
+
+            # Strategy 1: real mouse click at the computed page point.
+            if page_point:
+                try:
+                    cx, cy = page_point
+                    await self._page.mouse.move(cx, cy, steps=2)
+                    await asyncio.sleep(random.uniform(0.15, 0.35))
+                    await self._page.mouse.click(cx, cy)
+                    if await _confirm(f"mouse click (attempt {attempt})"):
+                        return True
+                except Exception as e:
+                    self._log(f"[Captcha] Mouse click failed: {str(e)[:120]}", level="debug")
+
+            # Strategy 2: keyboard activation — role=checkbox is natively
+            # activatable via Enter/Space; no coordinates involved.
+            try:
+                await frame.evaluate("""() => {
+                    const el = document.querySelector('[role="checkbox"], #checkbox, .checkbox, [aria-checked], .button-submit');
+                    if (el) el.focus();
+                }""")
+                await asyncio.sleep(0.1)
+                await self._page.keyboard.press("Enter")
+                if await _confirm(f"keyboard Enter (attempt {attempt})"):
+                    return True
+                await self._page.keyboard.press("Space")
+                if await _confirm(f"keyboard Space (attempt {attempt})"):
+                    return True
+            except Exception as e:
+                self._log(f"[Captcha] Keyboard activation failed: {str(e)[:120]}", level="debug")
+
+            # Strategy 3: JS el.click() — hCaptcha binds click listeners.
+            try:
+                js_clicked = await frame.evaluate("""() => {
+                    const el = document.querySelector('[role="checkbox"], #checkbox, .checkbox, input[type="checkbox"], [aria-checked], .button-submit');
+                    if (!el) return false;
+                    el.click();
+                    return true;
+                }""")
+                if js_clicked and await _confirm(f"JS click (attempt {attempt})"):
+                    return True
+            except Exception as e:
+                self._log(f"[Captcha] JS click failed: {str(e)[:120]}", level="debug")
+
+        # Nothing registered — dump the frame DOM to ALL LOGS so the user can
+        # see exactly what hCaptcha rendered inside the widget.
         try:
             html = await frame.evaluate(
                 "() => (document.body ? document.body.outerHTML : '').slice(0, 2000)")
-            self._log(f"[Captcha] No clickable checkbox found — widget frame DOM:\n{html}",
+            self._log(f"[Captcha] Checkbox click never confirmed — widget frame DOM:\n{html}",
                       level="debug")
         except Exception as e:
             self._log(f"[Captcha] Widget frame DOM dump failed: {e}", level="debug")
@@ -1828,17 +1807,52 @@ class DiscordAutomation:
                 #    Find the first genuinely-rendered frame, auto-click its
                 #    checkbox (user request) so hCaptcha spawns the challenge.
                 try:
-                    widgets = self._page.locator('iframe[src*="newassets.hcaptcha.com"]')
+                    widgets = self._page.locator(
+                        'iframe[title="Widget containing checkbox for hCaptcha security challenge"], '
+                        'iframe[src*="newassets.hcaptcha.com"], '
+                        'iframe[src*="hcaptcha.com"][src*="frame=checkbox"]'
+                    )
                     wcount = await widgets.count()
                     if wcount > 0:
                         if widget_since is None:
                             widget_since = time.time()
                             self._log(f"[Captcha] hCaptcha widget present ({wcount} iframes) — waiting for it to initialize...")
+                        # Sitekey: extract + log it once per session (user
+                        # request — the widget src carries sitekey=).
+                        if not getattr(self, "_hcaptcha_sitekey", ""):
+                            try:
+                                sk = await extract_hcaptcha_sitekey(self._page)
+                                if sk:
+                                    self._hcaptcha_sitekey = sk
+                                    self._log(f"[Captcha] Sitekey: {sk}")
+                            except Exception as e:
+                                self._log(f"[Captcha] Sitekey extraction error: {e}", level="debug")
                         # Checkbox-only pass: token already present, no
                         # challenge needed.
                         if await read_hcaptcha_token(self._page):
                             self._log("[Captcha] [OK] hCaptcha already solved (token present)")
                             return True
+                        # ALWAYS-CLICK pass: try EVERY widget frame that is
+                        # rendered OR merely contains a checkbox node until
+                        # one click actually registers. Readiness probes
+                        # never gate the attempt.
+                        if not checkbox_clicked:
+                            for wi in range(wcount):
+                                w = widgets.nth(wi)
+                                if (await self._widget_rendered(w)
+                                        or await self._widget_has_checkbox(w)):
+                                    if await self._click_hcaptcha_checkbox(w):
+                                        checkbox_clicked = True
+                                        checkbox_clicked_at = time.time()
+                                        self._log("[Captcha] Checkbox clicked — waiting for challenge to spawn...")
+                                        break
+                        if checkbox_clicked and (time.time() - checkbox_clicked_at) < 5.0:
+                            # hCaptcha swaps to the challenge a moment
+                            # after the click — the next loop iteration
+                            # (0.25s) catches the painted challenge iframe.
+                            continue
+                        # Hand the first genuinely-rendered widget to the
+                        # accessibility solver.
                         rendered_widget = None
                         for wi in range(wcount):
                             w = widgets.nth(wi)
@@ -1846,16 +1860,6 @@ class DiscordAutomation:
                                 rendered_widget = w
                                 break
                         if rendered_widget is not None:
-                            if not checkbox_clicked:
-                                if await self._click_hcaptcha_checkbox(rendered_widget):
-                                    checkbox_clicked = True
-                                    checkbox_clicked_at = time.time()
-                                    self._log("[Captcha] Checkbox clicked — waiting for challenge to spawn...")
-                            if checkbox_clicked and (time.time() - checkbox_clicked_at) < 5.0:
-                                # hCaptcha swaps to the challenge a moment
-                                # after the click — the next loop iteration
-                                # (0.25s) catches the painted challenge iframe.
-                                continue
                             iframe = rendered_widget
                             self._log("[Captcha] [READY] hCaptcha widget rendered — opening accessibility challenge")
                             break

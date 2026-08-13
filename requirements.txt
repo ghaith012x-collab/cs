@@ -25,9 +25,7 @@ lxml>=5.0.0
 # one coherent, unlinkable machine identity.
 shardx>=0.1.11
 patchright>=1.60.0
-# Legacy engines (kept for git history / one-off scripts):
-# truedriver>=0.1.5
-# clearcote>=0.25.0
+# (Legacy truedriver / clearcote engines removed — repo is ShardX-only.)
 Pillow>=10.0.0
 asyncpg>=0.29.0
 flask>=3.0.0

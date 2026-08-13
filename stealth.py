@@ -74,18 +74,12 @@ _STEALTH_ARGS = _BASE_ARGS + [
 def launch_args(headless: bool = True) -> list:
     """Launch args for the active engine.
 
-    clearcote = minimal baseline only: the SDK already drops
-    ``--enable-automation`` and derives a coherent headless persona/window
-    geometry in the engine; extra flags (and ``--headless=new``) would fight
-    its machinery and can reintroduce signals.
     shardx = minimal baseline + ``--incognito``: the engine owns the whole
     identity (TLS / WebGL / UA-CH / fonts) and adds its own ``--headless=new``;
     incognito keeps every session a clean, disk-less identity.
     patchright = minimal set (it patches the CDP layer itself).
     stock = full hardening set.
     """
-    if ENGINE == "clearcote":
-        return list(_BASE_ARGS)
     if ENGINE == "shardx":
         return list(_BASE_ARGS) + ["--incognito"]
     args = _BASE_ARGS if ENGINE == "patchright" else _STEALTH_ARGS
@@ -437,12 +431,12 @@ _INIT_TEMPLATE = r"""
 def build_init_script(fingerprint: dict, ua: str) -> str:
     """Build the init script with one consistent identity baked in.
 
-    clearcote / shardx: returns a no-op script — the engine's C++ persona
-    already owns the whole identity (webdriver, UA-CH, WebGL, fonts, canvas,
-    TLS). Injecting these JS overrides on top would re-introduce the
-    self-revealing shims (toString returns the shim source, realm
-    re-acquisition, descriptor checks) the engines exist to remove."""
-    if ENGINE in ("clearcote", "shardx"):
+    shardx: returns a no-op script — the engine's C++ persona already owns
+    the whole identity (webdriver, UA-CH, WebGL, fonts, canvas, TLS).
+    Injecting these JS overrides on top would re-introduce the self-revealing
+    shims (toString returns the shim source, realm re-acquisition, descriptor
+    checks) the engines exist to remove."""
+    if ENGINE == "shardx":
         return f"// {ENGINE}: engine-level persona — no JS shims needed"
     pl = ua_platform(ua)
     version = ua_chrome_version(ua)
@@ -507,12 +501,12 @@ def build_context_options(fingerprint: dict, ua: str, proxy=None,
     locale ↔ languages ↔ timezone ↔ geolocation ↔ devicePixelRatio.
     proxy is a dict {proto, host, port, username, password} or None.
 
-    clearcote / shardx: the persona lives in the ENGINE (C++), so the
-    context only carries functional options. No user_agent / timezone /
-    locale / headers / proxy — the persona owns the identity and the proxy
-    rides on browser launch (Playwright rejects a context-level proxy when
-    the browser was launched with one)."""
-    if ENGINE in ("clearcote", "shardx"):
+    shardx: the persona lives in the ENGINE (C++), so the context only
+    carries functional options. No user_agent / timezone / locale / headers
+    / proxy — the persona owns the identity and the proxy rides on browser
+    launch (Playwright rejects a context-level proxy when the browser was
+    launched with one)."""
+    if ENGINE == "shardx":
         vp = viewport or {"width": 1920, "height": 1080}
         opts = {
             "viewport": vp,
@@ -582,11 +576,10 @@ async def apply_cdp_stealth(context, page) -> None:
     """CDP-level patches that run before init scripts / page JS.
     Works for both Playwright and Patchright (new_cdp_session exists on both).
 
-    clearcote / shardx: no-op — the engine's C++ layer already hides
-    webdriver and the launch defaults hold back CDP side-effects. Injecting
-    JS here would create the exact self-revealing shim tells the engines
-    remove."""
-    if ENGINE in ("clearcote", "shardx"):
+    shardx: no-op — the engine's C++ layer already hides webdriver and the
+    launch defaults hold back CDP side-effects. Injecting JS here would
+    create the exact self-revealing shim tells the engines remove."""
+    if ENGINE == "shardx":
         return
     try:
         cdp = await context.new_cdp_session(page)

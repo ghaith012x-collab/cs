@@ -326,10 +326,8 @@ class _Browser:
         """Answer HTTP-proxy 407 challenges over CDP Fetch.
 
         The ShardX fork ignores inline ``user:pass@`` in ``--proxy-server``
-        (the SDK's own comment admits stock Chromium does too), so an
-        authenticated gateway like vaultproxies 407-challenges every request
-        and the page never loads. This is the same mechanism the previous
-        truedriver engine needed: enable Fetch with auth-request handling on
+        (the SDK's own comment admits stock Chromium does too), so        an authenticated gateway like vaultproxies 407-challenges every request
+        and the page never loads. Enable Fetch with auth-request handling on
         the page's CDP session and answer ``authRequired`` with the
         credentials. Mirrors Playwright's own proxy-auth implementation.
         """
