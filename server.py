@@ -144,6 +144,51 @@ _CDP_NAV_SELECTORS = {
 }
 
 
+# ── Full-form readiness probe ─────────────────────────────────────────
+# _goto_register() returns as soon as email+username (or the age gate) paint,
+# but the SPA keeps hydrating: password, the three DOB dropdowns, ToS and the
+# Continue button can appear a beat later. Filling before they exist — and
+# before React has attached its value trackers — is what produced runs where
+# the bot typed into a half-rendered page and the form ended up empty. This
+# probe is the "is it actually all there yet?" gate _wait_for_form_ready polls.
+_FORM_READY_JS = r"""() => {
+    const vis = (el) => !!el && (el.offsetParent !== null || el.getClientRects().length > 0);
+    const q = (sel) => document.querySelector(sel);
+    const email = q('input[name="email"], input[type="email"], input[autocomplete="email"], input[aria-label*="email" i], input[placeholder*="email" i], input[id*="email" i]');
+    const username = q('input[name="username"], input[autocomplete="username"], input[aria-label*="username" i], input[id*="username" i], input[placeholder*="username" i]');
+    const password = q('input[name="password"], input[type="password"], input[autocomplete="new-password"], input[aria-label*="password" i]');
+    // DOB controls: native <select> or React-Select combobox/container whose
+    // label/placeholder/text mentions month/day/year (word-bounded so a
+    // "birthday" heading doesn't count as the "day" dropdown).
+    const seen = {};
+    const controls = Array.from(document.querySelectorAll(
+        'select, [role="combobox"], [role="listbox"], [class*="select" i], [class*="dropdown" i], [class*="control" i]'
+    ));
+    for (const el of controls) {
+        if (!vis(el)) continue;
+        const cls = typeof el.className === 'string' ? el.className : '';
+        const acc = (cls + ' ' + (el.getAttribute('aria-label') || '') + ' ' +
+                     (el.getAttribute('name') || '') + ' ' + (el.getAttribute('id') || '') + ' ' +
+                     (el.getAttribute('placeholder') || '') + ' ' +
+                     ((el.textContent || '').slice(0, 80))).toLowerCase();
+        for (const lbl of ['month', 'day', 'year']) {
+            if (new RegExp('\\b' + lbl + '\\b').test(acc)) { seen[lbl] = true; break; }
+        }
+    }
+    const body = document.body ? document.body.innerText : '';
+    return JSON.stringify({
+        email: vis(email),
+        username: vis(username),
+        password: vis(password),
+        dob: Object.keys(seen).length,
+        dobText: /date of birth|birthday/i.test(body),
+        inputs: document.querySelectorAll('input').length,
+        buttons: document.querySelectorAll('button').length,
+        readyState: document.readyState || '',
+    });
+}"""
+
+
 # Robust DOB (Month/Day/Year) setter. Discord's DOB control has changed
 # across builds: native <select>, a React-Select combobox, or a custom div.
 # This targets the control BY LABEL (aria-label / name / id / placeholder /
@@ -2667,6 +2712,24 @@ class DiscordAutomation:
         try:
             self._log(f"Selecting {label}: {option_text}")
 
+            # The register SPA hydrates the DOB dropdowns a beat after the
+            # credential inputs. Poll briefly for a DOB control to exist
+            # before attempting any click - clicking a not-yet-rendered
+            # control is how the old build typed into the wrong field.
+            control_ready = False
+            for _probe in range(8):
+                try:
+                    _st = json.loads(await self._page.evaluate(_FORM_READY_JS))
+                except Exception:
+                    _st = {}
+                if int(_st.get("dob") or 0) >= 1:
+                    control_ready = True
+                    break
+                await asyncio.sleep(0.4)
+            if not control_ready:
+                self._log(f"[Form] DOB control for {label} not rendered after ~3s — aborting", level="warn")
+                return False
+
             # Strategy 1: JS click on placeholder, then find and click option
             success = await self._page.evaluate(f"""
                 async () => {{
@@ -2771,6 +2834,60 @@ class DiscordAutomation:
         low = (text or "").lower()
         return any(k in low for k in _RATE_LIMIT_KEYWORDS)
 
+    async def _wait_for_form_ready(self, timeout: float = 30.0):
+        """Wait for the register form to FULLY render before touching it.
+
+        Returns "form" (credential inputs visible), "age_gate" (DOB controls
+        up but credentials not shown yet - Discord asks for birthday first on
+        some builds), or None (stopped / rate limited / timed out). The ready
+        state must HOLD for ~0.5s so React's hydration and value trackers are
+        attached before anything is written to a field - writing to a
+        not-yet-hydrated input is exactly what made Discord wipe the value on
+        its next re-render (the "nothing was filled" bug).
+        """
+        self._log(f"[Form] Waiting for the full form (email/username/password) to render (up to {timeout:.0f}s)...")
+        start = time.time()
+        last_log = -1.0
+        stable_since = None
+        while True:
+            if self._stopped.is_set():
+                self._nav_error = "stopped by user"
+                self._log("[Form] Stopped by user while waiting for the form")
+                return None
+            if await self._rate_limited():
+                self._nav_error = "rate limited (429) by Discord"
+                self._log("[Form] RATE LIMITED while waiting for the form", level="warn")
+                return None
+            elapsed = time.time() - start
+            try:
+                st = json.loads(await self._page.evaluate(_FORM_READY_JS))
+            except Exception:
+                st = {}
+            email = bool(st.get("email"))
+            username = bool(st.get("username"))
+            password = bool(st.get("password"))
+            dob = int(st.get("dob") or 0)
+            dob_text = bool(st.get("dobText"))
+            full_form = email and username and password
+            age_gate = (not email and not username and not password) and (dob >= 1 or dob_text)
+            if full_form or age_gate:
+                if stable_since is None:
+                    stable_since = time.time()
+                if time.time() - stable_since >= 0.5:
+                    which = "age_gate" if age_gate else "form"
+                    self._log(f"[Form] {'Age gate' if age_gate else 'Full form'} rendered in {elapsed:.1f}s (email={email} user={username} pass={password} dob={dob})")
+                    return which
+            else:
+                stable_since = None
+            if elapsed >= last_log + 4.0:
+                last_log = elapsed
+                self._log(f"[Form] Render wait {int(elapsed)}s: email={email} user={username} pass={password} dob={dob}/3 inputs={st.get('inputs')} buttons={st.get('buttons')}")
+            if elapsed >= timeout:
+                self._nav_error = f"register form never fully rendered after {int(elapsed)}s"
+                self._log(f"[Form] Form never fully rendered after {int(elapsed)}s - rotating", level="warn")
+                return None
+            await asyncio.sleep(0.3)
+
     async def _fill_registration_form(self) -> bool:
         try:
             self._log("=" * 40)
@@ -2794,32 +2911,26 @@ class DiscordAutomation:
                      'July', 'August', 'September', 'October', 'November', 'December']
             month_name = months[month_val - 1]
 
-            # ── Handle Discord age gate (birthday modal before form) ──
-            for _ in range(6):
-                try:
-                    age_text = await self._page.evaluate(
-                        "() => (document.body.innerText || '').substring(0, 300)")
-                except Exception:
-                    age_text = ""
-                has_age_gate = any(w in age_text.lower() for w in
-                                   ('birthday', 'date of birth', 'born', 'how old'))
-                has_form = ('email' in age_text.lower() and 'username' in age_text.lower())
-
-                if has_form:
-                    self._log("[Form] Registration form detected — no age gate")
-                    break
-                if has_age_gate:
-                    self._log("[Form] Age gate detected — setting DOB via dropdowns...")
-                    await self._select_dob("Month", month_name)
-                    await asyncio.sleep(0.3)
-                    await self._select_dob("Day", day_val)
-                    await asyncio.sleep(0.3)
-                    await self._select_dob("Year", year_val)
-                    await asyncio.sleep(0.6)
-                    continue
-
-                self._log(f"[Form] Waiting for page content... ({_+1}/6)")
+            # ── Wait for the form (or age gate) to FULLY render first ──
+            # The old 6x0.6s body-text poll returned on partial text and let
+            # the filler run while React was still hydrating - fields looked
+            # present but their handlers/value-trackers weren't attached yet,
+            # so writes got wiped and the keystroke fallback typed into
+            # whatever half-rendered element had focus. Gate on ACTUAL
+            # visible inputs (+ DOB controls) before touching anything.
+            phase = await self._wait_for_form_ready(timeout=30.0)
+            if phase == "age_gate":
+                self._log("[Form] Age gate detected — setting DOB before the main form...")
+                await self._select_dob("Month", month_name)
+                await asyncio.sleep(0.3)
+                await self._select_dob("Day", day_val)
+                await asyncio.sleep(0.3)
+                await self._select_dob("Year", year_val)
                 await asyncio.sleep(0.6)
+                phase = await self._wait_for_form_ready(timeout=20.0)
+            if phase != "form":
+                self._log("[Form] Form never fully rendered — aborting fill", level="warn")
+                return False
 
             # ── Generate credentials ──
             consonants = 'bcdfghjklmnpqrstvwxyz'
@@ -3244,11 +3355,18 @@ class DiscordAutomation:
                 loc = self._page.locator(sel)
                 if (await loc.count()) == 0:
                     continue
-                if await loc.input_value() == val:
+                el = loc.first
+                # Only type into a field that is actually rendered + visible.
+                # Typing into a detached / not-yet-hydrated element is the
+                # "typed random shit, nothing filled" failure mode.
+                if not (await el.is_visible()):
+                    self._log(f"[Form] Fallback fill skipped ({sel.split(',')[0].strip()}): not visible yet", level="warn")
                     continue
-                await loc.click()
-                await loc.press("Control+A")
-                await loc.type(val, delay=45 + random.randint(15, 70))
+                if await el.input_value() == val:
+                    continue
+                await el.click()
+                await el.press("Control+A")
+                await el.type(val, delay=45 + random.randint(15, 70))
             except Exception:
                 pass
         try:
