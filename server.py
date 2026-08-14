@@ -780,8 +780,10 @@ class DiscordAutomation:
         # minutes while the navigation commits and React downloads. The
         # render-wait loop below is the only gate; real dead proxies were
         # already caught by the chrome-error / about:blank check above.
-        if str(page_title) == "(unknown)" and str(page_url) == "(unknown)":
-            self._log("[Nav] Page not readable yet - waiting for it to load (no timeout)...", level="warn")
+        title_blank = not str(page_title or "").strip()
+        url_blank = not str(page_url or "").strip() or str(page_url or "").strip() in ("about:blank",)
+        if title_blank and url_blank:
+            self._log(f"[Nav] Page white/unreadable after goto (title empty, url={str(page_url)[:40]}) - render-wait keeps polling and rotates if it stays dead", level="warn")
 
         # ── Quick body text check (403/Forbidden/Cloudflare) ──
         try:
@@ -866,6 +868,7 @@ class DiscordAutomation:
         turnstile_tried = False  # already attempted a UC stealth Turnstile bypass
         blank_nav_since = None   # when the tab first sat at about:blank (nav never committed)
         nav_reissues = 0         # re-issued gotos for a never-committed navigation
+        dead_reads = 0           # consecutive unreadable polls -> page died (old-build bail)
         last_log = -1.0
         while True:
             # User hit Stop — abort the wait immediately (the browser gets
@@ -915,17 +918,39 @@ class DiscordAutomation:
                 state = None
 
             if state is None:
-                # Page still loading — the JS execution context isn't ready
-                # yet (navigation committing, React bundles downloading). This
-                # can last MINUTES on a slow TOR/residential circuit, so KEEP
-                # WAITING — no bail, no timeout. Only the render checks below
-                # gate success; real dead proxies were already caught by the
-                # chrome-error / block checks above.
-                if elapsed >= last_log + 5.0:
+                # Page unreadable (JS context not ready / tab white / dead) —
+                # the "white screen" the old build bailed on. Probe WHAT'S
+                # WRONG every ~3s for ALL logs (title, url, readyState, body
+                # length, the JS error), then after 20 consecutive unreadable
+                # polls declare the session dead and rotate — exactly like the
+                # old build — instead of staring at a blank tab forever.
+                dead_reads += 1
+                if elapsed >= last_log + 3.0:
                     last_log = elapsed
-                    self._log(f"[Nav] Page still loading - waiting for render ({int(elapsed)}s)...")
+                    probe = "(no probe)"
+                    try:
+                        probe = await asyncio.wait_for(self._page.evaluate(
+                            """() => {
+                                try {
+                                    return JSON.stringify({
+                                        title: document.title || "",
+                                        url: location.href || "",
+                                        readyState: document.readyState || "",
+                                        bodyLen: document.body ? (document.body.innerText || "").length : -1
+                                    });
+                                } catch (e) { return "probe-err: " + (e && e.message || e); }
+                            }"""
+                        ), timeout=2.0)
+                    except Exception as _pe:
+                        probe = f"probe-failed: {type(_pe).__name__}: {_pe}"
+                    self._log(f"[Nav] Page unreadable ({int(elapsed)}s, {dead_reads}x in a row) - probe: {probe}", level="warn")
+                if dead_reads >= 20:
+                    self._nav_error = "page unreadable 20x in a row (white screen / tab dead) - rotating circuit"
+                    self._log("[Nav] Page unreadable 20x in a row - page died, rotating circuit", level="warn")
+                    return False
                 await asyncio.sleep(0.3)
                 continue
+            dead_reads = 0
 
             if state:
                 # ── Mid-wait page-health checks ──
