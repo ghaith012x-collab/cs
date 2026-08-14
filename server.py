@@ -144,6 +144,99 @@ _CDP_NAV_SELECTORS = {
 }
 
 
+# Robust DOB (Month/Day/Year) setter. Discord's DOB control has changed
+# across builds: native <select>, a React-Select combobox, or a custom div.
+# This targets the control BY LABEL (aria-label / name / id / placeholder /
+# class) and sets the matching option directly — never "first N inputs",
+# never tab-roulette, never typing into whatever happens to have focus.
+_DOB_FALLBACK_JS = r"""
+async () => {
+    const LABEL = __LABEL__;
+    const OPT = __OPT__;
+    const norm = (s) => (s == null ? '' : String(s)).replace(/\s+/g, ' ').trim();
+    const low = (s) => norm(s).toLowerCase();
+    const monthIndex = ['january','february','march','april','may','june',
+        'july','august','september','october','november','december']
+        .indexOf(low(OPT)) + 1;
+    const wantNum = monthIndex || (parseInt(OPT, 10) || 0);
+    const wantStr = low(OPT);
+    const optionMatches = (text, value) => {
+        const t = low(text || ''); const v = low(value || '');
+        if (!t && !v) return false;
+        if (t === wantStr) return true;
+        if (!wantNum) return false;
+        const n = String(wantNum);
+        const p = n.length === 1 ? '0' + n : n;
+        return t === n || v === n || t === p || v === p;
+    };
+    const labelHits = (el) => {
+        const cls = (typeof el.className === 'string') ? el.className : '';
+        const acc = norm(el.getAttribute('aria-label') || '') + ' ' +
+                    norm(el.getAttribute('name') || '') + ' ' +
+                    norm(el.getAttribute('id') || '') + ' ' +
+                    norm(el.getAttribute('placeholder') || '') + ' ' +
+                    norm(el.getAttribute('data-label') || '') + ' ' +
+                    norm(cls);
+        return low(acc).includes(low(LABEL));
+    };
+    let candidates = Array.from(document.querySelectorAll(
+        'select, [role="combobox"], [role="listbox"], [class*="select" i], [class*="dropdown" i], [class*="control" i]'
+    )).filter(labelHits);
+    if (!candidates.length) {
+        const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null);
+        let node;
+        while ((node = walker.nextNode())) {
+            if (norm(node.textContent) !== norm(LABEL)) continue;
+            let p = node.parentElement;
+            for (let i = 0; p && i < 5; i++) {
+                if (p.matches && p.matches('select, [role="combobox"], [class*="select" i], [class*="dropdown" i], [class*="control" i]')) {
+                    candidates.push(p);
+                    break;
+                }
+                p = p.parentElement;
+            }
+            if (candidates.length) break;
+        }
+    }
+    for (const el of candidates) {
+        const tag = el.tagName.toLowerCase();
+        if (tag !== 'select' && el.offsetParent === null) continue;
+        if (tag === 'select') {
+            for (const opt of Array.from(el.options || [])) {
+                if (optionMatches(opt.text || opt.label, opt.value)) {
+                    el.value = opt.value;
+                    el.dispatchEvent(new Event('change', { bubbles: true }));
+                    el.dispatchEvent(new Event('input', { bubbles: true }));
+                    return 'native:' + (opt.text || opt.value);
+                }
+            }
+            continue;
+        }
+        el.scrollIntoView({ block: 'center' });
+        el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+        el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true }));
+        el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+        for (let attempt = 0; attempt < 8; attempt++) {
+            if (attempt > 0) await new Promise(r => setTimeout(r, 250));
+            const opts = document.querySelectorAll('[role="option"], [id*="option" i], [class*="option" i], ul li');
+            for (const opt of opts) {
+                const t = norm(opt.textContent || opt.getAttribute('aria-label') || '');
+                if (!t) continue;
+                if (optionMatches(t, opt.getAttribute('data-value') || opt.getAttribute('value') || t)) {
+                    opt.scrollIntoView({ block: 'nearest' });
+                    opt.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+                    opt.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+                    opt.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+                    return 'combo:' + t;
+                }
+            }
+        }
+    }
+    return 'not_found';
+}
+"""
+
+
 # ── Log verbosity ─────────────────────────────────────────
 # Normal mode prints ONLY the essential signup events listed below (plus
 # warnings / errors, which always print). Everything else — proxy sweeps,
@@ -2641,46 +2734,24 @@ class DiscordAutomation:
 
             self._log(f"JS result for {label}: {success}")
 
-            # Strategy 2: Click the placeholder text, then type to filter
+            # Strategy 2: robust native-<select> / labeled-combobox setter.
+            # Never tab-navigation roulette or type into "whatever has focus"
+            # — that is how the birth year leaked into the email field.
             try:
-                placeholder = self._page.get_by_text(label, exact=True)
-                count = await asyncio.wait_for(placeholder.count(), timeout=2.0)
-                if count > 0:
-                    await placeholder.first.click()
-                    await asyncio.sleep(0.5)
-                    await self._page.keyboard.type(option_text, delay=30)
-                    await asyncio.sleep(0.4)
-                    await self._page.keyboard.press('Enter')
-                    await asyncio.sleep(0.4)
-                    self._log(f"Selected {label} via text click")
-                    return True
-            except:
-                pass
-
-            # Strategy 3: Tab navigation
-            try:
-                idx = {"Month": 0, "Day": 1, "Year": 2}.get(label, 0)
-                pw = self._page.locator('input[name="password"]')
-                count = await asyncio.wait_for(pw.count(), timeout=2.0)
-                if count > 0:
-                    await pw.click()
-                    await asyncio.sleep(0.2)
-                    for _ in range(idx + 1):
-                        await self._page.keyboard.press('Tab')
-                        await asyncio.sleep(0.15)
-                    await self._page.keyboard.press('Space')
-                    await asyncio.sleep(0.5)
-                    await self._page.keyboard.type(option_text, delay=30)
+                result2 = await self._page.evaluate(_DOB_FALLBACK_JS
+                    .replace("__LABEL__", json.dumps(label))
+                    .replace("__OPT__", json.dumps(option_text)))
+                if result2 and str(result2).startswith(("native:", "combo:")):
+                    self._log(f"Selected {label} ({result2})")
                     await asyncio.sleep(0.3)
-                    await self._page.keyboard.press('Enter')
-                    await asyncio.sleep(0.4)
-                    self._log(f"Selected {label} via tab")
                     return True
-            except:
-                pass
+                self._log(f"DOB fallback for {label}: {result2}")
+            except Exception as e:
+                self._log(f"DOB fallback error for {label}: {e}", level="warn")
 
-            self._log(f"All DOB strategies failed for {label}")
+            self._log(f"All DOB strategies failed for {label}", level="warn")
             return False
+
 
         except Exception as e:
             self._log(f"DOB error for {label}: {e}")
@@ -2738,48 +2809,15 @@ class DiscordAutomation:
                     self._log("[Form] Registration form detected — no age gate")
                     break
                 if has_age_gate:
-                    self._log("[Form] Age gate detected — setting DOB via JS...")
-                    # Set DOB directly by interacting with the DOM
-                    try:
-                        await self._page.evaluate("""(month_name, day_val, year_val) => {
-                            const months = {'january':1,'february':2,'march':3,'april':4,'may':5,'june':6,
-                                'july':7,'august':8,'september':9,'october':10,'november':11,'december':12};
-                            const val = (month_name||'').toLowerCase();
-                            const m = months[val] || 1;
-                            const day = day_val || '15';
-                            const year = year_val || '1995';
-                            const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
-                            const all = Array.from(document.querySelectorAll('input, select'));
-                            let idx = 0;
-                            for (const el of all) {
-                                if (el.offsetParent === null) continue;
-                                const tag = el.tagName.toLowerCase();
-                                if (tag === 'select') {
-                                    const opts = el.options;
-                                    const target = idx===0 ? String(m) : (idx===1 ? day : year);
-                                    for (let oi=0; oi<opts.length; oi++) {
-                                        const ot = (opts[oi].text||'').toLowerCase().trim();
-                                        if (ot === target || ot === String(m) || ot === day || ot === year) {
-                                            el.selectedIndex = oi;
-                                            break;
-                                        }
-                                    }
-                                    el.dispatchEvent(new Event('change', {bubbles:true}));
-                                    idx++;
-                                } else {
-                                    const target = idx===0 ? String(m) : (idx===1 ? day : year);
-                                    setter.call(el, target);
-                                    el.dispatchEvent(new Event('input', {bubbles:true}));
-                                    el.dispatchEvent(new Event('change', {bubbles:true}));
-                                    idx++;
-                                }
-                                if (idx >= 3) break;
-                            }
-                        }""", month_name, day_val, year_val)
-                        await asyncio.sleep(1.5)
-                    except Exception:
-                        pass
+                    self._log("[Form] Age gate detected — setting DOB via dropdowns...")
+                    await self._select_dob("Month", month_name)
+                    await asyncio.sleep(0.3)
+                    await self._select_dob("Day", day_val)
+                    await asyncio.sleep(0.3)
+                    await self._select_dob("Year", year_val)
+                    await asyncio.sleep(0.6)
                     continue
+
                 self._log(f"[Form] Waiting for page content... ({_+1}/6)")
                 await asyncio.sleep(0.6)
 
@@ -2819,10 +2857,10 @@ class DiscordAutomation:
                         HTMLInputElement.prototype, 'value'
                     ).set;
                     const selectors = {{
-                        email: 'input[name="email"]',
-                        display: 'input[name="global_name"]',
-                        username: 'input[name="username"]',
-                        password: 'input[name="password"]',
+                        email: 'input[name="email"], input[type="email"], input[autocomplete="email"], input[aria-label*="email" i], input[placeholder*="email" i], input[id*="email" i]',
+                        display: 'input[name="global_name"], input[aria-label*="display name" i], input[aria-label*="display" i]',
+                        username: 'input[name="username"], input[autocomplete="username"], input[aria-label*="username" i], input[id*="username" i], input[placeholder*="username" i]',
+                        password: 'input[name="password"], input[type="password"], input[autocomplete="new-password"], input[aria-label*="password" i]',
                     }};
                     // Humanized but RELIABLE fill: a human pause, then ONE
                     // native-setter write + input event. Chunked partial
@@ -2873,10 +2911,10 @@ class DiscordAutomation:
                 v = await self._page.evaluate("""() => {
                     const g = (sel) => { const e = document.querySelector(sel); return e ? (e.value || '') : ''; };
                     return JSON.stringify({
-                        email: g('input[name="email"]'),
-                        display: g('input[name="global_name"]'),
-                        username: g('input[name="username"]'),
-                        password: g('input[name="password"]'),
+                        email: g('input[name="email"], input[type="email"], input[autocomplete="email"], input[aria-label*="email" i], input[id*="email" i]'),
+                        display: g('input[name="global_name"], input[aria-label*="display" i]'),
+                        username: g('input[name="username"], input[autocomplete="username"], input[aria-label*="username" i], input[id*="username" i]'),
+                        password: g('input[name="password"], input[type="password"], input[autocomplete="new-password"], input[aria-label*="password" i]'),
                         tos: document.querySelectorAll('input[type="checkbox"]:checked, [role="checkbox"][aria-checked="true"], [role="checkbox"][data-state="checked"]').length,
                     });
                 }""")
@@ -3194,10 +3232,10 @@ class DiscordAutomation:
     async def _fill_missing_fields(self, display_name: str) -> None:
         """Real-keystroke fallback for fields the JS fill didn't keep."""
         fields = (
-            ("input[name='email']", self._email or ""),
-            ("input[name='global_name']", display_name),
-            ("input[name='username']", self._username or ""),
-            ("input[name='password']", self._password or ""),
+            ("input[name='email'], input[type='email'], input[autocomplete='email'], input[aria-label*='email' i], input[id*='email' i]", self._email or ""),
+            ("input[name='global_name'], input[aria-label*='display name' i], input[aria-label*='display' i]", display_name),
+            ("input[name='username'], input[autocomplete='username'], input[aria-label*='username' i], input[id*='username' i]", self._username or ""),
+            ("input[name='password'], input[type='password'], input[autocomplete='new-password'], input[aria-label*='password' i]", self._password or ""),
         )
         for sel, val in fields:
             if not val:
