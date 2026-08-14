@@ -1288,6 +1288,18 @@ class _Context:
 
     async def new_page(self, **kwargs):
         driver = self.driver
+        if self._browser._cdp_active():
+            # CDP Mode: the raw CDP websocket (driver.cdp) is bound to the tab
+            # that was active when CDP Mode was activated. Opening a NEW tab
+            # here SPLITS the two channels: cdp.open() navigates the old tab
+            # while title()/evaluate()/execute_script() read the new blank one
+            # — the bot lands on a white screen that never renders. Reuse the
+            # current window so navigation and reads always hit the same tab.
+            try:
+                self._window = driver.current_window_handle
+            except Exception:
+                pass
+            return _Page(self._browser, self)
         try:
             await asyncio.to_thread(driver.switch_to.new_window, "tab")
         except Exception:
