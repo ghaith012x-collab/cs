@@ -542,11 +542,17 @@ class _Page:
         return None
 
     async def _evaluate(self, js: str, arg=None):
+        # await_promise must be decided on the ORIGINAL js: _wrap_eval_js
+        # wraps function-style js in parens, so an ``async () => ...``
+        # becomes ``(async () => ...)()`` and no longer starts with "async"
+        # (which silently made every async evaluate return its Promise
+        # instead of the awaited value).
+        await_promise = _is_async_fn(js)
         js = _wrap_eval_js(js, arg)
         remote, errors = await self._tab.send(cdp.runtime.evaluate(
             expression=js,
             context_id=None,
-            await_promise=_is_async_fn(js),
+            await_promise=await_promise,
             return_by_value=True,
             user_gesture=True,
             allow_unsafe_eval_blocked_by_csp=True,
@@ -561,11 +567,12 @@ class _Page:
         ctx = await self._frame_context(frame)
         if ctx is None:
             raise RuntimeError(f"no execution context for frame {frame.id_}")
+        await_promise = _is_async_fn(js)
         js = _wrap_eval_js(js, arg)
         remote, errors = await self._tab.send(cdp.runtime.evaluate(
             expression=js,
             context_id=ctx,
-            await_promise=_is_async_fn(js),
+            await_promise=await_promise,
             return_by_value=True,
             user_gesture=True,
             allow_unsafe_eval_blocked_by_csp=True,
@@ -667,7 +674,7 @@ class _Page:
         if headers:
             try:
                 await self._tab.send(cdp.network.set_extra_http_headers(
-                    headers=[cdp.network.HeaderEntry(name=k, value=str(v))
+                    headers=[cdp.fetch.HeaderEntry(name=k, value=str(v))
                              for k, v in headers.items()]))
             except Exception:
                 pass
@@ -807,23 +814,26 @@ class _Page:
 
     # ── screenshots ────────────────────────────────────────────────────
     async def screenshot(self, full_page=True, clip=None, type="png"):
-        kwargs = {"format": "png"}
+        # truedriver's capture_screenshot takes ``format_`` (not ``format``)
+        # and returns a base64 string (not a response object with .data).
+        kwargs = {"format_": "png"}
         if clip:
             kwargs["clip"] = cdp.page.Viewport(
                 x=float(clip.get("x", 0)), y=float(clip.get("y", 0)),
                 width=float(clip.get("width", 100)),
-                height=float(clip.get("height", 100)))
+                height=float(clip.get("height", 100)),
+                scale=1.0)
             kwargs["capture_beyond_viewport"] = False
         elif full_page:
             kwargs["capture_beyond_viewport"] = True
         try:
             res = await self._tab.send(cdp.page.capture_screenshot(**kwargs))
-            return base64.b64decode(res.data)
+            return base64.b64decode(res)
         except Exception:
             # Retry a plain viewport capture (full-page can fail on zoom)
             try:
-                res = await self._tab.send(cdp.page.capture_screenshot(format="png"))
-                return base64.b64decode(res.data)
+                res = await self._tab.send(cdp.page.capture_screenshot(format_="png"))
+                return base64.b64decode(res)
             except Exception:
                 return b""
 
