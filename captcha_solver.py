@@ -4865,6 +4865,167 @@ async def solve_hcaptcha_accessibility(page, iframe,
     except Exception as _warm_err:
         log(f"[Accessibility] Warm-up skipped: {_warm_err}", level="warn")
 
+
+    # ── VISION solver (Qwen3-VL family via Ollama) ─────────────────────
+    # Used for IMAGE challenges (drag / silhouette / image-pick) with EXACT
+    # pixel coordinates, and as a final accuracy layer for ambiguous text
+    # questions. Set OLLAMA_VISION_MODEL on the Ollama server, e.g.
+    #   ollama pull qwen2.5vl:7b   (or qwen3-vl:8b when available)
+    #   OLLAMA_VISION_MODEL=qwen2.5vl:7b
+    ollama_vision_model = __import__("os").environ.get("OLLAMA_VISION_MODEL") or ""
+    ollama_vision_model = ollama_vision_model.strip()
+    if ollama_vision_model:
+        log("[Vision] Image solver armed: " + ollama_vision_model + " (exact-coordinate drag/image solving)")
+    else:
+        log("[Vision] No OLLAMA_VISION_MODEL set - image/drag challenges fall back to Skip")
+
+    # Every vision solve is appended to data/vision_train.jsonl so the
+    # Qwen3-VL LoRA trainer can be retrained on every real challenge.
+    _VISION_TRAIN_FILE = "data/vision_train.jsonl"
+
+    def _save_vision_sample(image_b64, question, model_reply, plan):
+        try:
+            __import__("os").makedirs("data", exist_ok=True)
+            with open(_VISION_TRAIN_FILE, "a", encoding="utf-8") as f:
+                f.write(json.dumps({
+                    "ts": time.time(),
+                    "question": (question or "")[:300],
+                    "screenshot_b64": image_b64,
+                    "model_reply": (model_reply or "")[:600],
+                    "plan": plan,
+                }) + "\n")
+        except Exception:
+            pass
+
+    async def _llm_answer_vision(image_b64, prompt, timeout=25.0):
+        """Ask the Ollama VISION model about a screenshot. Returns raw text."""
+        if not ollama_vision_model:
+            return ""
+        try:
+            import aiohttp
+            payload = {
+                "model": ollama_vision_model,
+                "stream": False,
+                "keep_alive": "30m",
+                "think": False,
+                "options": {"temperature": 0.1, "num_predict": 320},
+                "messages": [{"role": "user", "content": prompt,
+                              "images": [image_b64]}],
+            }
+            async with aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=timeout)
+            ) as session:
+                async with session.post(ollama_url + "/api/chat",
+                                        json=payload) as resp:
+                    if resp.status != 200:
+                        log("[Vision] Ollama vision HTTP " + str(resp.status), level="warn")
+                        return ""
+                    data = await resp.json()
+                    return str(data.get("message", {}).get("content", "")).strip()
+        except asyncio.TimeoutError:
+            return ""
+        except Exception as e:
+            log("[Vision] Ollama vision error: " + str(e), level="warn")
+            return ""
+
+    _VISION_PROMPT = (
+        "You are an expert hCaptcha solver. You are shown a screenshot of an "
+        "hCaptcha challenge. Pixel coordinates are relative to the image "
+        "(0,0 = top-left). Determine the challenge type and reply with STRICT "
+        "JSON only - no markdown, no extra text, no code fences:\n"
+        '{"type": "drag", "from": [x,y], "to": [x,y]}\n'
+        '{"type": "click", "points": [[x,y], ...]}\n'
+        '{"type": "text", "answer": "single word"}\n'
+        "Rules:\n"
+        "- drag: the puzzle piece you must grab is centered at [from]; the "
+        "target drop zone (the outlined silhouette/slot it must land in) is "
+        "centered at [to]. Give CENTER pixels of each, exact integers.\n"
+        "- click: give the center pixel of EVERY image/tile you must click "
+        "(the ones matching the prompt), exact integers.\n"
+        "- text: the single word/number/phrase that answers the question "
+        "shown (the challenge is displayed as an image).\n"
+        "Be exact - wrong coordinates fail the challenge."
+    )
+
+    def _parse_vision_json(raw):
+        if not raw:
+            return None
+        m = re.search(r"\{.*\}", raw, re.DOTALL)
+        if not m:
+            return None
+        try:
+            d = json.loads(m.group(0))
+            return d if isinstance(d, dict) else None
+        except Exception:
+            return None
+
+    async def _execute_drag(fx, fy, tx, ty):
+        """Trusted CDP mouse drag with a slight arc (piece -> target)."""
+        try:
+            await page.mouse.move(fx, fy, steps=14)
+            await asyncio.sleep(0.12)
+            await page.mouse.down()
+            steps = 20
+            for i in range(1, steps + 1):
+                t = i / steps
+                # gentle vertical arc so the path isn't a dead-straight line
+                arc = math.sin(t * math.pi) * 6
+                await page.mouse.move(fx + (tx - fx) * t,
+                                      fy + (ty - fy) * t - arc, steps=1)
+                await asyncio.sleep(0.007)
+            await asyncio.sleep(0.1)
+            await page.mouse.up()
+        except Exception as e:
+            log("[Vision] drag execution error: " + str(e), level="warn")
+
+    async def _solve_gesture_challenge(question_text):
+        """Screenshot the viewport, ask the vision model for exact
+        coordinates, execute the gesture. Returns True when performed."""
+        if not ollama_vision_model:
+            return False
+        try:
+            # Viewport capture (not full-page) so model pixel coordinates
+            # map 1:1 to viewport mouse coordinates for the drag/click.
+            try:
+                _png = await page.screenshot(full_page=False, type="png")
+                shot = base64.b64encode(_png).decode() if _png else ""
+            except Exception:
+                shot = await _screenshot_b64(page)
+            if not shot:
+                return False
+            prompt = _VISION_PROMPT + (
+                "\n\nChallenge instruction shown to the user: " +
+                (question_text or "")[:220])
+            raw = await _llm_answer_vision(shot, prompt, timeout=25.0)
+            plan = _parse_vision_json(raw)
+            if not plan:
+                log("[Vision] No parseable plan: " + str(raw)[:120], level="warn")
+                return False
+            ctype = str(plan.get("type", "")).lower()
+            _save_vision_sample(shot, question_text, raw, plan)
+            if ctype == "drag":
+                frm = plan.get("from")
+                to = plan.get("to")
+                if (isinstance(frm, (list, tuple)) and len(frm) >= 2
+                        and isinstance(to, (list, tuple)) and len(to) >= 2):
+                    log("[Vision] Drag %d,%d -> %d,%d" % (int(frm[0]), int(frm[1]), int(to[0]), int(to[1])))
+                    await _execute_drag(float(frm[0]), float(frm[1]),
+                                        float(to[0]), float(to[1]))
+                    return True
+            elif ctype == "click":
+                pts = plan.get("points") or []
+                if isinstance(pts, list) and pts:
+                    for p in pts[:8]:
+                        if isinstance(p, (list, tuple)) and len(p) >= 2:
+                            log("[Vision] Click %d,%d" % (int(p[0]), int(p[1])))
+                            await page.mouse.click(float(p[0]), float(p[1]))
+                            await asyncio.sleep(0.35)
+                    return True
+            return False
+        except Exception as e:
+            log("[Vision] gesture solve error: " + str(e), level="warn")
+            return False
+
     # ── Helpers ────────────────────────────────────────────
 
     async def _ollama_chat(image_b64: str, prompt: str, timeout: float = 20.0) -> str:
@@ -7620,7 +7781,11 @@ async def solve_hcaptcha_accessibility(page, iframe,
                     or re.search(r'\bwhich (?:image|picture|photo)\b', _tl)
                     or re.search(r'\b(draw|trace|swipe|rotate)\b', _tl)
                     or re.search(r'\bcomplete (?:the|this) (?:pattern|shape|puzzle)\b', _tl)):
-                log(f"[Accessibility] Q{{q}} non-text instruction ('drag/silhouette' style) - skipping without LLM")
+                log(f"[Accessibility] Q{q} non-text instruction ('drag/silhouette' style) - trying VISION solver")
+                if await _solve_gesture_challenge(text):
+                    log(f"[Accessibility] Q{q} gesture solved by vision model")
+                    return "__GESTURE__"
+                log(f"[Accessibility] Q{q} vision gesture failed - skipping", level="warn")
                 return None
 
         if text:
@@ -7640,6 +7805,25 @@ async def solve_hcaptcha_accessibility(page, iframe,
                 log(f"[Accessibility] Q{q} Layer 3 LLM answered: {ans}")
                 return ans
             log(f"[Accessibility] Q{q} Layer 3 could not answer either", level="warn")
+            # ── Layer 4: VISION model on the real challenge screenshot ──
+            # Some questions render as an image with no alt/aria text - a
+            # VL model sees the actual pixels and answers exactly.
+            if ollama_vision_model:
+                try:
+                    _shot = await _screenshot_b64(page)
+                    if _shot:
+                        _vraw = await _llm_answer_vision(
+                            _shot,
+                            _VISION_PROMPT + "\n\nQuestion text: " + (text or "")[:220],
+                            timeout=20.0)
+                        _plan = _parse_vision_json(_vraw)
+                        if _plan and _plan.get("type") == "text" and _plan.get("answer"):
+                            _vans = _clean_llm_answer(str(_plan["answer"]))
+                            if _vans:
+                                log(f"[Accessibility] Q{q} VISION model answered: {_vans}")
+                                return _vans
+                except Exception:
+                    pass
         else:
             log(f"[Accessibility] Q{q} NO TEXT FOUND — cannot ask LLM without text", level="warn")
         return None
@@ -7953,6 +8137,19 @@ async def solve_hcaptcha_accessibility(page, iframe,
                             break
 
                     answer = await _get_answer(hcaptcha, q)
+                    if answer == "__GESTURE__":
+                        # Vision model already performed the drag/click
+                        # gesture - no typing/submitting needed. Wait for
+                        # the challenge to advance or a token to appear.
+                        log(f"[Accessibility] Q{q} gesture performed - waiting for challenge to advance")
+                        for _ti in range(8):
+                            if await _token_present():
+                                break
+                            await asyncio.sleep(0.3)
+                        if await _token_present():
+                            log(f"[Accessibility] Token appeared after Q{q} (gesture)!")
+                            break
+                        continue
                     # ── Duplicate detection: if we get the same question
                     # text 3+ times in a row, the page isn't showing real
                     # captcha challenges — abort this chain.

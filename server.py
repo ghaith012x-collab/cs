@@ -538,8 +538,56 @@ class DiscordAutomation:
             label = "proxy session" if self.proxy else "TOR circuit"
             self._log(f"[Proxy] Exit IP ({label}): {ip}")
 
+    async def _discover_vision_model(self) -> None:
+        """Auto-arm the qwen3-vl image solver when OLLAMA_VISION_MODEL is
+        unset: query the Ollama server for a vision-capable model and set
+        the env var the captcha solver reads. Drag/silhouette/image-pick
+        challenges then get solved with exact pixel coordinates instead of
+        being skipped. Preference: qwen3-vl → qwen2.5vl → qwen2-vl →
+        moondream → llava → minicpm-v → bakllava."""
+        if (os.environ.get("OLLAMA_VISION_MODEL") or "").strip():
+            return
+        url = (os.environ.get("OLLAMA_URL") or os.environ.get("OLLAMA_BASE")
+               or "http://localhost:11434").rstrip("/")
+        try:
+            import aiohttp
+
+            async def _discover() -> str:
+                async with aiohttp.ClientSession(
+                    timeout=aiohttp.ClientTimeout(total=4)
+                ) as s:
+                    async with s.get(url + "/api/tags") as r:
+                        if r.status != 200:
+                            return ""
+                        d = await r.json()
+                names = [m.get("name", "") for m in d.get("models", [])]
+                if not names:
+                    return ""
+                for pref in ("qwen3-vl", "qwen2.5vl", "qwen2-vl",
+                             "moondream", "llava", "minicpm-v", "bakllava"):
+                    for n in sorted(names, key=lambda x: -len(x)):
+                        if n.split(":")[0] == pref or n.startswith(pref + ":"):
+                            return n
+                for n in sorted(names, key=lambda x: -len(x)):
+                    if re.search(r"vl|vision|moondream|llava", n.lower()):
+                        return n
+                return ""
+
+            model = await asyncio.wait_for(_discover(), timeout=5)
+        except Exception:
+            model = ""
+        if model:
+            os.environ["OLLAMA_VISION_MODEL"] = model
+            self._log(f"[Vision] Image solver auto-armed: {model} (drag challenges solved with exact coordinates)")
+        else:
+            self._log("[Vision] No vision model found on Ollama server — drag/image challenges will fall back to Skip (set OLLAMA_VISION_MODEL)")
+
     async def initialize(self) -> None:
         self._playwright = await async_playwright().start()
+
+        # Auto-arm the qwen3-vl image solver BEFORE the first captcha so
+        # drag challenges are solved on the very first attempt.
+        await self._discover_vision_model()
 
         # Best-human-stealth launch flags (patchright = minimal set, stock
         # playwright = full hardening set). See stealth.launch_args().
@@ -678,15 +726,11 @@ class DiscordAutomation:
         if self._browser is None or self._page is None:
             return False
         try:
-            # CDP Mode detaches WebDriver around stealth ops — reattach it
-            # before the DOM read so a healthy parked browser isn't mistaken
-            # for a dead one.
-            try:
-                await asyncio.to_thread(self._browser._ensure_connected)
-            except Exception:
-                pass
+            # TrueDriver: liveness = the tab answers one CDP read.
+            if not getattr(self._browser, "is_connected", True):
+                return False
             url = await asyncio.wait_for(
-                asyncio.to_thread(lambda: self._page.url), timeout=3.0)
+                self._page.evaluate("location.href"), timeout=3.0)
             return bool(url)
         except Exception:
             return False
@@ -750,31 +794,30 @@ class DiscordAutomation:
             return False
 
     async def _read_nav_state(self):
-        """Read the register-page state over every working channel.
+        """Read the register-page state over the engine's single CDP channel.
 
-        Returns (state_dict, channel_name) — channel is "js" or "cdp" —
-        or (None, None) only when EVERY channel failed. That is the single
-        real "page is dead" signal: a healthy page can always be read over
-        at least one channel, and a broken JS channel must never look like
-        a dead page (the old white-screen bug that rotated good sessions).
+        TrueDriver is pure CDP: every evaluate() runs over the same websocket
+        that drove the navigation, so there is no stale-WebDriver channel to
+        fall back from. A healthy page ALWAYS answers; (None, None) is now
+        the one true "tab dead" signal.
         """
-        # 1) JS state: WebDriver execute_script, falling back inside the
-        #    engine to the raw CDP websocket when the reattached session's
-        #    JS context is stale.
         try:
             checks = await asyncio.wait_for(
                 self._page.evaluate(_NAV_STATE_JS), timeout=2.5)
             if checks:
                 st = json.loads(checks)
-                st["source"] = "js"
-                return st, "js"
+                st["source"] = "cdp"
+                return st, "cdp"
         except Exception:
             pass
-        # 2) CDP DOM-presence state: no JS execution required.
+        # Mid-navigation the old execution context is destroyed before the
+        # new one registers — one quick retry, then report dead.
         try:
-            st = await asyncio.wait_for(
-                self._cdp_dom_nav_state(), timeout=2.5)
-            if st is not None:
+            await asyncio.sleep(0.15)
+            checks = await asyncio.wait_for(
+                self._page.evaluate(_NAV_STATE_JS), timeout=2.5)
+            if checks:
+                st = json.loads(checks)
                 st["source"] = "cdp"
                 return st, "cdp"
         except Exception:
@@ -782,65 +825,8 @@ class DiscordAutomation:
         return None, None
 
     async def _cdp_dom_nav_state(self):
-        """Minimal page state read purely over the raw CDP websocket.
-
-        Uses driver.cdp.* (get_title / get_current_url / is_element_present)
-        so the navigation keeps working even when the reattached WebDriver
-        session cannot execute JS at all. Returns None when CDP is gone.
-        """
-        driver = self._page.driver
-        cdp = getattr(driver, "cdp", None)
-        if cdp is None:
-            return None
-
-        def _sync():
-            state = {
-                "url": "", "title": "", "readyState": "",
-                "email": False, "username": False, "password": False,
-                "ageGate": False, "isLogin": False, "hasQR": False,
-                "hasButton": False, "hasAppMount": False, "inputCount": 0,
-                "buttonCount": 0, "cfClearance": False, "challenge": False,
-                "textPreview": "",
-            }
-            try:
-                state["title"] = cdp.get_title() or ""
-            except Exception:
-                pass
-            try:
-                state["url"] = cdp.get_current_url() or ""
-            except Exception:
-                pass
-            for key, sel in _CDP_NAV_SELECTORS.items():
-                try:
-                    state[key] = bool(cdp.is_element_present(sel))
-                except Exception:
-                    pass
-            try:
-                state["inputCount"] = len(cdp.find_elements("input"))
-            except Exception:
-                pass
-            try:
-                state["buttonCount"] = len(cdp.find_elements("button"))
-            except Exception:
-                pass
-            # Body text drives age-gate / login / block detection.
-            try:
-                txt = cdp.evaluate(
-                    "document.body ? document.body.innerText.substring(0, 250) : ''") or ""
-                state["textPreview"] = txt
-                low = txt.lower()
-                state["ageGate"] = bool(re.search(
-                    r"birthday|date of birth|born|how old", low[:400]))
-                state["isLogin"] = bool(re.search(
-                    r"login|sign in|welcome back", low[:400]))
-            except Exception:
-                pass
-            return state
-
-        try:
-            return await asyncio.to_thread(_sync)
-        except Exception:
-            return None
+        """Kept as a JS-only alias — TrueDriver has no separate CDP channel."""
+        return await self._read_nav_state()
 
     async def _goto_register(self) -> bool:
         """Navigate to discord.com/register — single attempt, no retries.
@@ -878,7 +864,7 @@ class DiscordAutomation:
             self._log(f"[Nav] Page DOM ready in {time.time() - t0:.1f}s (not waiting for hCaptcha subresources)")
         except asyncio.TimeoutError:
             elapsed = time.time() - t0
-            self._log(f"[Nav] Page.goto HARD TIMEOUT after {elapsed:.1f}s — proxy likely dead", level="warn")
+            self._log(f"[Nav] Page.goto HARD TIMEOUT after {elapsed:.1f}s — proxy likely dead")
 
         # ── Check what we got ──
         try:
@@ -916,7 +902,7 @@ class DiscordAutomation:
         if "chrome-error://" in (page_url or ""):
             proxy_label = "PROXY SESSION" if self.proxy else "TOR CIRCUIT"
             self._nav_error = f"{proxy_label.lower()} dead (browser error page: {page_url[:60]})"
-            self._log(f"[Nav] {proxy_label} DEAD (url={page_url[:60]}) - rotating to fresh circuit", level="warn")
+            self._log(f"[Nav] {proxy_label} DEAD (url={page_url[:60]}) - rotating to fresh circuit")
             return False
         if (page_url or "").strip() in ("", "about:blank"):
             self._log("[Nav] Tab still at about:blank after goto cap - navigation still committing, render-wait will re-issue if stuck", level="warn")
@@ -929,7 +915,7 @@ class DiscordAutomation:
         title_blank = not str(page_title or "").strip()
         url_blank = not str(page_url or "").strip() or str(page_url or "").strip() in ("about:blank",)
         if title_blank and url_blank:
-            self._log(f"[Nav] Page white/unreadable after goto (title empty, url={str(page_url)[:40]}) - render-wait keeps polling and rotates if it stays dead", level="warn")
+            self._log(f"[Nav] Page white/unreadable after goto (title empty, url={str(page_url)[:40]}) - render-wait keeps polling and rotates if it stays dead")
 
         # ── Quick body text check (403/Forbidden/Cloudflare) ──
         try:
@@ -1060,10 +1046,10 @@ class DiscordAutomation:
                         ), timeout=2.0)
                     except Exception as _pe:
                         probe = f"probe-failed: {type(_pe).__name__}: {_pe}"
-                    self._log(f"[Nav] Page unreadable ({int(elapsed)}s, {dead_reads}x in a row) - probe: {probe}", level="warn")
+                    self._log(f"[Nav] Page unreadable ({int(elapsed)}s, {dead_reads}x in a row) - probe: {probe}")
                 if dead_reads >= 20:
                     self._nav_error = "page unreadable 20x in a row (white screen / tab dead) - rotating circuit"
-                    self._log("[Nav] Page unreadable 20x in a row - page died, rotating circuit", level="warn")
+                    self._log("[Nav] Page unreadable 20x in a row - page died, rotating circuit")
                     return False
                 await asyncio.sleep(0.3)
                 continue
@@ -1075,7 +1061,7 @@ class DiscordAutomation:
                 # Browser error page appearing mid-wait = the circuit died.
                 if "chrome-error://" in cur_url:
                     self._nav_error = "proxy/circuit dead (chrome-error page)"
-                    self._log("[Nav] Browser error page - rotating circuit", level="warn")
+                    self._log("[Nav] Browser error page - rotating circuit")
                     return False
                 if cur_url in ("", "about:blank"):
                     # Navigation never committed (goto cap fired mid-commit on

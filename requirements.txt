@@ -17,22 +17,12 @@ aiohttp>=3.9.0
 beautifulsoup4>=4.12.0
 lxml>=5.0.0
 
-# Existing project deps
-# Stealth engine: SeleniumBase (https://github.com/seleniumbase/SeleniumBase)
-# in CDP Mode (Chrome DevTools Protocol — the stealth successor to UC Mode),
-# driving the BRAVE browser (unbranded Chromium) with incognito ALWAYS on.
-# CDP Mode launches with the UC (undetected-chromedriver) driver, then
-# activate_cdp_mode() disconnects chromedriver and re-drives the browser over
-# a raw CDP websocket: no WebDriver is attached while navigating or clicking
-# Cloudflare Turnstile widgets. cdp_click / uc_click / uc_gui_click_captcha
-# handle CAPTCHAs at the CDP/OS level instead of injecting JS, so Cloudflare
-# can't fingerprint synthetic events.
-seleniumbase>=4.51.0
-# (Legacy ShardX/patchright engines removed from the active path — kept only
-# for the old shardx_engine.py reference + Dockerfile pre-fetch. Repo default
-# is SeleniumBase.)
-shardx>=0.1.11
-patchright>=1.60.0
+# Browser engine: TrueDriver (https://pypi.org/project/truedriver — a blazing
+# fast, async-first, undetectable CDP automation framework, a fork of
+# nodriver) driving UNGOOGLED CHROMIUM. Pure CDP — no WebDriver session, no
+# chromedriver, nothing to go stale and white-screen. Incognito is ALWAYS on.
+truedriver>=0.1.5
+
 Pillow>=10.0.0
 asyncpg>=0.29.0
 flask>=3.0.0

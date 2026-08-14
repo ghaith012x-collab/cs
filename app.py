@@ -329,7 +329,7 @@ async def _run_worker(wid: str, cfg: dict, proxy=None) -> None:
             except Exception:
                 probe_ok = False
             if not probe_ok:
-                _log(f"[{wid}] [Proxy] Probe failed — session dead, blacklisting {proxy.get('key','?')[:44]}...", level="warn")
+                _log(f"[{wid}] [Proxy] Probe failed — session dead, blacklisting {proxy.get('key','?')[:44]}...", level="info")
                 proxy_pool.release(proxy, ok=False)
                 proxy = None
                 consecutive_tunnel_fails += 1
@@ -339,11 +339,11 @@ async def _run_worker(wid: str, cfg: dict, proxy=None) -> None:
                         tor_fallback = True
                         proxy = None
                         consecutive_tunnel_fails = 0
-                        _log(f"[{wid}] [Proxy] All proxy sessions appear dead — falling back to TOR (socks5://127.0.0.1:9050)", level="warn")
+                        _log(f"[{wid}] [Proxy] All proxy sessions appear dead — falling back to TOR (socks5://127.0.0.1:9050)", level="info")
                         _proxy_stats_line(wid)
                         await asyncio.sleep(1)
                         continue
-                    _log(f"[{wid}] {consecutive_tunnel_fails} consecutive tunnel failures — aborting (all sessions appear dead)", level="error")
+                    _log(f"[{wid}] {consecutive_tunnel_fails} consecutive tunnel failures — aborting (all sessions appear dead)")
                     break
                 _proxy_stats_line(wid)
                 await asyncio.sleep(backoff)
@@ -395,11 +395,11 @@ async def _run_worker(wid: str, cfg: dict, proxy=None) -> None:
                         tor_fallback = True
                         proxy = None
                         consecutive_tunnel_fails = 0
-                        _log(f"[{wid}] [Proxy] All proxy sessions appear dead — falling back to TOR (socks5://127.0.0.1:9050)", level="warn")
+                        _log(f"[{wid}] [Proxy] All proxy sessions appear dead — falling back to TOR (socks5://127.0.0.1:9050)", level="info")
                         _proxy_stats_line(wid)
                         await asyncio.sleep(1)
                         continue
-                    _log(f"[{wid}] {consecutive_tunnel_fails} consecutive tunnel failures — aborting (all sessions appear dead)", level="error")
+                    _log(f"[{wid}] {consecutive_tunnel_fails} consecutive tunnel failures — aborting (all sessions appear dead)")
                     break
                 await asyncio.sleep(backoff)
                 continue
@@ -514,10 +514,10 @@ async def _run_worker(wid: str, cfg: dict, proxy=None) -> None:
                     if (not using_tor and TOR_FALLBACK and _tor_check() and not tor_fallback):
                         tor_fallback = True
                         consecutive_tunnel_fails = 0
-                        _log(f"[{wid}] [Proxy] All proxy sessions appear dead — falling back to TOR (socks5://127.0.0.1:9050)", level="warn")
+                        _log(f"[{wid}] [Proxy] All proxy sessions appear dead — falling back to TOR (socks5://127.0.0.1:9050)", level="info")
                     else:
                         reason = "all TOR circuits blocked" if using_tor else "all sessions appear dead"
-                        _log(f"[{wid}] {consecutive_tunnel_fails} consecutive tunnel failures — aborting ({reason})", level="error")
+                        _log(f"[{wid}] {consecutive_tunnel_fails} consecutive tunnel failures — aborting ({reason})")
                         break
             else:
                 consecutive_tunnel_fails = 0
@@ -703,15 +703,15 @@ async def _start_all_async(cfg: dict) -> None:
                  f"workers probe-gate every session before launching a browser")
             if sw.get("tested") and not sw.get("reachable"):
                 _log(
-                    "[Proxy] [ERROR] 0 of the loaded sessions can reach Discord. "
+                    "[Proxy] 0 of the loaded sessions can reach Discord. "
                     "vaultproxies sessions expire (ttl-600 = 10 min) and cannot "
-                    "be revived — and re-saving the SAME session IDs under a new "
+                    "be revived — re-saving the SAME session IDs under a new "
                     "filename changes nothing (it's the identical expired list). "
                     "Generate a FRESH session list in the vaultproxies dashboard "
                     "and save it as proxies.txt — the session IDs (the part after "
                     "'-s-') must be NEW. The bot auto-reloads proxies.txt when it "
                     "changes, so save the fresh list and the next sweep picks it up.",
-                    level="error",
+                    level="info",
                 )
         except Exception as e:
             _log(f"[Proxy] Sweep error: {e}", level="warn")

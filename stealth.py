@@ -82,6 +82,29 @@ def launch_args(headless: bool = True) -> list:
     """
     if ENGINE == "shardx":
         return list(_BASE_ARGS) + ["--incognito"]
+    if ENGINE == "truedriver":
+        # TrueDriver owns headless + the persona at the CDP layer; pass only
+        # the functional hardening flags + incognito (ALWAYS on).
+        return list(_BASE_ARGS) + ["--incognito"] + [
+            "--disable-blink-features=AutomationControlled",
+            "--disable-component-extensions-with-background-pages",
+            "--disable-background-networking",
+            "--disable-background-timer-throttling",
+            "--disable-backgrounding-occluded-windows",
+            "--disable-renderer-backgrounding",
+            "--disable-sync",
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--disable-default-apps",
+            "--disable-translate",
+            "--disable-component-update",
+            "--metrics-recording-only",
+            "--no-pings",
+            "--disable-hang-monitor",
+            "--disable-ipc-flooding-protection",
+            "--disable-notifications",
+            "--lang=en-US",
+        ]
     args = _BASE_ARGS if ENGINE == "patchright" else _STEALTH_ARGS
     if headless:
         # New headless mode: visually identical to headed, no "HeadlessChrome"
@@ -578,8 +601,11 @@ async def apply_cdp_stealth(context, page) -> None:
 
     shardx: no-op — the engine's C++ layer already hides webdriver and the
     launch defaults hold back CDP side-effects. Injecting JS here would
-    create the exact self-revealing shim tells the engines remove."""
-    if ENGINE == "shardx":
+    create the exact self-revealing shim tells the engines remove.
+    truedriver: no-op — TrueDriver is pure CDP (no WebDriver session ever
+    exists, so there is no webdriver flag to hide); the persona is applied
+    at the CDP layer, not via JS shims."""
+    if ENGINE in ("shardx", "truedriver"):
         return
     try:
         cdp = await context.new_cdp_session(page)
