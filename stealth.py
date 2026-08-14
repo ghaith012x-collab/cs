@@ -359,17 +359,21 @@ _INIT_TEMPLATE = r"""
     patch(WebGL2RenderingContext);
   });
 
-  // 7. canvas noise (opt-in via STEALTH_CANVAS_NOISE) — avoid headless hash
+  // 7. canvas noise — seeded per session so each session's canvas is unique
+  // but STABLE across reads (a canvas that changes on every read is itself a
+  // bot tell). Noise is a pure function of (seed, pixel index).
   SAFE(() => {
     if (__CANVAS_NOISE__ > 0) {
       const n = __CANVAS_NOISE__;
+      const s = __CANVAS_SEED__ >>> 0;
       const origData = HTMLCanvasElement.prototype.toDataURL;
       const origGI = CanvasRenderingContext2D.prototype.getImageData;
       const jitter = (d) => {
         for (let i = 0; i < d.length; i += 4) {
-          d[i] += (Math.random() * 2 - 1) * n;
-          d[i + 1] += (Math.random() * 2 - 1) * n;
-          d[i + 2] += (Math.random() * 2 - 1) * n;
+          let h = (s ^ (i >>> 2)) * 0x9E3779B1;
+          h = (h ^ (h >>> 15)) >>> 0;
+          const j = ((h / 4294967296) * 2 - 1) * n;
+          d[i] += j; d[i + 1] += j; d[i + 2] += j;
         }
       };
       HTMLCanvasElement.prototype.toDataURL = function (...a) {
@@ -447,6 +451,49 @@ _INIT_TEMPLATE = r"""
     try { delete document.__webdriver_script_fn; } catch (e) {}
     try { delete document.__driver_unwrapped; } catch (e) {}
   });
+
+  // 12. screen geometry + color depth — coherent desktop panel, not the
+  // headless default (screen === inner window, inconsistent color depth).
+  SAFE(() => {
+    const cd = __NAV_COLOR_DEPTH__;
+    Object.defineProperty(screen, 'width', { get: () => __SCREEN_W__, configurable: true });
+    Object.defineProperty(screen, 'height', { get: () => __SCREEN_H__, configurable: true });
+    Object.defineProperty(screen, 'availWidth', { get: () => __SCREEN_AVAIL_W__, configurable: true });
+    Object.defineProperty(screen, 'availHeight', { get: () => __SCREEN_AVAIL_H__, configurable: true });
+    Object.defineProperty(screen, 'colorDepth', { get: () => cd, configurable: true });
+    Object.defineProperty(screen, 'pixelDepth', { get: () => cd, configurable: true });
+  });
+
+  // 13. fonts — headless Chromium ships a near-empty font list, one of the
+  // strongest bot signals. Inject a realistic installed-font set so
+  // document.fonts enumeration and font.check() behave like a real machine.
+  SAFE(() => {
+    const FAMILIES = __FONT_LIST__;
+    try {
+      const added = [];
+      for (const fam of FAMILIES) {
+        try {
+          const ff = new FontFace(fam, 'local("' + fam + '")');
+          document.fonts.add(ff);
+          added.push(fam);
+        } catch (e) {}
+      }
+      if (document.fonts && document.fonts.check) {
+        const origCheck = document.fonts.check.bind(document.fonts);
+        document.fonts.check = function (font, text) {
+          try {
+            if (typeof font === 'string') {
+              const fam = font.replace(/["']/g, '').split(',')[0]
+                             .replace(/^\s*(\d+(\.\d+)?(px|pt|em|rem)?\s+)/, '')
+                             .trim().toLowerCase();
+              if (added.some((f) => f.toLowerCase() === fam)) return true;
+            }
+          } catch (e) {}
+          try { return origCheck(font, text); } catch (e) { return false; }
+        };
+      }
+    } catch (e) {}
+  });
 })();
 """
 
@@ -476,11 +523,26 @@ def build_init_script(fingerprint: dict, ua: str) -> str:
         languages = [locale] + languages
     gpu = fingerprint.get("gpu") or pick_gpu(pl["ch_platform"], fingerprint.get("seed", 0))
 
-    canvas_noise = int(os.environ.get("STEALTH_CANVAS_NOISE", "0") or "0")
+    canvas_noise = int(fingerprint.get("canvas_noise", 0) or 0)
+    env_noise = (os.environ.get("STEALTH_CANVAS_NOISE") or "").strip()
+    if env_noise:
+        try:
+            canvas_noise = int(env_noise)
+        except Exception:
+            pass
     try:
         canvas_noise = max(0, min(3, canvas_noise))
     except Exception:
         canvas_noise = 0
+
+    canvas_seed = int(fingerprint.get("canvas_seed", 0) or 0) & 0x7FFFFFFF
+    color_depth = int(fingerprint.get("color_depth", 24) or 24)
+    scr = fingerprint.get("screen") or {}
+    screen_w = int(scr.get("width", 1920) or 1920)
+    screen_h = int(scr.get("height", 1080) or 1080)
+    screen_aw = int(scr.get("avail_width", screen_w) or screen_w)
+    screen_ah = int(scr.get("avail_height", screen_h - 48) or (screen_h - 48))
+    fonts = list(fingerprint.get("fonts") or []) or ["Arial", "Times New Roman", "Verdana"]
 
     return (
         _INIT_TEMPLATE
@@ -499,6 +561,13 @@ def build_init_script(fingerprint: dict, ua: str) -> str:
         .replace("__WEBGL_VENDOR__", gpu["webgl_vendor"])
         .replace("__WEBGL_RENDERER__", gpu["webgl_renderer"])
         .replace("__CANVAS_NOISE__", str(canvas_noise))
+        .replace("__CANVAS_SEED__", str(canvas_seed))
+        .replace("__NAV_COLOR_DEPTH__", str(color_depth))
+        .replace("__SCREEN_W__", str(screen_w))
+        .replace("__SCREEN_H__", str(screen_h))
+        .replace("__SCREEN_AVAIL_W__", str(screen_aw))
+        .replace("__SCREEN_AVAIL_H__", str(screen_ah))
+        .replace("__FONT_LIST__", json.dumps(fonts))
     )
 
 

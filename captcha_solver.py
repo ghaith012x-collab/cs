@@ -4777,6 +4777,15 @@ async def solve_hcaptcha_accessibility(page, iframe,
     """
     log = log or (lambda msg, level="info": None)
 
+    # ── Humanization knobs ─────────────────────────────────────────────
+    # Machine-perfect, instant answers are what hCaptcha uses to grade the
+    # session as a bot — which is what then pushes Discord into the phone
+    # verification lock. These add human cadence and imperfection.
+    HUMAN_THINK_MIN = float((os.environ.get("HUMAN_THINK_MIN") or "0.8") or "0.8")
+    HUMAN_THINK_MAX = float((os.environ.get("HUMAN_THINK_MAX") or "2.4") or "2.4")
+    HUMAN_MISTAKE_RATE = float((os.environ.get("HUMAN_MISTAKE_RATE") or "0.08") or "0.08")
+    HUMAN_MISTAKE_RATE = max(0.0, min(1.0, HUMAN_MISTAKE_RATE))
+
     # Ollama endpoint/model come from env vars so the bot can reach
     # a server that actually hosts a vision model (localhost:11434
     # only works when Ollama runs on the same machine as the bot).
@@ -7717,6 +7726,21 @@ async def solve_hcaptcha_accessibility(page, iframe,
         return None
 
     _reject_counts: dict = {}
+    _mistakes_made = 0
+
+    def _human_typo(answer: str) -> str:
+        """Introduce one plausible human typo into a short answer."""
+        a = (answer or "").strip()
+        if len(a) < 2:
+            return answer
+        # Most common human typo: two adjacent letters swapped.
+        if " " not in a and a.isalpha():
+            i = random.randrange(len(a) - 1)
+            if a[i].lower() != a[i + 1].lower():
+                return a[:i] + a[i + 1] + a[i] + a[i + 2:]
+        # Fallback: duplicate one character.
+        i = random.randrange(len(a))
+        return a[:i] + a[i] + a[i:]
 
     async def _get_answer(hcaptcha, q: int) -> Optional[str]:
         """Get the answer with 3 layers:
@@ -7828,13 +7852,110 @@ async def solve_hcaptcha_accessibility(page, iframe,
             log(f"[Accessibility] Q{q} NO TEXT FOUND — cannot ask LLM without text", level="warn")
         return None
 
+    async def _human_type(hcaptcha, answer: str) -> bool:
+        """Human-like typing: pointer-interact with the field, focus it, then
+        type character-by-character with real key events and human cadence.
+        Instant ``value=`` + dispatch is a textbook bot signature."""
+        if not answer:
+            return False
+        focus_js = (
+            "() => {"
+            "const inputs = document.querySelectorAll("
+            "'input:not([type=\"hidden\"]), textarea, [role=\"textbox\"], [contenteditable=\"true\"]');"
+            "for (const inp of inputs) {"
+            "if (inp.offsetParent !== null) {"
+            "inp.scrollIntoView({ block: 'center' });"
+            "const r = inp.getBoundingClientRect();"
+            "const cx = r.left + r.width / 2, cy = r.top + r.height / 2;"
+            "const ev = (t, x, y) => inp.dispatchEvent(new PointerEvent(t, {"
+            "bubbles: true, cancelable: true, clientX: x, clientY: y,"
+            "pointerId: 1, pointerType: 'mouse', isPrimary: true,"
+            "button: 0, buttons: (t === 'pointerup' ? 0 : 1)}));"
+            "ev('pointermove', cx - 16, cy + 3);"
+            "ev('pointermove', cx - 5, cy + 1);"
+            "ev('pointerdown', cx, cy);"
+            "ev('pointerup', cx, cy);"
+            "inp.focus();"
+            "try { inp.value = ''; inp.dispatchEvent(new Event('input', { bubbles: true })); } catch (e) {}"
+            "return 'ok:' + inp.tagName;"
+            "}"
+            "}"
+            "return null;"
+            "}"
+        )
+        try:
+            focused = await _challenge_js(focus_js)
+        except Exception as e:
+            log(f"[Accessibility] human focus error: {e}", level="warn")
+            return False
+        if not (focused and "ok" in str(focused)):
+            return False
+
+        # A human has to visually locate the field before typing.
+        await asyncio.sleep(random.uniform(0.45, 0.95))
+
+        def _char_js(ch: str) -> str:
+            c = json.dumps(ch)
+            return (
+                "() => {"
+                "const inputs = document.querySelectorAll("
+                "'input:not([type=\"hidden\"]), textarea, [role=\"textbox\"], [contenteditable=\"true\"]');"
+                "for (const inp of inputs) {"
+                "if (inp.offsetParent !== null) {"
+                "const ch = " + c + ";"
+                "const code = 'Key' + ch.toUpperCase();"
+                "inp.dispatchEvent(new KeyboardEvent('keydown', { key: ch, code: code, bubbles: true, cancelable: true }));"
+                "if (inp.tagName === 'INPUT' || inp.tagName === 'TEXTAREA') {"
+                "const s = (inp.selectionStart != null) ? inp.selectionStart : inp.value.length;"
+                "inp.value = inp.value.slice(0, s) + ch + inp.value.slice(s);"
+                "inp.selectionStart = inp.selectionEnd = s + 1;"
+                "} else {"
+                "try { document.execCommand('insertText', false, ch); } catch (e) {}"
+                "}"
+                "inp.dispatchEvent(new InputEvent('input', { data: ch, inputType: 'insertText', bubbles: true }));"
+                "inp.dispatchEvent(new KeyboardEvent('keyup', { key: ch, code: code, bubbles: true, cancelable: true }));"
+                "return 'ok';"
+                "}"
+                "}"
+                "return null;"
+                "}"
+            )
+
+        ok = True
+        for ch in answer:
+            try:
+                res = await _challenge_js(_char_js(ch))
+                if not (res and "ok" in str(res)):
+                    ok = False
+                    break
+            except Exception:
+                ok = False
+                break
+            delay = random.uniform(0.045, 0.14)
+            if random.random() < 0.08:
+                delay += random.uniform(0.15, 0.45)
+            await asyncio.sleep(delay)
+        if not ok:
+            return False
+
+        await asyncio.sleep(random.uniform(0.2, 0.5))
+        await _challenge_js(
+            "() => { const i = document.querySelector('input:not([type=\"hidden\"]), textarea, [role=\"textbox\"]'); "
+            "if (i) { i.dispatchEvent(new Event('change', { bubbles: true })); return 'ok'; } return null; }"
+        )
+        return True
+
     async def _type_answer(hcaptcha, answer: str) -> bool:
         """Type answer into the hCaptcha accessibility input.
-        Uses JS injection (via _challenge_js which scans ALL frames) as primary
-        approach - more reliable than Playwright locators on deeply nested iframes."""
+        Human typing first; instant JS injection kept as a robustness fallback."""
+        # Primary: human typing (per-char key events + realistic cadence).
+        if await _human_type(hcaptcha, answer):
+            log(f"[Accessibility] Human-typed '{answer}'")
+            return True
+
         escaped = answer.replace("\\", "\\\\").replace("'", "\\'")
 
-        # Primary: JS injection - find visible input, set value, fire events
+        # Fallback 0: JS injection - find visible input, set value, fire events
         js_set = (
             "() => {"
             "const inputs = document.querySelectorAll("
@@ -8191,13 +8312,27 @@ async def solve_hcaptcha_accessibility(page, iframe,
                         await asyncio.sleep(0.6)
                         continue
 
+                    # Human imperfection: occasionally a real user mistypes,
+                    # hCaptcha shows "please try again", and they correct it.
+                    # Reproducing that (once per challenge) breaks the
+                    # machine-perfect signature that flags the session.
+                    if (answer and answer != "__GESTURE__"
+                            and len(answer) >= 2 and _mistakes_made == 0
+                            and random.random() < HUMAN_MISTAKE_RATE):
+                        answer = _human_typo(answer)
+                        _mistakes_made += 1
+                        log(f"[Accessibility] Q{q} humanized typo -> '{answer}'")
+
                     log(f"[Accessibility] Q{q} solved: {answer}")
+
+                    # Human think-time — a real user reads the question first.
+                    await asyncio.sleep(random.uniform(HUMAN_THINK_MIN, HUMAN_THINK_MAX))
 
                     if not await _type_answer(hcaptcha, answer):
                         log("[Accessibility] Could not type answer", level="warn")
                         break
 
-                    await asyncio.sleep(0.8)
+                    await asyncio.sleep(random.uniform(0.6, 1.1))
 
                     if not await _submit_answer(hcaptcha):
                         log("[Accessibility] Could not submit", level="warn")

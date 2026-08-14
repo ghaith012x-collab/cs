@@ -328,11 +328,41 @@ def generate_fingerprint(worker_id: str, session_seed: str = "") -> dict:
     seed_input = f"{worker_id}:{session_seed or time.time()}"
     seed = hashlib.sha256(seed_input.encode()).hexdigest()
 
-    fonts = ["Arial", "Times New Roman", "Helvetica", "Georgia", "Courier New", "Verdana"]
-    font = fonts[int(seed[:8], 16) % len(fonts)]
+    # Realistic Windows desktop font stack — headless Chromium ships an
+    # (almost) empty font list, one of the strongest bot signals.
+    font_pool = [
+        "Arial", "Arial Black", "Arial Narrow", "Book Antiqua", "Calibri",
+        "Cambria", "Cambria Math", "Candara", "Comic Sans MS", "Consolas",
+        "Constantia", "Corbel", "Courier New", "Franklin Gothic Medium",
+        "Garamond", "Georgia", "Impact", "Lucida Console",
+        "Lucida Sans Unicode", "Microsoft Sans Serif", "Palatino Linotype",
+        "Segoe Print", "Segoe Script", "Segoe UI", "Segoe UI Light",
+        "Segoe UI Semibold", "Tahoma", "Times New Roman", "Trebuchet MS",
+        "Verdana",
+    ]
+    font = font_pool[int(seed[:8], 16) % len(font_pool)]
     color_depths = [24, 24, 24, 30]
     color_depth = color_depths[int(seed[24:32], 16) % len(color_depths)]
-    pixel_ratio = 1.0 + (int(seed[24:32], 16) % 5) / 10  # 1.0 - 1.4
+    # Real desktops run 1.0 or (Windows scaling) 1.25 — never 1.1..1.4.
+    pixel_ratio = 1.25 if (int(seed[24:32], 16) % 4 == 0) else 1.0
+
+    # Coherent desktop resolution + taskbar offset for screen.width/height.
+    # Every entry is >= the fixed 1920x1080 viewport so screen >= inner window.
+    resolutions = [
+        {"width": 1920, "height": 1080, "avail_height": 1040},
+        {"width": 1920, "height": 1080, "avail_height": 1032},
+        {"width": 2560, "height": 1440, "avail_height": 1400},
+        {"width": 2560, "height": 1440, "avail_height": 1392},
+    ]
+    scr = resolutions[int(seed[40:48], 16) % len(resolutions)]
+
+    # Canvas noise ON by default (unique per session, stable within a
+    # session) — the stock clean headless canvas hash is shared by every bot.
+    try:
+        canvas_noise = int(os.environ.get("STEALTH_CANVAS_NOISE", "1") or "1")
+    except Exception:
+        canvas_noise = 1
+    canvas_noise = max(0, min(3, canvas_noise))
 
     # Consistent identity for the stealth layer (stealth.build_init_script /
     # build_context_options consume these). GPU comes from stealth so the
@@ -344,11 +374,19 @@ def generate_fingerprint(worker_id: str, session_seed: str = "") -> dict:
 
     return {
         "font": font,
-        "canvas_noise": 0,
+        "fonts": font_pool,
+        "canvas_noise": canvas_noise,
+        "canvas_seed": int(seed[16:24], 16) & 0x7FFFFFFF,
         "webgl_vendor": gpu["webgl_vendor"],
         "webgl_renderer": gpu["webgl_renderer"],
         "color_depth": color_depth,
         "pixel_ratio": pixel_ratio,
+        "screen": {
+            "width": scr["width"],
+            "height": scr["height"],
+            "avail_width": scr["width"],
+            "avail_height": scr["avail_height"],
+        },
         "seed": int(seed, 16),
         "ua": ua,
         "locale": profile["locale"],
