@@ -259,7 +259,27 @@ async def _run_worker(wid: str, cfg: dict, proxy=None) -> None:
     state["started_at"] = time.time()
     max_tries = 30 if PROXY_FORCE else 12
 
-    bot = None
+    # ── Reuse a browser parked on Discord by a previous run ──
+    # Stop leaves the browser ALIVE on discord.com; Start picks it up here
+    # instead of cold-launching Brave + CDP (the slow part). A dead parked
+    # browser (circuit dropped, browser crashed) is closed and relaunched.
+    bot = state.get("bot")
+    if bot is not None:
+        try:
+            bot._stopped.clear()
+        except Exception:
+            pass
+        if not await bot.is_alive():
+            _log(f"[{wid}] Parked browser died while stopped - launching fresh", level="warn")
+            try:
+                await bot.close()
+            except Exception:
+                pass
+            bot = None
+            state["bot"] = None
+        else:
+            _log(f"[{wid}] Reusing parked browser (already on Discord) - skipping cold launch")
+
     consecutive_tunnel_fails = 0  # fast-fail after consecutive dead connections
     backoff = 0.3  # seconds between attempts; doubles after dead-session failures
     tor_fallback = False  # flipped to True when the proxy pool proves dead → TOR
@@ -267,7 +287,8 @@ async def _run_worker(wid: str, cfg: dict, proxy=None) -> None:
     for attempt in range(max_tries):
         if not _running:
             state["status"] = "stopped"
-            if bot: await bot.close()
+            # PARK the browser on Discord — the next Start reuses it
+            # (is_alive() gates the reuse; a dead one gets relaunched).
             return
 
         # Re-read the config on every attempt so a custom email / headless
@@ -356,7 +377,13 @@ async def _run_worker(wid: str, cfg: dict, proxy=None) -> None:
             bot._domain = domain
             bot.phone_verify_detected = False
             bot._nav_ok = False
-            if not await bot.switch_proxy(proxy):
+            if (proxy is not None and bot.proxy is not None
+                    and proxy.get("key") == bot.proxy.get("key")):
+                # Same sticky session — the browser is ALREADY on Discord.
+                # Keep the page and just re-navigate; no context rebuild, no
+                # bounce through about:blank.
+                _log(f"[{wid}] Same proxy session reused - keeping browser on Discord")
+            elif not await bot.switch_proxy(proxy):
                 _log(f"[{wid}] Context rebuild failed", level="warn")
                 if proxy:
                     proxy_pool.release(proxy, ok=False)
@@ -441,7 +468,9 @@ async def _run_worker(wid: str, cfg: dict, proxy=None) -> None:
                     except Exception:
                         pass
                 _proxy_stats_line(wid)
-                if bot: await bot.close()
+                # Park the browser on Discord (account visible in LIVE BROWSER)
+                # so the next Start reuses it. The next run's switch_proxy
+                # rotates to a fresh context/IP anyway.
                 return
             elif ok:
                 state["status"] = "done"
@@ -462,7 +491,7 @@ async def _run_worker(wid: str, cfg: dict, proxy=None) -> None:
                         humanized=bool(acc.get("humanized")),
                     )
                     _log(f"[{wid}] Pending account saved (email verification required to unlock token)")
-                if bot: await bot.close()
+                # Park the browser on Discord for reuse on the next Start.
                 return
 
             # ── Track consecutive tunnel failures ──
@@ -519,9 +548,10 @@ async def _run_worker(wid: str, cfg: dict, proxy=None) -> None:
 
     state["status"] = "error"
     state["step"] = "retries exhausted - all proxy/TOR attempts failed"
+    # Park the browser on Discord — the next Start reuses it (or relaunches
+    # if it died while parked). No close() here.
     if bot:
-        await bot.close()
-        state["bot"] = None
+        state["bot"] = bot
 
 async def _proxy_validate_loop() -> None:
     """Background: re-confirm which proxies can reach Discord, using the
@@ -614,7 +644,13 @@ async def _start_all_async(cfg: dict) -> None:
     _start_time = time.time()
 
     for wid in WORKER_IDS:
+        # Preserve a browser parked on Discord by a previous run so Start
+        # reuses it instantly instead of cold-launching Brave + CDP.
+        parked = (_workers.get(wid) or {}).get("bot")
         _workers[wid] = _init_worker(wid)
+        if parked is not None:
+            _workers[wid]["bot"] = parked
+            _log(f"[{wid}] Browser parked from previous run - will reuse it on Discord")
 
     # Warm the AI in the background so the first captcha doesn't pay a
     # cold start (model load + first LLM inference).
@@ -695,14 +731,17 @@ async def _stop_all_async() -> None:
     for wid, state in list(_workers.items()):
         bot = state.get("bot")
         if bot is not None:
+            # Signal an in-flight navigation/signup to abort immediately.
             try:
-                await bot.close()
+                bot._stopped.set()
             except Exception:
                 pass
-            state["bot"] = None
+            # Browsers stay ALIVE and parked on Discord so the next Start
+            # reuses them instantly (is_alive() gates the reuse; dead ones
+            # relaunch). No close() here.
         if state["status"] in ("starting", "running"):
             state["status"] = "stopped"
-    _log("[App] All workers stopped")
+    _log("[App] All workers stopped (browser parked on Discord - reused on next Start)")
 
 
 def _run_in_loop(coro) -> Optional[object]:

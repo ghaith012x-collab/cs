@@ -352,6 +352,10 @@ class DiscordAutomation:
         # surfaced in the worker's per-attempt summary so every failure is
         # self-explanatory ("TOR circuit blocked: page unresponsive after 9s").
         self._nav_error: str = ""
+        # Set by the app when the user hits Stop — aborts an in-flight
+        # navigation wait immediately so Stop actually stops (the browser is
+        # then PARKED on Discord and reused on the next Start).
+        self._stopped = asyncio.Event()
         # Engine-owned identity: ShardX mints a fresh randomized profile per
         # launch — the bot-side fingerprint only exists for legacy engines.
         if ENGINE == "shardx":
@@ -596,7 +600,11 @@ class DiscordAutomation:
         self._page = None
         self._context = None
         try:
-            if proxy_changed:
+            # A failed previous relaunch can leave self._browser None — never
+            # call _build_context() (which does browser.new_context()) on a
+            # dead browser: that was the "'NoneType' object has no attribute
+            # 'new_context'" crash. Relaunch the browser instead.
+            if proxy_changed or self._browser is None:
                 self._log("[Switch] Proxy changed — relaunching browser with new session")
                 await self._relaunch_browser()
             else:
@@ -606,6 +614,28 @@ class DiscordAutomation:
             return True
         except Exception as e:
             self._log(f"[Switch] Context rebuild failed: {e}", level="error")
+            return False
+
+    async def is_alive(self) -> bool:
+        """True if the browser + page are still usable.
+
+        A parked browser (kept alive across Stop/Start) can die while the
+        worker is stopped — TOR circuit dropped, browser crashed. Reuse is
+        gated on this: a dead parked browser gets closed and relaunched."""
+        if self._browser is None or self._page is None:
+            return False
+        try:
+            # CDP Mode detaches WebDriver around stealth ops — reattach it
+            # before the DOM read so a healthy parked browser isn't mistaken
+            # for a dead one.
+            try:
+                await asyncio.to_thread(self._browser._ensure_connected)
+            except Exception:
+                pass
+            url = await asyncio.wait_for(
+                asyncio.to_thread(lambda: self._page.url), timeout=3.0)
+            return bool(url)
+        except Exception:
             return False
 
     def rotate_fingerprint(self) -> None:
@@ -728,16 +758,21 @@ class DiscordAutomation:
         self._log('[Nav] Page: title="' + str(page_title)[:80] + '" url=' + str(page_url)[:80])
 
         # ── Dead proxy (cannot reach Discord at all) ──
-        dead_proxy = (
-            "chrome-error://" in (page_url or "") or
-            "about:blank" == (page_url or "") or
-            (not page_title and "error" in (page_url or "").lower())
-        )
-        if dead_proxy:
+        # chrome-error:// is a REAL dead signal (DNS/connection failure).
+        # about:blank is NOT dead: a slow TOR/residential circuit can still be
+        # committing the navigation when the goto cap fires, so a blank tab
+        # means "still loading" here, not "dead". Dead sessions surface
+        # chrome-error within seconds; blank-but-alive sessions just need the
+        # render-wait loop below (which re-issues the goto if the tab stays
+        # blank). Bouncing on about:blank is what made the bot "fail instantly
+        # without waiting" on slow circuits.
+        if "chrome-error://" in (page_url or ""):
             proxy_label = "PROXY SESSION" if self.proxy else "TOR CIRCUIT"
             self._nav_error = f"{proxy_label.lower()} dead (browser error page: {page_url[:60]})"
             self._log(f"[Nav] {proxy_label} DEAD (url={page_url[:60]}) - rotating to fresh circuit", level="warn")
             return False
+        if (page_url or "").strip() in ("", "about:blank"):
+            self._log("[Nav] Tab still at about:blank after goto cap - navigation still committing, render-wait will re-issue if stuck", level="warn")
 
         # ── Page still loading (title + url unreadable) — do NOT bail. ──
         # A slow TOR/residential circuit can keep the page unreadable for
@@ -828,8 +863,16 @@ class DiscordAutomation:
         reload_count = 0         # reloads attempted for a blank/hung SPA
         login_clicked = False    # already clicked the Register link once
         turnstile_tried = False  # already attempted a UC stealth Turnstile bypass
+        blank_nav_since = None   # when the tab first sat at about:blank (nav never committed)
+        nav_reissues = 0         # re-issued gotos for a never-committed navigation
         last_log = -1.0
         while True:
+            # User hit Stop — abort the wait immediately (the browser gets
+            # parked on Discord for reuse; it is NOT killed).
+            if self._stopped.is_set():
+                self._log("[Nav] Stopped by user - aborting navigation wait")
+                self._nav_error = "stopped by user"
+                return False
             elapsed = time.time() - _render_wait_start
             try:
                 checks = await asyncio.wait_for(self._page.evaluate("""() => {
@@ -850,6 +893,7 @@ class DiscordAutomation:
                     const allInputs = document.querySelectorAll('input');
                     const allButtons = document.querySelectorAll('button');
                     return JSON.stringify({
+                        url: location.href,
                         email: email !== null,
                         username: username !== null,
                         password: password !== null,
@@ -883,6 +927,35 @@ class DiscordAutomation:
                 continue
 
             if state:
+                # ── Mid-wait page-health checks ──
+                cur_url = (state.get("url") or "").strip() or ""
+                # Browser error page appearing mid-wait = the circuit died.
+                if "chrome-error://" in cur_url:
+                    self._nav_error = "proxy/circuit dead (chrome-error page)"
+                    self._log("[Nav] Browser error page - rotating circuit", level="warn")
+                    return False
+                if cur_url in ("", "about:blank"):
+                    # Navigation never committed (goto cap fired mid-commit on
+                    # a slow circuit). Re-issue the goto so the page actually
+                    # starts loading instead of waiting forever on a blank
+                    # tab. max_reloads re-issues, then KEEP waiting — the
+                    # directive is no render timeout.
+                    if blank_nav_since is None:
+                        blank_nav_since = time.time()
+                    elif time.time() - blank_nav_since >= 5.0 and nav_reissues < max_reloads:
+                        nav_reissues += 1
+                        self._log(f"[Nav] Tab stuck at about:blank for {int(time.time() - blank_nav_since)}s - re-issuing goto ({nav_reissues}/{max_reloads})...", level="warn")
+                        try:
+                            await asyncio.wait_for(
+                                self._page.goto(url, wait_until="domcontentloaded", timeout=15000),
+                                timeout=18.0)
+                        except Exception:
+                            pass
+                        await asyncio.sleep(1.0)
+                        blank_nav_since = None
+                else:
+                    blank_nav_since = None
+
                 # Log every ~4s with input/button counts for debugging
                 if elapsed >= last_log + 4.0:
                     last_log = elapsed
