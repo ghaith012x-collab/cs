@@ -91,6 +91,59 @@ _RATE_LIMIT_KEYWORDS = (
 )
 
 
+# ── Discord register-page state ─────────────────────────────────────────
+# The navigation poll reads the page through TWO independent channels:
+#   1. JS evaluation (page.evaluate) — the engine falls back to the raw CDP
+#      websocket when the reattached WebDriver session's JS context is stale
+#      (the old white-screen bug: page loaded, title="Discord", but every
+#      evaluate() returned None and the bot rotated a healthy session).
+#   2. CDP DOM-presence checks (driver.cdp.is_element_present) — no JS
+#      execution required at all.
+_NAV_STATE_JS = r"""() => {
+    const body = document.body;
+    if (!body) return JSON.stringify({error: "no-body"});
+    const text = body.innerText || "";
+    const titleLow = (document.title || "").toLowerCase();
+    const challenge = /just a moment|checking your browser|verify you are human|attention required/.test(titleLow + " " + text.toLowerCase().substring(0, 800)) || !!document.querySelector('iframe[src*="challenges.cloudflare.com"], #challenge-stage, #cf-challenge-running, #cf-chl');
+    // Broad selectors — Discord uses aria-label, not name
+    const email = document.querySelector('input[name="email"], input[type="email"], input[aria-label*="email" i], input[aria-label*="Email"], input[id*="email" i]');
+    const username = document.querySelector('input[name="username"], input[aria-label*="username" i], input[aria-label*="display" i]');
+    const password = document.querySelector('input[name="password"], input[type="password"], input[aria-label*="password" i]');
+    const hasAge = /birthday|date of birth|born|how old/i.test(text.substring(0, 400));
+    const hasMonth = document.querySelector('[class*="month" i], [aria-label*="month" i], select');
+    const isLogin = /login|sign in|welcome back/i.test(text.substring(0, 400));
+    const hasQR = document.querySelector('img[src*="qr" i], [class*="qr" i]');
+    const continueBtn = document.querySelector('button[type="submit"], button[class*="continue" i]');
+    return JSON.stringify({
+        url: location.href,
+        title: document.title || "",
+        readyState: document.readyState || "",
+        email: email !== null,
+        username: username !== null,
+        password: password !== null,
+        ageGate: hasAge || hasMonth !== null,
+        isLogin: isLogin,
+        hasQR: hasQR,
+        hasButton: continueBtn !== null,
+        hasAppMount: document.querySelector("#app-mount") !== null,
+        inputCount: document.querySelectorAll("input").length,
+        buttonCount: document.querySelectorAll("button").length,
+        cfClearance: document.cookie.indexOf("cf_clearance=") !== -1,
+        challenge: challenge,
+        textPreview: text.substring(0, 250)
+    });
+}"""
+
+# CDP DOM-presence selectors used when JS evaluation is unavailable.
+_CDP_NAV_SELECTORS = {
+    "email": 'input[name="email"], input[type="email"], input[aria-label*="email" i], input[id*="email" i]',
+    "username": 'input[name="username"], input[aria-label*="username" i], input[aria-label*="display" i]',
+    "password": 'input[name="password"], input[type="password"], input[aria-label*="password" i]',
+    "hasAppMount": "#app-mount",
+    "challenge": 'iframe[src*="challenges.cloudflare.com"], #challenge-stage, #cf-challenge-running',
+}
+
+
 # ── Log verbosity ─────────────────────────────────────────
 # Normal mode prints ONLY the essential signup events listed below (plus
 # warnings / errors, which always print). Everything else — proxy sweeps,
@@ -696,6 +749,99 @@ class DiscordAutomation:
             self._log(f"[Nav] context rebuild failed: {e}", level="error")
             return False
 
+    async def _read_nav_state(self):
+        """Read the register-page state over every working channel.
+
+        Returns (state_dict, channel_name) — channel is "js" or "cdp" —
+        or (None, None) only when EVERY channel failed. That is the single
+        real "page is dead" signal: a healthy page can always be read over
+        at least one channel, and a broken JS channel must never look like
+        a dead page (the old white-screen bug that rotated good sessions).
+        """
+        # 1) JS state: WebDriver execute_script, falling back inside the
+        #    engine to the raw CDP websocket when the reattached session's
+        #    JS context is stale.
+        try:
+            checks = await asyncio.wait_for(
+                self._page.evaluate(_NAV_STATE_JS), timeout=2.5)
+            if checks:
+                st = json.loads(checks)
+                st["source"] = "js"
+                return st, "js"
+        except Exception:
+            pass
+        # 2) CDP DOM-presence state: no JS execution required.
+        try:
+            st = await asyncio.wait_for(
+                self._cdp_dom_nav_state(), timeout=2.5)
+            if st is not None:
+                st["source"] = "cdp"
+                return st, "cdp"
+        except Exception:
+            pass
+        return None, None
+
+    async def _cdp_dom_nav_state(self):
+        """Minimal page state read purely over the raw CDP websocket.
+
+        Uses driver.cdp.* (get_title / get_current_url / is_element_present)
+        so the navigation keeps working even when the reattached WebDriver
+        session cannot execute JS at all. Returns None when CDP is gone.
+        """
+        driver = self._page.driver
+        cdp = getattr(driver, "cdp", None)
+        if cdp is None:
+            return None
+
+        def _sync():
+            state = {
+                "url": "", "title": "", "readyState": "",
+                "email": False, "username": False, "password": False,
+                "ageGate": False, "isLogin": False, "hasQR": False,
+                "hasButton": False, "hasAppMount": False, "inputCount": 0,
+                "buttonCount": 0, "cfClearance": False, "challenge": False,
+                "textPreview": "",
+            }
+            try:
+                state["title"] = cdp.get_title() or ""
+            except Exception:
+                pass
+            try:
+                state["url"] = cdp.get_current_url() or ""
+            except Exception:
+                pass
+            for key, sel in _CDP_NAV_SELECTORS.items():
+                try:
+                    state[key] = bool(cdp.is_element_present(sel))
+                except Exception:
+                    pass
+            try:
+                state["inputCount"] = len(cdp.find_elements("input"))
+            except Exception:
+                pass
+            try:
+                state["buttonCount"] = len(cdp.find_elements("button"))
+            except Exception:
+                pass
+            # Body text drives age-gate / login / block detection.
+            try:
+                txt = cdp.evaluate(
+                    "document.body ? document.body.innerText.substring(0, 250) : ''") or ""
+                state["textPreview"] = txt
+                low = txt.lower()
+                state["ageGate"] = bool(re.search(
+                    r"birthday|date of birth|born|how old", low[:400]))
+                state["isLogin"] = bool(re.search(
+                    r"login|sign in|welcome back", low[:400]))
+            except Exception:
+                pass
+            return state
+
+        try:
+            return await asyncio.to_thread(_sync)
+        except Exception:
+            return None
+
     async def _goto_register(self) -> bool:
         """Navigate to discord.com/register — single attempt, no retries.
 
@@ -878,52 +1024,23 @@ class DiscordAutomation:
                 self._nav_error = "stopped by user"
                 return False
             elapsed = time.time() - _render_wait_start
-            try:
-                checks = await asyncio.wait_for(self._page.evaluate("""() => {
-                    const body = document.body;
-                    if (!body) return JSON.stringify({error: "no-body"});
-                    const text = body.innerText || "";
-                    const titleLow = (document.title || "").toLowerCase();
-                    const challenge = /just a moment|checking your browser|verify you are human|attention required/.test(titleLow + " " + text.toLowerCase().substring(0, 800)) || !!document.querySelector('iframe[src*="challenges.cloudflare.com"], #challenge-stage, #cf-challenge-running, #cf-chl');
-                    // Broad selectors — Discord uses aria-label, not name
-                    const email = document.querySelector('input[name="email"], input[type="email"], input[aria-label*="email" i], input[aria-label*="Email"], input[id*="email" i]');
-                    const username = document.querySelector('input[name="username"], input[aria-label*="username" i], input[aria-label*="display" i]');
-                    const password = document.querySelector('input[name="password"], input[type="password"], input[aria-label*="password" i]');
-                    const hasAge = /birthday|date of birth|born|how old/i.test(text.substring(0, 400));
-                    const hasMonth = document.querySelector('[class*="month" i], [aria-label*="month" i], select');
-                    const isLogin = /login|sign in|welcome back/i.test(text.substring(0, 400));
-                    const hasQR = document.querySelector('img[src*="qr" i], [class*="qr" i]');
-                    const continueBtn = document.querySelector('button[type="submit"], button[class*="continue" i]');
-                    const allInputs = document.querySelectorAll('input');
-                    const allButtons = document.querySelectorAll('button');
-                    return JSON.stringify({
-                        url: location.href,
-                        email: email !== null,
-                        username: username !== null,
-                        password: password !== null,
-                        ageGate: hasAge || hasMonth !== null,
-                        isLogin: isLogin,
-                        hasQR: hasQR,
-                        hasButton: continueBtn !== null,
-                        hasAppMount: document.querySelector("#app-mount") !== null,
-                        inputCount: allInputs.length,
-                        buttonCount: allButtons.length,
-                        cfClearance: document.cookie.indexOf('cf_clearance=') !== -1,
-                        challenge: challenge,
-                        textPreview: text.substring(0, 250)
-                    });
-                }"""), timeout=2.0)
-                state = json.loads(checks)
-            except Exception:
-                state = None
+            # Dual-channel read: page.evaluate() (the engine falls back to the
+            # raw CDP websocket when the reattached WebDriver session's JS
+            # context is stale — the old white-screen bug where the page
+            # loaded fine, title read "Discord", but evaluate() returned
+            # None and the bot rotated a PERFECTLY GOOD session), then CDP
+            # DOM-presence checks that need no JS execution at all. state is
+            # None ONLY when every channel failed = the page is genuinely
+            # dead.
+            state, _chan = await self._read_nav_state()
 
             if state is None:
-                # Page unreadable (JS context not ready / tab white / dead) —
-                # the "white screen" the old build bailed on. Probe WHAT'S
-                # WRONG every ~3s for ALL logs (title, url, readyState, body
-                # length, the JS error), then after 20 consecutive unreadable
-                # polls declare the session dead and rotate — exactly like the
-                # old build — instead of staring at a blank tab forever.
+                # Every read channel failed (WebDriver JS + CDP JS + CDP DOM)
+                # — tab white / dead. Probe WHAT'S WRONG every ~3s for ALL
+                # logs (title, url, readyState, body length, the error), then
+                # after 20 consecutive dead polls rotate — the old-build
+                # white-screen bail. A healthy page can NEVER reach here,
+                # because the CDP fallback keeps reads alive.
                 dead_reads += 1
                 if elapsed >= last_log + 3.0:
                     last_log = elapsed
@@ -985,7 +1102,7 @@ class DiscordAutomation:
                 # Log every ~4s with input/button counts for debugging
                 if elapsed >= last_log + 4.0:
                     last_log = elapsed
-                    self._log(f"[Nav] Poll {int(elapsed)}s: email={state.get('email')} ageGate={state.get('ageGate')} login={state.get('isLogin')} inputs={state.get('inputCount')} buttons={state.get('buttonCount')} cf={state.get('cfClearance')} text={state.get('textPreview','')[:60]}")
+                    self._log(f"[Nav] Poll {int(elapsed)}s ({_chan}): email={state.get('email')} ageGate={state.get('ageGate')} login={state.get('isLogin')} inputs={state.get('inputCount')} buttons={state.get('buttonCount')} cf={state.get('cfClearance')} text={state.get('textPreview','')[:60]}")
 
                 if state.get("email") and state.get("username"):
                     self._log(f"[Nav] SUCCESS! Full form rendered after {int(elapsed)}s")

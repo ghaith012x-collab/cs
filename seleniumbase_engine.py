@@ -82,6 +82,54 @@ def _wrap_eval_js(js: str, has_arg: bool = False) -> str:
     return js
 
 
+def _cdp_eval(driver, script: str):
+    """Evaluate JS over the raw CDP websocket (``driver.cdp.evaluate``).
+
+    This is the SECOND read channel. SeleniumBase CDP Mode re-drives the
+    browser over a raw websocket; the WebDriver session reattached via
+    ``connect()`` can end up with a stale JS execution context on the
+    CDP-navigated page and return ``None`` for EVERY ``execute_script()``
+    call while ``driver.title`` still reads fine. ``driver.cdp`` uses the
+    websocket that actually drove the navigation, so it keeps evaluating.
+    Returns the value, or None when the channel is unavailable/failing.
+    """
+    cdp = getattr(driver, "cdp", None)
+    if cdp is None or not hasattr(cdp, "evaluate"):
+        return None
+    try:
+        return cdp.evaluate(script)
+    except Exception:
+        return None
+
+
+def _cdp_title(driver):
+    """Title over the raw CDP websocket (fallback for ``driver.title``)."""
+    cdp = getattr(driver, "cdp", None)
+    if cdp is None or not hasattr(cdp, "get_title"):
+        return None
+    try:
+        return cdp.get_title()
+    except Exception:
+        return None
+
+
+def _exec_js_sync(driver, script: str):
+    """WebDriver ``execute_script`` with the CDP websocket fallback (sync).
+
+    For scripts that embed their arguments in the string (no element
+    references), so the locator stack (get_by_role / get_by_text / clicks)
+    keeps working even when the reattached WebDriver session's JS context is
+    stale and ``execute_script`` returns None for everything.
+    """
+    try:
+        val = driver.execute_script(script)
+        if val is not None:
+            return val
+    except Exception:
+        pass
+    return _cdp_eval(driver, script)
+
+
 # get_by_role / get_by_text / get_by_label matching, injected inside the
 # page or frame scope. Returns JSON: [{x, y, w, h, text, value, visible,
 # disabled, ok}]. Coordinates are relative to the CURRENT context viewport
@@ -516,7 +564,26 @@ class _Frame:
         try:
             script = _wrap_eval_js(js, arg is not None)
             args = [arg] if arg is not None else []
-            return await asyncio.to_thread(self.driver.execute_script, script, *args)
+            try:
+                val = await asyncio.wait_for(
+                    asyncio.to_thread(self.driver.execute_script, script, *args),
+                    timeout=3.0)
+                if val is not None:
+                    return val
+            except Exception:
+                pass
+            # CDP fallback: evaluate in the TOP frame (frame-scoped reads
+            # can't cross the websocket, but a value beats a false "dead").
+            if arg is None:
+                try:
+                    val = await asyncio.wait_for(
+                        asyncio.to_thread(_cdp_eval, self.driver, script),
+                        timeout=3.0)
+                    if val is not None:
+                        return val
+                except Exception:
+                    pass
+            return None
         finally:
             self._exit()
 
@@ -706,7 +773,7 @@ class _Locator:
         kind, a, b, exact = self._kind, self._kind_args[0], self._kind_args[1], self._kind_args[2]
         self._enter()
         try:
-            raw = self.driver.execute_script(_pick_js(kind, a, b, exact))
+            raw = _exec_js_sync(self.driver, _pick_js(kind, a, b, exact))
             records = json.loads(raw) if raw else []
         except Exception:
             records = []
@@ -767,8 +834,8 @@ class _Locator:
             kind, a, b, exact = self._kind, self._kind_args[0], self._kind_args[1], self._kind_args[2]
             self._enter()
             try:
-                raw = self.driver.execute_script(
-                    _action_js(kind, a, b, exact, idx or 0))
+                raw = _exec_js_sync(
+                    self.driver, _action_js(kind, a, b, exact, idx or 0))
                 data = json.loads(raw) if raw else {}
             except Exception:
                 data = {}
@@ -1049,10 +1116,12 @@ class _Page:
         target = "complete" if wait_until in (None, "load") else "interactive"
         deadline = time.time() + (timeout or 30000) / 1000.0
         while time.time() < deadline:
+            # self.evaluate() has the CDP fallback, so a stale WebDriver JS
+            # context (returns None on the CDP-navigated page) can't make a
+            # healthy navigation look like a timeout.
             try:
                 rs = await asyncio.wait_for(
-                    asyncio.to_thread(driver.execute_script, "return document.readyState"),
-                    timeout=2.0)
+                    self.evaluate("document.readyState"), timeout=2.0)
             except Exception:
                 rs = ""
             if target == "interactive" and rs in ("interactive", "complete"):
@@ -1065,13 +1134,47 @@ class _Page:
     async def evaluate(self, js, arg=None):
         script = _wrap_eval_js(js, arg is not None)
         args = [arg] if arg is not None else []
-        return await asyncio.to_thread(self.driver.execute_script, script, *args)
+        # 1) WebDriver session (works while its JS context is live).
+        try:
+            val = await asyncio.wait_for(
+                asyncio.to_thread(self.driver.execute_script, script, *args),
+                timeout=3.0)
+            if val is not None:
+                return val
+        except Exception:
+            pass
+        # 2) Raw CDP websocket fallback — the reattached WebDriver session's
+        #    JS execution context can go stale on the CDP-navigated page
+        #    (execute_script returns None for EVERY call), while driver.cdp
+        #    keeps evaluating. A broken JS channel must NEVER look like a
+        #    dead page, so never return None without trying CDP first.
+        if arg is None:
+            try:
+                val = await asyncio.wait_for(
+                    asyncio.to_thread(_cdp_eval, self.driver, script),
+                    timeout=3.0)
+                if val is not None:
+                    return val
+            except Exception:
+                pass
+        return None
 
     async def title(self) -> str:
         try:
-            return await asyncio.to_thread(lambda: self.driver.title)
+            t = await asyncio.wait_for(
+                asyncio.to_thread(lambda: self.driver.title), timeout=3.0)
+            if t:
+                return t
         except Exception:
-            return ""
+            pass
+        try:
+            t = await asyncio.wait_for(
+                asyncio.to_thread(_cdp_title, self.driver), timeout=3.0)
+            if t:
+                return t
+        except Exception:
+            pass
+        return ""
 
     @property
     def url(self) -> str:
