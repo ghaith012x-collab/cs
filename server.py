@@ -704,13 +704,14 @@ class DiscordAutomation:
         circuit is pointless — if Discord blocked that exit node, it won't
         unblock on retry."""
         url = "https://discord.com/register"
-        # 15s cap: the goto is only a warm-up — the form-poll below is the real
-        # render gate and returns the INSTANT the form paints (0.15s polling).
-        # Dead sessions bail here ~2x faster than the old 30s cap. Slow-but-
-        # alive sessions survive: the goto coroutine is cancelled in the
-        # background (the tab keeps committing) and the title/url grace-poll
-        # below lets them catch up before anything is declared dead.
-        timeout_ms = 15000
+        # 30s cap like the original build: the goto is only a warm-up — the
+        # form-poll below is the real render gate and returns the INSTANT the
+        # form paints (0.15s polling). Dead sessions still bail via the hard
+        # cap; slow-but-alive sessions survive: the goto coroutine is
+        # cancelled in the background (the tab keeps committing) and the
+        # title/url grace-poll below lets them catch up before anything is
+        # declared dead.
+        timeout_ms = 30000
 
         self._log(f"[Nav] Navigating to {url} (timeout={timeout_ms}ms)...")
         t0 = time.time()
@@ -947,8 +948,8 @@ class DiscordAutomation:
                         self._log(f"[Nav] Tab stuck at about:blank for {int(time.time() - blank_nav_since)}s - re-issuing goto ({nav_reissues}/{max_reloads})...", level="warn")
                         try:
                             await asyncio.wait_for(
-                                self._page.goto(url, wait_until="domcontentloaded", timeout=15000),
-                                timeout=18.0)
+                                self._page.goto(url, wait_until="domcontentloaded", timeout=30000),
+                                timeout=33.0)
                         except Exception:
                             pass
                         await asyncio.sleep(1.0)
