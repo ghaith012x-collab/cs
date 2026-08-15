@@ -135,7 +135,8 @@ function lcRender(st){
     if(img) img.style.display = 'none';
     if(ph){
       ph.style.display = 'flex';
-      if(st.connected) ph.textContent = 'waiting for frame…';
+      if(st.connected && st.error) ph.textContent = '⚠ ' + st.error;
+      else if(st.connected) ph.textContent = 'waiting for frame…';
       else if(launching) ph.textContent = 'launching browser…';
       else ph.textContent = 'browser not started — press LAUNCH';
     }

@@ -828,14 +828,18 @@ class _Page:
             kwargs["capture_beyond_viewport"] = True
         try:
             res = await self._tab.send(cdp.page.capture_screenshot(**kwargs))
-            return base64.b64decode(res)
-        except Exception:
-            # Retry a plain viewport capture (full-page can fail on zoom)
-            try:
-                res = await self._tab.send(cdp.page.capture_screenshot(format_="png"))
+            if isinstance(res, str) and res:
                 return base64.b64decode(res)
-            except Exception:
-                return b""
+        except Exception:
+            pass
+        # Retry a plain viewport capture (full-page can fail on zoom)
+        try:
+            res = await self._tab.send(cdp.page.capture_screenshot(format_="png"))
+            if isinstance(res, str) and res:
+                return base64.b64decode(res)
+        except Exception:
+            pass
+        return b""
 
     async def close(self):
         try:

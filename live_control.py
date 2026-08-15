@@ -9,6 +9,7 @@ input over that page (no second browser is ever launched).
 """
 import asyncio
 import base64
+import time
 
 from browser_engine import ENGINE
 from server import NAV_TIMEOUT_MS
@@ -56,25 +57,33 @@ async def live_meta(bot) -> dict:
 
 
 async def live_screenshot(bot) -> str:
-    """Viewport-sized PNG -> base64 for the live feed. Bounded so a slow page
-    never stalls the dashboard poll."""
+    """Viewport-sized PNG -> base64 for the live feed. Retries once and logs
+    the EXACT failure so the dashboard's ALL LOGS shows why the frame is
+    missing instead of silently sitting on 'waiting for frame'."""
     page = getattr(bot, "_page", None)
     if page is None:
         return ""
+    last_err = ""
     try:
         shot = await asyncio.wait_for(
-            page.screenshot(full_page=False), timeout=5)
+            page.screenshot(full_page=False), timeout=6)
+        if not shot:
+            last_err = "empty capture"
+    except Exception as e:
+        last_err = str(e)
+    if not last_err:
+        b64 = base64.b64encode(shot).decode("utf-8")
+        shots = getattr(bot, "_screenshots", None)
+        if shots is not None:
+            shots.append(b64)
+            if len(shots) > 100:
+                bot._screenshots = shots[-50:]
+        return b64
+    try:
+        bot._log(f"[Live] screenshot failed: {last_err}", level="warn")
     except Exception:
-        return ""
-    if not shot:
-        return ""
-    b64 = base64.b64encode(shot).decode("utf-8")
-    shots = getattr(bot, "_screenshots", None)
-    if shots is not None:
-        shots.append(b64)
-        if len(shots) > 100:
-            bot._screenshots = shots[-50:]
-    return b64
+        pass
+    return ""
 
 
 async def get_live_state(bot) -> dict:
@@ -86,9 +95,32 @@ async def get_live_state(bot) -> dict:
 
 def _dead_page(url: str) -> bool:
     """True when the page is a Chromium error/blank page (proxy tunnel died,
-    site unreachable) rather than real content."""
+    site unreachable, or navigation never happened) rather than real content."""
     u = (url or "").lower()
-    return "chrome-error" in u or "err_tunnel" in u or "err_" in u
+    if "chrome-error" in u or "err_tunnel" in u or "err_" in u:
+        return True
+    if u in ("", "about:blank") or u.startswith("about:"):
+        return True
+    return False
+
+
+async def _wait_for_content(page, timeout: float = 6.0) -> bool:
+    """True once the page has actually painted non-empty text. Discord is a
+    SPA, so readyState can be 'complete' while React hasn't rendered yet —
+    give it a short grace window before declaring the page blank."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            has = await asyncio.wait_for(page.evaluate(
+                "() => { const b = document.body; "
+                "return !!(b && (b.innerText || '').trim().length); }"),
+                timeout=2.0)
+            if has:
+                return True
+        except Exception:
+            pass
+        await asyncio.sleep(0.3)
+    return False
 
 
 async def live_navigate(bot, url: str) -> dict:
@@ -110,6 +142,11 @@ async def live_navigate(bot, url: str) -> dict:
     # caller can rotate the session.
     if _dead_page(meta.get("url", "")):
         meta["error"] = "site unreachable (proxy tunnel failed)"
+        return meta
+    # A white screen can also mean navigation never happened (parked on
+    # about:blank) or the SPA failed to paint — catch that too.
+    if not await _wait_for_content(page):
+        meta["error"] = "page rendered blank (no content)"
     return meta
 
 

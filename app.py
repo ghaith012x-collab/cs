@@ -913,8 +913,18 @@ async def _start_live_browser(wid: str, url: str = "",
             await asyncio.wait_for(bot.initialize(), timeout=90)
             _log(f"[{wid}] [Live] Browser launched ({via})")
             launched = True
-        if url and (force or launched):
-            return await _live_navigate_robust(wid, bot, url)
+        if url:
+            # Navigate whenever the page isn't already where the operator
+            # asked it to be. A parked browser on about:blank (or a stale
+            # error page) must NOT be treated as "still filling a signup" —
+            # that was leaving the LIVE tab on a permanent white screen.
+            cur = ""
+            try:
+                cur = str(bot._page.url or "") if bot._page else ""
+            except Exception:
+                cur = ""
+            if force or launched or cur.rstrip("/") != url.rstrip("/"):
+                return await _live_navigate_robust(wid, bot, url)
         return await live_control.get_live_state(bot)
     except Exception as e:
         import traceback
