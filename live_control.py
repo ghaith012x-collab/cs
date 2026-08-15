@@ -39,12 +39,17 @@ async def live_meta(bot) -> dict:
                 await asyncio.wait_for(page.title(), timeout=3.0) or "")
         except Exception:
             title = ""
+    try:
+        dsf = float(getattr(bot, "_fingerprint", {}).get("pixel_ratio", 1.0) or 1.0)
+    except Exception:
+        dsf = 1.0
     return {
         "connected": connected,
         "url": url,
         "title": title,
         "viewport_width": VIEWPORT_W,
         "viewport_height": VIEWPORT_H,
+        "device_scale_factor": dsf,
         "browser": ENGINE,
         "worker_id": getattr(bot, "worker_id", ""),
     }

@@ -215,7 +215,13 @@ function lcPoint(e){
   var img = document.getElementById('lcImg');
   var rect = img.getBoundingClientRect();
   if(rect.width <= 0 || rect.height <= 0) return {x:0, y:0};
-  var iw = img.naturalWidth || 1920, ih = img.naturalHeight || 1080;
+  // Map screen click -> CSS-pixel viewport coords. The CDP mouse event
+  // expects CSS pixels, but the screenshot can be device-scaled (dpr 1.25
+  // makes a 2400x1350 PNG of a 1920x1080 viewport). Always scale against the
+  // reported CSS viewport, never the image's natural device-pixel size.
+  var last = LC.last || {};
+  var iw = last.viewport_width || img.naturalWidth || 1920;
+  var ih = last.viewport_height || img.naturalHeight || 1080;
   var px = (e.clientX - rect.left) / rect.width * iw;
   var py = (e.clientY - rect.top) / rect.height * ih;
   return {x: Math.max(0, Math.min(iw, Math.round(px))), y: Math.max(0, Math.min(ih, Math.round(py)))};
@@ -238,7 +244,7 @@ function lcLaunch(force){
   lcRender(LC.last || {});
   toast('Launching browser…');
   var u = lcSmartUrl(document.getElementById('lcAddr').value);
-  if(!u) u = 'https://discord.com';
+  if(!u) u = 'https://discord.com/register';
   fetch('/browser/start?worker=' + LC.worker, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({url:u, force:!!force})})
     .then(function(r){ return r.json(); })
     .then(function(st){

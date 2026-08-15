@@ -866,7 +866,7 @@ async def _start_live_browser(wid: str, url: str = "",
     state = _workers.get(wid) or _init_worker(wid)
     _workers[wid] = state
     if not url:
-        url = "https://discord.com"
+        url = "https://discord.com/register"
     if state.get("launching"):
         # A launch is already in flight — report it instead of starting a
         # second Chromium on top of the first (which would leak the first).
