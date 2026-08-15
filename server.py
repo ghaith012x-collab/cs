@@ -73,41 +73,77 @@ _SUBMIT_TEXT_RE = (
 # the marketing box by its label, and returns the click point of the first
 # unchecked ToS box (or null when none remains).
 _TOS_TARGET_JS = r"""() => {
-    const els = document.querySelectorAll(
-        'input[type="checkbox"], [role="checkbox"], [data-state]');
+    const norm = (s) => (s == null ? '' : String(s)).replace(/\s+/g, ' ').trim();
+    const low = (s) => norm(s).toLowerCase();
+    // The consent checkbox renders as several element types across Discord
+    // builds/locales: a native input, a div[role=checkbox], a data-state
+    // box, or a plain div with class*='checkbox'. Accept ALL of them;
+    // never styled container divs (leaf-ish boxes only).
+    const isRealBox = (el) => {
+        if (el.tagName === 'INPUT' && el.type === 'checkbox') return true;
+        if (el.getAttribute('role') === 'checkbox') return true;
+        if (el.getAttribute('data-state')) return true;
+        const cls = (el.className || '').toString().toLowerCase();
+        if (cls.includes('checkbox')) {
+            const r = el.getBoundingClientRect();
+            return r.width >= 8 && r.height >= 8 && el.children.length <= 2;
+        }
+        return false;
+    };
+    const els = [];
+    for (const el of document.querySelectorAll(
+        'input[type="checkbox"], [role="checkbox"], [data-state], [class*="checkbox" i]')) {
+        if (isRealBox(el)) els.push(el);
+    }
+    const candidates = [];
     for (const cb of els) {
         if (cb.checked || cb.getAttribute('aria-checked') === 'true'
             || cb.getAttribute('data-state') === 'checked') continue;
-        if (cb.offsetParent === null) continue;
-        const r = cb.getBoundingClientRect();
-        if (!r || r.width < 5 || r.height < 5) continue;
+        // The real click target: the box itself when it has size, else the
+        // first sized ancestor (the box's visible representation).
+        let target = null;
+        let r = cb.getBoundingClientRect();
+        if (r && r.width >= 5 && r.height >= 5) target = cb;
+        if (!target) {
+            for (let p = cb.parentElement; p && p !== document.body; p = p.parentElement) {
+                const pr = p.getBoundingClientRect();
+                if (pr && pr.width >= 8 && pr.height >= 8) { target = p; break; }
+            }
+        }
+        if (!target || target.offsetParent === null) continue;
+        // Label text: closest <label>, else the nearest ancestor row.
         let label = '';
         try {
-            const lab = cb.closest('label') || (cb.id ? document.querySelector('label[for="' + CSS.escape(cb.id) + '"]') : null);
+            const lab = cb.closest('label');
             if (lab) label = lab.innerText || '';
         } catch (e) {}
         if (!label) {
             try {
-                const wrap = cb.closest('[class*="checkbox"]');
-                if (wrap) label = wrap.innerText || '';
+                let anc = cb.parentElement;
+                for (let i = 0; anc && i < 3; i++) {
+                    const t = norm(anc.innerText || '');
+                    if (t.length > 4 && t.length <= 220) { label = t; break; }
+                    anc = anc.parentElement;
+                }
             } catch (e) {}
         }
-        const low = label.toLowerCase().replace(/\s+/g, ' ').trim();
-        // Skip the optional marketing / email-updates box — only the ToS
-        // agreement is required to enable Continue.
+        const lowL = low(label);
         // Skip the optional marketing / email-updates box in ANY locale
-        // (English "email updates", Swedish "mejl"/"uppdateringar"/"tips",
-        // Dutch "updates", French "e-mail"...). Only the ToS agreement is
-        // required to enable Continue.
-        if (/mejl|e-post|mail|email|marketing|updat|news|newsletter|promotion|exclusive|offers|subscribe|reklam|tips|erbjudande/.test(low)) continue;
-        // Positive signal: the required box's label mentions terms/agreement
-        // (Swedish "användarvillkor"/"godkänner", Dutch "voorwaarden",
-        // French "conditions", German "akzeptiere", Spanish "acepto"...).
-        if (/terms|service|agreement|conditions|villkor|voorwaarden|condiciones|akzeptiere|accedo|aceito|godk|aksoord|conform/i.test(low)) return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
-        // Fallback: the first unchecked non-marketing box IS the ToS box.
-        return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
+        // (Dutch 'e-mails ontvangen'/'aanbiedingen', Swedish 'mejl'/
+        // 'tips', ...). Only the ToS agreement enables the button.
+        if (/mejl|e-post|mail|email|marketing|updat|news|newsletter|promotion|exclusive|offers|subscribe|reklam|tips|erbjudande|aanbieding|optioneel/.test(lowL)) continue;
+        const r2 = target.getBoundingClientRect();
+        candidates.push({
+            x: r2.left + r2.width / 2,
+            y: r2.top + r2.height / 2,
+            tos: /terms|service|agreement|conditions|villkor|voorwaarden|condiciones|akzeptiere|accedo|aceito|godk|aksoord|conform|akkoord|gelezen|nous avons lu|acepto los t|принимаю|已阅读|同意/.test(lowL)
+        });
     }
-    return null;
+    if (!candidates.length) return null;
+    // Prefer the box whose label signals ToS; otherwise the LAST unchecked
+    // visible box (the ToS box sits below the optional marketing box).
+    candidates.sort((a, b) => (b.tos ? 1 : 0) - (a.tos ? 1 : 0));
+    return candidates[0];
 }"""
 
 
@@ -509,17 +545,25 @@ def _month_index(name: str) -> int:
 
 def _dob_text_matches(text: str, option_text: str) -> bool:
     """True when a DOB control's current text represents `option_text` in the
-    page's locale (e.g. the Dutch 'Januari' matches the English 'January')."""
+    page's locale (e.g. the Dutch 'Januari' matches the English 'January').
+
+    Discord renders the control's visible button text as 'value, value'
+    (label + value duplicated, e.g. 'January, January'), so matching is
+    TOKEN-based: the option text - or its localized/numeric equivalent -
+    must appear as one whitespace/comma-separated token in the control text.
+    """
+    import re as _re
     t = (text or "").strip().lower()
     o = (option_text or "").strip().lower()
     if not t or not o:
         return False
-    if t == o:
+    tokens = [tok for tok in _re.split(r"[^a-z0-9]+", t) if tok]
+    if o in tokens:
         return True
     want = _month_index(o)
     if want:
-        return _month_index(t) == want
-    return t.lstrip("0") == o.lstrip("0")
+        return any(_month_index(tok) == want for tok in tokens)
+    return any(tok.lstrip("0") == o.lstrip("0") for tok in tokens if tok.isdigit())
 
 
 # Locate a DOB dropdown control by its localized label ("Day"/"Month"/"Year"
@@ -533,6 +577,27 @@ def _dob_text_matches(text: str, option_text: str) -> bool:
 # with trusted Playwright clicks. Also accepts the selected VALUE text
 # (alias-aware) so a control whose placeholder was replaced by the value
 # ("Januari" instead of "Maand") is still found for verification.
+# Read the visible text of a DOB control by its LOCALIZED combobox
+# aria-label (e.g. 'Month'/'Maand'/'Monat'/'mois'...). The data-dob-target
+# marker can land on the field label after a React re-render (the label
+# text like 'Month*' matches too), so the post-fill verify reads the
+# combobox's select-field text directly as a fallback.
+_DOB_VALUE_JS = r"""([label, aliases]) => {
+    const norm = (s) => (s == null ? '' : String(s)).replace(/\s+/g, ' ').trim();
+    const labels = (aliases && aliases[label]) || [label.toLowerCase()];
+    const re = new RegExp('(^|[^a-z0-9])(' + labels.join('|') + ')([^a-z0-9]|$)');
+    for (const t of document.querySelectorAll('[role="combobox"]')) {
+        const aria = norm(t.getAttribute('aria-label') || '');
+        if (!re.test(aria)) continue;
+        const wrap = t.closest('[class*="selectField" i]') || t.parentElement;
+        if (!wrap) continue;
+        const txt = norm(wrap.innerText || '');
+        const lines = txt.split('\n').map(norm).filter(Boolean);
+        return lines.length ? lines[lines.length - 1] : txt;
+    }
+    return '';
+}"""
+
 _DOB_LOCATE_JS = r"""([label, aliases, valueText, monthAliases]) => {
     const norm = (s) => (s == null ? '' : String(s)).replace(/\s+/g, ' ').trim();
     const low = (s) => norm(s).toLowerCase();
@@ -542,13 +607,20 @@ _DOB_LOCATE_JS = r"""([label, aliases, valueText, monthAliases]) => {
         'august','september','october','november','december'];
     const want = valueText ? low(valueText) : null;
     const wantNum = want ? ((MONTHS.indexOf(want) + 1) || (monthAliases && monthAliases[want]) || (parseInt(valueText, 10) || 0)) : 0;
+    // Discord renders the control text as 'value, value' (label + value
+    // duplicated), so match by TOKEN, not the whole string.
     const valueHits = (t) => {
         if (!want || !t) return false;
-        if (t === want) return true;
-        if (wantNum && ((monthAliases && monthAliases[t]) === wantNum || MONTHS.indexOf(t) + 1 === wantNum)) return true;
+        const toks = String(t).split(/[^a-z0-9]+/).filter(Boolean);
+        if (toks.indexOf(want) !== -1) return true;
         if (wantNum) {
             const n = String(wantNum);
-            return t === n || t === (n.length === 1 ? '0' + n : n);
+            const p = n.length === 1 ? '0' + n : n;
+            for (const tok of toks) {
+                if ((monthAliases && monthAliases[tok]) === wantNum) return true;
+                if (MONTHS.indexOf(tok) + 1 === wantNum) return true;
+                if (tok === n || tok === p) return true;
+            }
         }
         return false;
     };
@@ -558,11 +630,24 @@ _DOB_LOCATE_JS = r"""([label, aliases, valueText, monthAliases]) => {
     );
     for (const el of scan) {
         if (!el.offsetParent) continue;
+        // Skip zero-size a11y targets: Discord's combobox has a hidden
+        // focusTarget div (role=combobox) with NO size - Playwright
+        // refuses to click it. The visible selectButton div is the real
+        // click target.
+        const _r = el.getBoundingClientRect();
+        if (!_r || _r.width < 5 || _r.height < 5) continue;
         const acc = low(norm((el.getAttribute('aria-label') || '') + ' ' +
                              (el.getAttribute('placeholder') || '') + ' ' +
                              (el.getAttribute('data-label') || '') + ' ' +
                              (el.textContent || '').slice(0, 80)));
-        if (re.test(acc) || valueHits(low(norm(el.textContent || '')).slice(0, 80))) {
+        // Group containers span all three DOB controls ('Month, Month
+        // Day, Day Year, Year'); an individual control shows ONE short
+        // value/label. Cap the matched text so the container can never
+        // be picked as the deepest 'match' (its text contains every
+        // label, and depth counts ancestors, so it always sorted first).
+        const _tt = norm(el.textContent || '');
+        if (_tt.length > 40) continue;
+        if (re.test(acc) || valueHits(low(_tt.slice(0, 80)))) {
             let depth = 0;
             let p = el.parentElement;
             while (p) { depth++; p = p.parentElement; }
@@ -580,8 +665,11 @@ _DOB_LOCATE_JS = r"""([label, aliases, valueText, monthAliases]) => {
             let p = node.parentElement;
             for (let i = 0; p && i < 6; i++) {
                 if (p.offsetParent !== null && (p.textContent || '').trim().length <= 40) {
-                    hits.push({ el: p, depth: 0 });
-                    break;
+                    const _pr = p.getBoundingClientRect();
+                    if (_pr && _pr.width >= 5 && _pr.height >= 5) {
+                        hits.push({ el: p, depth: 0 });
+                        break;
+                    }
                 }
                 p = p.parentElement;
             }
@@ -622,10 +710,15 @@ _DOB_OPTION_INDEX_JS = r"""([optionText, monthAliases]) => {
     };
     const sel = __OPT_SEL__;
     const opts = Array.from(document.querySelectorAll(sel));
-    for (let i = 0; i < opts.length; i++) {
-        const t = norm(opts[i].textContent || opts[i].getAttribute('aria-label') || '');
-        const v = opts[i].getAttribute('data-value') || opts[i].getAttribute('value') || t;
-        if (matches(t, v)) return i;
+    let visIdx = 0;
+    for (const el of opts) {
+        // hidden li/option elements from other menus must NOT shift the
+        // index - count visible options only.
+        if (el.offsetParent === null) continue;
+        const t = norm(el.textContent || el.getAttribute('aria-label') || '');
+        const v = el.getAttribute('data-value') || el.getAttribute('value') || t;
+        if (matches(t, v)) return visIdx;
+        visIdx++;
     }
     return -1;
 }"""
@@ -3182,7 +3275,11 @@ class DiscordAutomation:
                         idx = -1
                     if isinstance(idx, int) and idx >= 0:
                         try:
-                            await self._page.locator(_DOB_OPTION_SEL).nth(idx).click()
+                            # index is over VISIBLE options only (see
+                            # _DOB_OPTION_INDEX_JS), so filter hidden
+                            # matches before nth() or we'd click the
+                            # wrong element.
+                            await self._page.locator(_DOB_OPTION_SEL).filter(visible=True).nth(idx).click()
                             picked = True
                             break
                         except Exception as e:
@@ -3258,14 +3355,25 @@ class DiscordAutomation:
 
         Used by the post-fill verify so a swallowed selection is caught and
         re-selected instead of submitting with placeholders still showing.
+        After a React re-render the data-dob-target marker can land on the
+        field's <label> (its text like 'Month*' matches the label regex), so
+        fall back to the combobox that carries the localized aria-label and
+        read the select field's visible text.
         """
+        # 1) the freshly marked control - only accept a short, value-like
+        #    read (a bare label like 'Month*' is rejected).
         try:
-            located = await self._page.evaluate(
-                _DOB_LOCATE_JS, [label, _DOB_LABEL_ALIASES, None, None])
-            if located:
-                txt = await self._page.locator(
-                    f'[data-dob-target="{label}"]').first.inner_text()
-                return (txt or "").strip()
+            txt = await self._page.locator(
+                f'[data-dob-target="{label}"]').first.inner_text()
+            txt = (txt or "").strip()
+            if txt and len(txt) <= 40 and "*" not in txt:
+                return txt
+        except Exception:
+            pass
+        # 2) combobox with the localized aria-label -> select field text.
+        try:
+            v = await self._page.evaluate(_DOB_VALUE_JS, [label, _DOB_LABEL_ALIASES])
+            return (v or "").strip()
         except Exception:
             pass
         return ""
@@ -3702,10 +3810,9 @@ class DiscordAutomation:
             try:
                 dob_missing = []
                 for dob_label, dob_opt in dob_targets:
-                    dob_cur = await self._dob_current_value(dob_label)
-                    if not _dob_text_matches(dob_cur, dob_opt):
+                    if not await self._dob_verify(dob_label, dob_opt):
                         dob_missing.append(dob_label)
-                        self._log(f"[DOB] {dob_label} not set after fill (shows '{dob_cur[:40]}') - re-selecting", level="warn")
+                        self._log(f"[DOB] {dob_label} not verified after fill - re-selecting", level="warn")
                 for dob_label, dob_opt in dob_targets:
                     if dob_label in dob_missing:
                         await self._select_dob(dob_label, dob_opt)
