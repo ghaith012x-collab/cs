@@ -59,6 +59,9 @@ def build_context_options(fingerprint: dict, ua: str, proxy=None,
         "viewport": vp,
         "ignore_https_errors": True,
         "color_scheme": random.choice(["light", "light", "dark"]),
+        # Explicit: never let a page land in a no-JS stub (Discord
+        # serves the "You need to enable JavaScript" shell).
+        "java_script_enabled": True,
     }
 
 

@@ -71,7 +71,7 @@ _FRAME_RATES = (60, 60, 60, 60, 60, 60, 60, 60, 75, 90, 120, 144)
 # bot passes (user_agent, timezone_id, locale, geolocation, device_scale_factor,
 # extra_http_headers, proxy, permissions...) is identity — the engine owns it
 # and overrides would break the fingerprint's internal consistency.
-_CONTEXT_WHITELIST = ("viewport", "ignore_https_errors", "color_scheme")
+_CONTEXT_WHITELIST = ("viewport", "ignore_https_errors", "color_scheme", "java_script_enabled")
 
 
 def _geoip_enabled() -> bool:

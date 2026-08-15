@@ -786,6 +786,15 @@ from stealth import (
 # these pages are light and a hang this long only wastes a dead-session slot.
 NAV_TIMEOUT_MS = 30000
 
+# Hard cap on the /register render-wait. A page can sit "loaded but no form"
+# forever: Cloudflare serves a canned shell (title + #app-mount + the "You
+# need to enable JavaScript" stub) to flagged IPs, JS bundles can drop, and
+# half-dead circuits stall. Without a budget the worker polls indefinitely
+# (the "insanely long" hang). Cloudflare managed challenges are EXEMPT — they
+# auto-resolve and get unlimited time; everything else rotates to a fresh
+# circuit once the budget is exhausted.
+RENDER_WAIT_BUDGET_S = 75.0
+
 
 # ═══════════════════════════════════════════════════════════════
 # Human Behavior Simulation & Fingerprint Randomization
@@ -1608,12 +1617,37 @@ class DiscordAutomation:
                     continue
                 challenge_since = None
 
+                # Render budget - never hang forever on a stub page. Reached
+                # only when there is no active Cloudflare challenge (the
+                # challenge block above already continues, so managed
+                # challenges get unlimited time). A page that still has no
+                # form after the budget gets the session rotated to a fresh
+                # circuit instead of polling indefinitely.
+                if elapsed >= RENDER_WAIT_BUDGET_S:
+                    self._nav_error = (f"Discord form never rendered after {int(elapsed)}s "
+                                       "(stub page / dead circuit) - rotating to fresh circuit")
+                    self._log(f"[Nav] Form never rendered after {int(elapsed)}s - rotating to fresh circuit", level="warn")
+                    return False
+
+                # "You need to enable JavaScript to run this app." as the body
+                # text = Discord/Cloudflare served a canned shell (title +
+                # #app-mount) but React never boots - a flagged exit IP or
+                # dropped JS bundles. Treat it as blank so the reload path
+                # re-fetches the bundles; if it persists past the reloads it
+                # rotates to a fresh circuit (reloads never fix a stub).
+                _preview_text = (state.get("textPreview") or "").strip()
+                _js_required = ("you need to enable javascript" in _preview_text.lower()
+                                or "enable javascript to run this app" in _preview_text.lower())
+
                 if (state.get("hasAppMount") and not state.get("inputCount")
                         and not state.get("buttonCount")
-                        and not (state.get("textPreview") or "").strip()):
+                        and (not _preview_text or _js_required)):
                     if blank_since is None:
                         blank_since = time.time()
-                        self._log("[Nav] SPA shell mounted but React not booted - waiting for JS bundles (reload if stuck)...")
+                        if _js_required:
+                            self._log("[Nav] Stub page ('You need to enable JavaScript') - React never boots; reloading to re-fetch bundles (rotating if persistent)...", level="warn")
+                        else:
+                            self._log("[Nav] SPA shell mounted but React not booted - waiting for JS bundles (reload if stuck)...")
                     # cf_clearance set = challenge passed - assets unblocked, form should follow.
                     if state.get("cfClearance"):
                         if blank_since is not None:
@@ -1630,8 +1664,16 @@ class DiscordAutomation:
                         blank_since = None
                         challenge_since = None
                         continue
-                    # max_reloads exhausted — KEEP waiting, no timeout. A slow
-                    # circuit can still paint the form minutes later.
+                    elif reload_count >= max_reloads and _js_required:
+                        # A JS-required stub after reloads is a flagged exit
+                        # IP, not a dropped bundle - reloading will never fix
+                        # it. Rotate NOW instead of burning the full budget.
+                        self._nav_error = "Discord served JS-required stub after reloads - rotating to fresh circuit"
+                        self._log("[Nav] Stub page persists after reloads - rotating to fresh circuit", level="warn")
+                        return False
+                    # max_reloads exhausted (blank, non-stub) - the budget
+                    # check above rotates the session instead of waiting
+                    # forever. A slow circuit still gets its full chance.
                 else:
                     blank_since = None
                 if state.get("isLogin") and not login_clicked and elapsed >= 3.0:
