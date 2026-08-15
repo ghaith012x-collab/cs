@@ -46,7 +46,9 @@ PROXY_FORCE = (
 # Disable with TOR_FALLBACK=0.
 TOR_FALLBACK = (os.environ.get("TOR_FALLBACK") or "").strip().lower() not in ("0", "false", "no", "off")
 
-from server import DiscordAutomation, _tor_check
+from server import DiscordAutomation, _tor_check, ENGINE
+import live_control
+from live_ui import LIVE_INJECTION
 
 # ── Global state (Flask thread + asyncio thread) ──
 
@@ -758,6 +760,68 @@ def _run_in_loop(coro) -> Optional[object]:
         return None
 
 
+async def _start_live_browser(wid: str, url: str = "") -> dict:
+    """Attach (or cold-launch) the worker's real browser for the LIVE tab.
+    The bot shares this same page, so the operator can watch it work or take
+    over. Proxy-first, TOR fallback — exactly like the worker."""
+    state = _workers.get(wid) or _init_worker(wid)
+    _workers[wid] = state
+    bot = state.get("bot")
+    cfg = load_config()
+    if bot is None:
+        bot = DiscordAutomation(
+            headless=bool(cfg.get("headless", True)),
+            proxy=None,
+            worker_id=wid,
+            domain=_pick_domain(cfg),
+            email=cfg.get("custom_email") or "",
+        )
+        state["bot"] = bot
+    try:
+        alive = await bot.is_alive()
+    except Exception:
+        alive = False
+    if not alive:
+        try:
+            proxy = await _next_proxy(force=False)
+            bot.proxy = proxy
+            await bot.initialize()
+        except Exception as e:
+            _log(f"[{wid}] Live browser launch failed: {e}", level="error")
+            return {"connected": False, "worker_id": wid, "url": "",
+                    "title": "", "viewport_width": 1920,
+                    "viewport_height": 1080, "browser": ENGINE,
+                    "screenshot": "", "error": f"browser launch failed: {e}"}
+    if url:
+        try:
+            await bot._page.goto(url, wait_until="domcontentloaded",
+                                 timeout=30000)
+        except Exception as e:
+            return {"connected": False, "worker_id": wid, "url": "",
+                    "title": "", "viewport_width": 1920,
+                    "viewport_height": 1080, "browser": ENGINE,
+                    "screenshot": "", "error": f"navigation failed: {e}"}
+    return await live_control.get_live_state(bot)
+
+
+async def _close_live_browser(wid: str) -> bool:
+    state = _workers.get(wid)
+    bot = state.get("bot") if state else None
+    if bot is None:
+        return False
+    try:
+        bot._stopped.set()
+    except Exception:
+        pass
+    try:
+        await bot.close()
+    except Exception:
+        pass
+    state["bot"] = None
+    state["last_shot_b64"] = ""
+    return True
+
+
 # ── Flask app ─────────────────────────────────────────────
 
 app = Flask(__name__)
@@ -765,7 +829,10 @@ app = Flask(__name__)
 
 @app.route('/')
 def handle_root():
-    return Response(DASHBOARD_HTML, content_type='text/html')
+    html = DASHBOARD_HTML
+    if "</body>" in html:
+        html = html.replace("</body>", LIVE_INJECTION + "</body>", 1)
+    return Response(html, content_type='text/html')
 
 
 @app.route('/start', methods=['POST'])
@@ -932,6 +999,87 @@ def handle_latest_screenshot():
             except Exception:
                 pass
     return Response(status=404)
+
+
+# ── LIVE CONTROL routes ──────────────────────────────────
+
+@app.route('/browser/state')
+def handle_browser_state():
+    wid = request.args.get("worker", "B1")
+    s = _workers.get(wid)
+    bot = s.get("bot") if s else None
+    if bot is None:
+        return jsonify({"connected": False, "worker_id": wid, "url": "",
+                        "title": "", "viewport_width": 1920,
+                        "viewport_height": 1080, "browser": ENGINE,
+                        "screenshot": "", "error": "browser not started"})
+    st = _run_in_loop(live_control.get_live_state(bot))
+    if st is None:
+        return jsonify({"connected": False, "worker_id": wid, "url": "",
+                        "title": "", "viewport_width": 1920,
+                        "viewport_height": 1080, "browser": ENGINE,
+                        "screenshot": "", "error": "event loop unavailable"}), 503
+    if st.get("screenshot"):
+        s["last_shot_b64"] = st["screenshot"]
+    elif s.get("last_shot_b64"):
+        st["screenshot"] = s["last_shot_b64"]
+    return jsonify(st)
+
+
+@app.route('/browser/navigate', methods=['POST'])
+def handle_browser_navigate():
+    wid = request.args.get("worker", "B1")
+    data = request.get_json(silent=True) or {}
+    url = str(data.get("url") or "").strip()
+    if not url:
+        return jsonify({"error": "empty url"}), 400
+    s = _workers.get(wid)
+    bot = s.get("bot") if s else None
+    if bot is None:
+        return jsonify({"connected": False, "worker_id": wid,
+                        "error": "browser not started"}), 409
+    st = _run_in_loop(live_control.live_navigate(bot, url))
+    if st is None:
+        return jsonify({"connected": False, "worker_id": wid,
+                        "error": "event loop unavailable"}), 503
+    if st.get("screenshot"):
+        s["last_shot_b64"] = st["screenshot"]
+    return jsonify(st)
+
+
+@app.route('/browser/action', methods=['POST'])
+def handle_browser_action():
+    wid = request.args.get("worker", "B1")
+    data = request.get_json(silent=True) or {}
+    s = _workers.get(wid)
+    bot = s.get("bot") if s else None
+    if bot is None:
+        return jsonify({"connected": False, "worker_id": wid,
+                        "error": "browser not started"}), 409
+    st = _run_in_loop(live_control.live_action(bot, data))
+    if st is None:
+        return jsonify({"connected": False, "worker_id": wid,
+                        "error": "event loop unavailable"}), 503
+    return jsonify(st)
+
+
+@app.route('/browser/start', methods=['POST'])
+def handle_browser_start():
+    wid = request.args.get("worker", "B1")
+    data = request.get_json(silent=True) or {}
+    url = str(data.get("url") or "").strip()
+    st = _run_in_loop(_start_live_browser(wid, url))
+    if st is None:
+        return jsonify({"connected": False, "worker_id": wid,
+                        "error": "event loop unavailable"}), 503
+    return jsonify(st)
+
+
+@app.route('/browser/close', methods=['POST'])
+def handle_browser_close():
+    wid = request.args.get("worker", "B1")
+    closed = _run_in_loop(_close_live_browser(wid))
+    return jsonify({"closed": bool(closed)})
 
 
 @app.route('/worker/<wid>/logs')
