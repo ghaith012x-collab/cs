@@ -1167,16 +1167,12 @@ class HSWGenerator:
 
     async def _get_page(self):
         if self._browser is None:
-            from browser_engine import async_playwright, ENGINE
+            from browser_engine import async_playwright
             import stealth as _st
             pw = await async_playwright().start()
-            launch_kw = {
-                "headless": True,
-                "args": _st.launch_args(headless=True) + [
-                    "--disable-web-security",
-                    "--window-size=1920,1080",
-                ],
-            }
+            # Camoufox owns the launch prefs and the identity — no Chrome
+            # args and no bot-side UA to pass.
+            launch_kw = {"headless": True}
             if self.proxy:
                 launch_kw["proxy"] = {"server": self.proxy}
             self._browser = await pw.chromium.launch(**launch_kw)
@@ -1186,11 +1182,11 @@ class HSWGenerator:
                    "locale_profile": None, "gpu": None, "pixel_ratio": 1.0}
             self._context = await self._browser.new_context(
                 **_st.build_context_options(
-                    _fp, CHROME_UA, viewport={"width": 1920, "height": 1080}
+                    _fp, "", viewport={"width": 1920, "height": 1080}
                 )
             )
             await self._context.add_init_script(
-                _st.build_init_script(_fp, CHROME_UA)
+                _st.build_init_script(_fp, "")
             )
 
     async def generate(self, session: cffi_requests.Session,
@@ -8401,7 +8397,7 @@ async def solve_hcaptcha_accessibility(page, iframe,
                             # before its JS paints — verify it actually painted
                             # content (same rule server._challenge_rendered uses).
                             try:
-                                _cf = await _chall.first.content_frame()
+                                _cf = await (await _chall.first.element_handle(timeout=5000)).content_frame()
                                 _painted = False
                                 if _cf is not None:
                                     _painted = bool(await _cf.evaluate(

@@ -365,21 +365,6 @@ def _tor_check():
         return False
 
 
-USER_AGENTS = [
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36 Edg/130.0.0.0',
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36 Edg/129.0.0.0',
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:131.0) Gecko/20100101 Firefox/131.0',
-    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (X11; CrOS x86_64 14541.0.0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15',
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36',
-]
-
 PAST_CAPTCHA_KEYWORDS = ['/channels', '/verify', '/welcome', '@me', 'discord.com/app']
 
 _BIO_POOL = [
@@ -401,14 +386,6 @@ from stealth import (
     build_context_options,
     build_init_script,
     launch_args,
-)
-
-# Legacy constant kept for compatibility — replaced by stealth.build_init_script
-INIT_SCRIPT = build_init_script(
-    {"cores": 8, "device_memory": 8, "touch_points": 0, "locale": "en-US",
-     "languages": ["en-US", "en"], "locale_profile": None,
-     "gpu": None, "pixel_ratio": 1.0},
-    USER_AGENTS[0],
 )
 
 # Secondary navigations (verification link, token page). Halved from 60s:
@@ -457,85 +434,6 @@ async def human_mouse_move(page, x: int, y: int):
         by = (1-progress)**2 * current['y'] + 2*(1-progress)*progress * cp_y + progress**2 * y
         await page.mouse.move(bx, by)
         await asyncio.sleep(random.gauss(0.008, 0.003))
-
-import hashlib
-
-def generate_fingerprint(worker_id: str, session_seed: str = "") -> dict:
-    """Deterministic but unique fingerprint per worker+session.
-    Returns dict with font, canvas_noise, webgl_vendor, webgl_renderer, etc."""
-    seed_input = f"{worker_id}:{session_seed or time.time()}"
-    seed = hashlib.sha256(seed_input.encode()).hexdigest()
-
-    # Realistic Windows desktop font stack — headless Chromium ships an
-    # (almost) empty font list, one of the strongest bot signals.
-    font_pool = [
-        "Arial", "Arial Black", "Arial Narrow", "Book Antiqua", "Calibri",
-        "Cambria", "Cambria Math", "Candara", "Comic Sans MS", "Consolas",
-        "Constantia", "Corbel", "Courier New", "Franklin Gothic Medium",
-        "Garamond", "Georgia", "Impact", "Lucida Console",
-        "Lucida Sans Unicode", "Microsoft Sans Serif", "Palatino Linotype",
-        "Segoe Print", "Segoe Script", "Segoe UI", "Segoe UI Light",
-        "Segoe UI Semibold", "Tahoma", "Times New Roman", "Trebuchet MS",
-        "Verdana",
-    ]
-    font = font_pool[int(seed[:8], 16) % len(font_pool)]
-    color_depths = [24, 24, 24, 30]
-    color_depth = color_depths[int(seed[24:32], 16) % len(color_depths)]
-    # Real desktops run 1.0 or (Windows scaling) 1.25 — never 1.1..1.4.
-    pixel_ratio = 1.25 if (int(seed[24:32], 16) % 4 == 0) else 1.0
-
-    # Coherent desktop resolution + taskbar offset for screen.width/height.
-    # Every entry is >= the fixed 1920x1080 viewport so screen >= inner window.
-    resolutions = [
-        {"width": 1920, "height": 1080, "avail_height": 1040},
-        {"width": 1920, "height": 1080, "avail_height": 1032},
-        {"width": 2560, "height": 1440, "avail_height": 1400},
-        {"width": 2560, "height": 1440, "avail_height": 1392},
-    ]
-    scr = resolutions[int(seed[40:48], 16) % len(resolutions)]
-
-    # Canvas noise ON by default (unique per session, stable within a
-    # session) — the stock clean headless canvas hash is shared by every bot.
-    try:
-        canvas_noise = int(os.environ.get("STEALTH_CANVAS_NOISE", "1") or "1")
-    except Exception:
-        canvas_noise = 1
-    canvas_noise = max(0, min(3, canvas_noise))
-
-    # Consistent identity for the stealth layer (stealth.build_init_script /
-    # build_context_options consume these). GPU comes from stealth so the
-    # WebGL strings match the platform implied by the chosen UA.
-    ua = USER_AGENTS[int(seed[:8], 16) % len(USER_AGENTS)]
-    from stealth import _LOCALE_PROFILES, pick_gpu, ua_platform
-    profile = _LOCALE_PROFILES[int(seed[32:40], 16) % len(_LOCALE_PROFILES)]
-    gpu = pick_gpu(ua_platform(ua)["ch_platform"], int(seed[16:24], 16))
-
-    return {
-        "font": font,
-        "fonts": font_pool,
-        "canvas_noise": canvas_noise,
-        "canvas_seed": int(seed[16:24], 16) & 0x7FFFFFFF,
-        "webgl_vendor": gpu["webgl_vendor"],
-        "webgl_renderer": gpu["webgl_renderer"],
-        "color_depth": color_depth,
-        "pixel_ratio": pixel_ratio,
-        "screen": {
-            "width": scr["width"],
-            "height": scr["height"],
-            "avail_width": scr["width"],
-            "avail_height": scr["avail_height"],
-        },
-        "seed": int(seed, 16),
-        "ua": ua,
-        "locale": profile["locale"],
-        "languages": profile["languages"],
-        "locale_profile": profile,
-        "cores": [4, 6, 8, 8, 12, 16][int(seed[8:16], 16) % 6],
-        "device_memory": [4, 8, 8, 16, 16, 32][int(seed[8:16], 16) % 6],
-        "touch_points": 0,
-        "gpu": gpu,
-    }
-
 
 class DiscordAutomation:
     def __init__(self, headless: bool = False, email: str = "",
@@ -589,12 +487,9 @@ class DiscordAutomation:
         # navigation wait immediately so Stop actually stops (the browser is
         # then PARKED on Discord and reused on the next Start).
         self._stopped = asyncio.Event()
-        # Engine-owned identity: ShardX mints a fresh randomized profile per
-        # launch — the bot-side fingerprint only exists for legacy engines.
-        if ENGINE == "shardx":
-            self._fingerprint = {}
-        else:
-            self._fingerprint = generate_fingerprint(worker_id)
+        # Engine-owned identity: Camoufox mints a fresh randomized profile
+        # per launch — there is no bot-side fingerprint to keep.
+        self._fingerprint = {}
 
     def _log(self, message: str, level: str = "info") -> None:
         # The store keeps EVERYTHING so the dashboard's ALL LOGS toggle can
@@ -627,41 +522,11 @@ class DiscordAutomation:
     def get_activity_log(self) -> list:
         return self._activity_log
 
-    def _launch_opts(self) -> dict:
-        """Engine launch options.
-
-        shardx: {} — ShardX mints its own randomized profile per launch.
-        Legacy engines: map the bot-side fingerprint onto persona options."""
-        if ENGINE == "shardx":
-            return {}
-        opts: dict = {
-            "fingerprint": self._fingerprint.get("seed") or int(time.time() * 1000)
-        }
-        fp = self._fingerprint
-        try:
-            from stealth import ua_platform
-            platform = ua_platform(self._ua or "")["ch_platform"].lower()
-            if platform in ("windows", "macos", "linux"):
-                opts["platform"] = platform
-        except Exception:
-            pass
-        # Pass the bot-chosen UA so the legacy persona uses it instead of
-        # deriving its own from the seed (which wouldn't match self._ua).
-        if self._ua:
-            opts["user_agent"] = self._ua
-        opts["pixel_ratio"] = fp.get("pixel_ratio", 1.0)
-        profile = fp.get("locale_profile") or {}
-        if profile.get("tz"):
-            opts["timezone"] = profile["tz"]
-        locale = fp.get("locale") or "en-US"
-        opts["accept_language"] = f"{locale},{locale.split('-')[0]};q=0.9,en;q=0.8"
-        return opts
-
     def _launch_proxy(self) -> Optional[dict]:
-        """The proxy rides on browser launch (ShardX/Playwright apply it as
-        a --proxy-server launch argument — a context-level proxy would either
-        be ignored or rejected). Returns the Playwright-style
-        {server, username, password} dict (or None for TOR/direct)."""
+        """The proxy rides on browser launch (Camoufox applies it at launch
+        — a context-level proxy would either be ignored or rejected).
+        Returns the Playwright-style {server, username, password} dict
+        (or None for TOR/direct)."""
         if not (self.proxy and isinstance(self.proxy, dict)):
             return None
         p = self.proxy
@@ -693,8 +558,7 @@ class DiscordAutomation:
             launch_proxy = {"server": "socks5://127.0.0.1:9050"}
             self._tor_enabled = True
         self._browser = await self._playwright.chromium.launch(
-            headless=self.headless, args=args, proxy=launch_proxy,
-            **self._launch_opts())
+            headless=self.headless, args=args, proxy=launch_proxy)
         await self._build_context()
 
     _PROXY_IP_CACHE: dict = {}
@@ -786,23 +650,18 @@ class DiscordAutomation:
         # drag challenges are solved on the very first attempt.
         await self._discover_vision_model()
 
-        # Best-human-stealth launch flags (patchright = minimal set, stock
-        # playwright = full hardening set). See stealth.launch_args().
+        # Best-human-stealth launch args: Camoufox owns launch prefs and the
+        # fingerprint entirely, so there is nothing to add.
         args = launch_args(headless=self.headless)
         self._log(f"[Engine] {ENGINE} launch args: {len(args)}")
 
-        if ENGINE == "shardx":
-            # Engine-level identity: ShardX mints a fresh randomized profile
-            # per launch — no bot-side UA / font / GPU / locale selection.
-            self._ua = ""
-            self._fingerprint = {}
-            self._log("[Fingerprint] Identity owned by ShardX engine — fresh randomized profile per launch")
-        else:
-            self._ua = random.choice(USER_AGENTS)
-            self._fingerprint = generate_fingerprint(self.worker_id)
-            # Keep the fingerprint's UA in sync with the one we actually use.
-            self._ua = self._fingerprint.get("ua") or self._ua
-            self._log(f"Fingerprint: font={self._fingerprint['font']}, gpu={self._fingerprint['webgl_renderer'][:40]}..., dpr={self._fingerprint['pixel_ratio']}")
+        # Engine-level identity: Camoufox mints a fresh randomized profile
+        # per launch — no bot-side UA / font / GPU / locale selection. It
+        # additionally geo-matches the fingerprint to the proxy's real exit
+        # region.
+        self._ua = ""
+        self._fingerprint = {}
+        self._log(f"[Fingerprint] Identity owned by {ENGINE} engine — fresh randomized profile per launch")
 
         # Launch the browser WITH the proxy. The engine applies it as a
         # --proxy-server launch arg — a proxy passed later to new_context()
@@ -812,8 +671,7 @@ class DiscordAutomation:
             launch_proxy = {"server": "socks5://127.0.0.1:9050"}
             self._tor_enabled = True
         self._browser = await self._playwright.chromium.launch(
-            headless=self.headless, args=args, proxy=launch_proxy,
-            **self._launch_opts())
+            headless=self.headless, args=args, proxy=launch_proxy)
 
         # Standard desktop viewport (1920x1080) — most common real resolution
         await self._build_context()
@@ -838,11 +696,9 @@ class DiscordAutomation:
             self._log("[TOR] Using TOR SOCKS5 proxy...")
             if _tor_newnym():
                 self._log("[TOR] New identity requested")
-            # ShardX already rides the TOR proxy from browser launch — a
+            # Camoufox already rides the TOR proxy from browser launch — a
             # context-level proxy would be rejected by Playwright when the
             # browser was launched with one.
-            if ENGINE != "shardx":
-                ctx_opts['proxy'] = {'server': 'socks5://127.0.0.1:9050'}
             await asyncio.sleep(1)
         elif getattr(self, "_direct", False):
             self._log("[Proxy] Direct connection - no proxy and TOR unavailable")
@@ -949,7 +805,6 @@ class DiscordAutomation:
         if self._browser is None or self._page is None:
             return False
         try:
-            # TrueDriver: liveness = the tab answers one CDP read.
             if not getattr(self._browser, "is_connected", True):
                 return False
             url = await asyncio.wait_for(
@@ -961,22 +816,12 @@ class DiscordAutomation:
     def rotate_fingerprint(self) -> None:
         """Rotate to a brand-new browser identity.
 
-        shardx: the engine mints a fresh persona on EVERY launch, so the
-        next relaunch (new proxy session) is automatically a new, unlinkable
-        identity.
-        Legacy engines: regenerate fingerprint + UA."""
-        if ENGINE == "shardx":
-            self._fingerprint = {}
-            self._ua = ""
-            self._log("[Fingerprint] Rotated: fresh ShardX profile on next launch (engine-owned identity)")
-            return
-        try:
-            self._fingerprint = generate_fingerprint(self.worker_id)
-            self._ua = self._fingerprint.get("ua") or self._ua
-            fp = self._fingerprint
-            self._log(f"[Fingerprint] Rotated: font={fp['font']}, gpu={fp['webgl_renderer'][:36]}..., ua={self._ua[:48]}...")
-        except Exception as e:
-            self._log(f"[Fingerprint] rotation error: {e}", level="warn")
+        Camoufox mints a fresh persona on EVERY launch (and on every
+        new_context()), so the next relaunch (new proxy session) is
+        automatically a new, unlinkable identity."""
+        self._fingerprint = {}
+        self._ua = ""
+        self._log(f"[Fingerprint] Rotated: fresh {ENGINE} profile on next launch (engine-owned identity)")
 
     async def _rebuild_context_with_tor(self) -> bool:
         """Close the context and reopen WITH a fresh TOR circuit."""
@@ -1017,12 +862,11 @@ class DiscordAutomation:
             return False
 
     async def _read_nav_state(self):
-        """Read the register-page state over the engine's single CDP channel.
+        """Read the register-page state.
 
-        TrueDriver is pure CDP: every evaluate() runs over the same websocket
-        that drove the navigation, so there is no stale-WebDriver channel to
-        fall back from. A healthy page ALWAYS answers; (None, None) is now
-        the one true "tab dead" signal.
+        Every evaluate() runs over the engine's own channel, so there is no
+        stale-WebDriver session to fall back from. A healthy page ALWAYS
+        answers; (None, None) is the one true "tab dead" signal.
         """
         try:
             checks = await asyncio.wait_for(
@@ -1048,7 +892,7 @@ class DiscordAutomation:
         return None, None
 
     async def _cdp_dom_nav_state(self):
-        """Kept as a JS-only alias — TrueDriver has no separate CDP channel."""
+        """JS-only alias of _read_nav_state (kept for callers)."""
         return await self._read_nav_state()
 
     async def _goto_register(self) -> bool:
@@ -1220,7 +1064,7 @@ class DiscordAutomation:
         challenge_since = None   # when a Cloudflare challenge first appeared
         reload_count = 0         # reloads attempted for a blank/hung SPA
         login_clicked = False    # already clicked the Register link once
-        turnstile_tried = False  # already attempted a UC stealth Turnstile bypass
+        turnstile_tried = False  # already attempted a Turnstile bypass
         blank_nav_since = None   # when the tab first sat at about:blank (nav never committed)
         nav_reissues = 0         # re-issued gotos for a never-committed navigation
         dead_reads = 0           # consecutive unreadable polls -> page died (old-build bail)
@@ -1328,7 +1172,7 @@ class DiscordAutomation:
                 #   1. Cloudflare managed challenge ("Just a moment..."): it
                 #      auto-resolves and drops cf_clearance. WAIT for it as
                 #      long as it takes — no bail-out (Turnstile widgets get
-                #      re-attempted every ~10s via UC stealth).
+                #      re-attempted every ~10s).
                 #   2. React failed to hydrate (a JS bundle dropped/errored): a
                 #      reload re-fetches the bundles and almost always boots.
                 #      Reload up to max_reloads times, then keep waiting.
@@ -1342,16 +1186,15 @@ class DiscordAutomation:
                         challenge_since = None
                     else:
                         # Cloudflare Turnstile widget (not the auto-resolving
-                        # managed challenge). Never use plain Selenium clicks —
-                        # use SeleniumBase UC stealth (uc_click /
-                        # uc_gui_click_captcha) to press it. Re-attempt every
-                        # ~10s — no bail-out; wait as long as it takes.
+                        # managed challenge). Click it with a real humanized
+                        # click and re-attempt every ~10s — no bail-out; wait
+                        # as long as it takes.
                         if (not turnstile_tried
                                 or time.time() - challenge_since >= 10.0):
                             turnstile_tried = True
-                            self._log("[Nav] Cloudflare Turnstile widget detected - bypassing with SeleniumBase UC stealth...")
+                            self._log("[Nav] Cloudflare Turnstile widget detected - clicking it...")
                             if await self._solve_turnstile_if_present():
-                                self._log("[Nav] Turnstile bypassed via UC stealth - waiting for React to boot...")
+                                self._log("[Nav] Turnstile clicked - waiting for React to boot...")
                                 challenge_since = None
                     await asyncio.sleep(0.3)
                     continue
@@ -1558,11 +1401,10 @@ class DiscordAutomation:
             success = False
             if form_ok:
                 self._log("[Form] Form filled - checking for hCaptcha...")
-                # Cloudflare Turnstile can gate the form submit. Bypass it
-                # with SeleniumBase UC stealth (never plain Selenium clicks)
-                # before the hCaptcha solver runs.
+                # Cloudflare Turnstile can gate the form submit. Click it
+                # with a real humanized click before the hCaptcha solver runs.
                 if await self._solve_turnstile_if_present():
-                    self._log("[Captcha] [OK] Turnstile bypassed via UC stealth")
+                    self._log("[Captcha] [OK] Turnstile clicked")
                 success = await self._solve_hcaptcha_if_present()
             else:
                 self._log("[FAIL] Form filling failed", level="error")
@@ -1648,13 +1490,13 @@ class DiscordAutomation:
         except Exception as e:
             self._log(f"[Humanize] Error: {e}", level="warn")
 
-    # ── Cloudflare Turnstile (SeleniumBase UC stealth) ───────────────────
+    # ── Cloudflare Turnstile ─────────────────────────────────────────────
     # Discord sits behind Cloudflare, and a Turnstile captcha can gate
-    # navigation / form submit / mail verification. Turnstile must NEVER be
-    # pressed with plain Selenium/JS clicks — Cloudflare fingerprints
-    # synthetic event triggers. Use SeleniumBase's CDP-native stealth
-    # (page.uc_click / page.uc_gui_click_captcha), which run with WebDriver
-    # detached over the raw CDP channel.
+    # navigation / form submit / mail verification. The widget is clicked
+    # with a real, humanized locator click on the Camoufox page (the engine's
+    # humanize layer drives the pointer — never a synthetic JS event), then
+    # we confirm the challenge cleared via cf_clearance or the widget
+    # leaving the DOM.
     _TURNSTILE_SELECTORS = (
         'iframe[src*="challenges.cloudflare.com"]',
         'iframe[src*="turnstile"]',
@@ -1684,35 +1526,27 @@ class DiscordAutomation:
         return False
 
     async def _solve_turnstile_if_present(self) -> bool:
-        """Bypass a Cloudflare Turnstile widget via SeleniumBase UC stealth.
+        """Bypass a Cloudflare Turnstile widget with a humanized click.
 
-        Clicks the widget checkbox with page.uc_click() (CDP-native, no
-        WebDriver attached) or uc_gui_click_captcha() (OS-level PyAutoGUI
-        click) for iframe widgets, then confirms the challenge cleared via
-        the cf_clearance cookie or the widget frame disappearing."""
+        Clicks the widget checkbox with a real locator click on the Camoufox
+        page, then confirms the challenge cleared via the cf_clearance
+        cookie or the widget frame disappearing."""
         try:
             if not await self._detect_turnstile():
                 return False
-            self._log("[Turnstile] Widget present - bypassing with UC stealth...")
-            # 1) CDP-native stealth click on the widget checkbox.
+            self._log("[Turnstile] Widget present - clicking it...")
+            # Humanized click on the widget checkbox (Camoufox drives the
+            # pointer with its humanize layer — never a synthetic JS event).
             clicked = False
             for sel in self._TURNSTILE_SELECTORS:
                 try:
                     loc = self._page.locator(sel)
                     if await loc.count() > 0:
-                        await self._page.uc_click(sel, timeout=4000)
+                        await loc.first.click(timeout=4000)
                         clicked = True
                         break
                 except Exception:
                     continue
-            # 2) OS-level GUI click fallback (PyAutoGUI) for iframe widgets.
-            if not clicked:
-                try:
-                    await self._page.uc_gui_click_captcha(frame="iframe",
-                                                          retry=True)
-                    clicked = True
-                except Exception:
-                    pass
             if not clicked:
                 self._log("[Turnstile] No checkbox found to click", level="warn")
                 return False
@@ -1782,8 +1616,8 @@ class DiscordAutomation:
             self._log(f"[Mail] Opening verification link: {link[:80]}...")
             await self._page.goto(link, wait_until='domcontentloaded', timeout=NAV_TIMEOUT_MS)
             await asyncio.sleep(2)
-            # Cloudflare Turnstile may gate the verification page - bypass it
-            # with SeleniumBase UC stealth if present.
+            # Cloudflare Turnstile may gate the verification page - click it
+            # if present.
             if await self._solve_turnstile_if_present():
                 self._log("[Mail] [OK] Turnstile bypassed on verification page")
             # Discord shows a verification success page (or redirects to login)
@@ -1821,9 +1655,10 @@ class DiscordAutomation:
         mounts a hidden twin (body aria-hidden=true, same URL) - never pick
         it when a visible one exists.
         """
-        # 1) Direct content_frame() first (works on stock engines).
+        # 1) Direct content_frame() first (real Playwright: Locator.
+        # content_frame is a property, so resolve the element handle first).
         try:
-            frame = await iframe.content_frame()
+            frame = await (await iframe.element_handle(timeout=5000)).content_frame()
             if frame is not None:
                 return frame
         except Exception:
@@ -1956,7 +1791,7 @@ class DiscordAutomation:
         painted and interactive, so readiness must never gate the attempt.
         """
         try:
-            frame = await iframe.content_frame()
+            frame = await (await iframe.element_handle(timeout=4000)).content_frame()
             if frame is None:
                 return False
             return bool(await frame.evaluate(

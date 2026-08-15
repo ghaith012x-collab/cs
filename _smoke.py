@@ -1,5 +1,5 @@
 import asyncio, json, os
-from truedriver_engine import async_playwright
+from browser_engine import async_playwright
 
 HTML = ("<html><body>"
         "<button id='b'>Submit</button>"
@@ -48,10 +48,8 @@ async def main():
     fl = page.frame_locator("#f")
     h2 = await fl.locator("h2").inner_text()
     print("frame_locator h2:", h2)
-    cf = await page.locator("#f").first.content_frame()
+    cf = await (await page.locator("#f").first.element_handle()).content_frame()
     print("content_frame:", cf is not None, (cf.url or "")[:20] if cf else "")
-    if cf:
-        print("frame offset:", await cf._offset())
 
     btn = await page.get_by_role("button", name="Submit").first.inner_text()
     print("get_by_role:", btn)

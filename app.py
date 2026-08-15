@@ -867,7 +867,7 @@ async def _start_live_browser(wid: str, url: str = "",
     if not url:
         url = "https://discord.com/register"
     # The gen is already driving this SAME browser — never relaunch a second
-    # Chromium on top of it and never yank it off the page it is filling.
+    # one on top of it and never yank it off the page it is filling.
     # Just report what the worker is doing so the LIVE tab shows it live.
     if state.get("status") in ("starting", "running"):
         bot = state.get("bot")
@@ -877,7 +877,7 @@ async def _start_live_browser(wid: str, url: str = "",
             st["status"] = state.get("status", "")
             return st
         # Worker is mid-launch (bot not created yet) — wait for it instead of
-        # racing it and leaking a second Chromium.
+        # racing it and leaking a second browser.
         return {"connected": False, "worker_id": wid, "url": url,
                 "title": "", "viewport_width": 1920,
                 "viewport_height": 1080, "browser": ENGINE,
@@ -885,7 +885,7 @@ async def _start_live_browser(wid: str, url: str = "",
                 "status": state.get("status", "")}
     if state.get("launching"):
         # A launch is already in flight — report it instead of starting a
-        # second Chromium on top of the first (which would leak the first).
+        # second browser on top of the first (which would leak the first).
         return {"connected": False, "worker_id": wid, "url": url,
                 "title": "", "viewport_width": 1920,
                 "viewport_height": 1080, "browser": ENGINE,

@@ -4,7 +4,7 @@ live_ui.py — the LIVE CONTROL overlay injected into the dashboard.
 ``LIVE_INJECTION`` is appended just before ``</body>`` by app.handle_root(),
 so it does not touch the giant DASHBOARD_HTML string. It adds a full-screen
 live-control surface (real screenshot stream + cursor + real keyboard +
-fullscreen + smart address bar) that drives the SAME Chromium page the bot
+fullscreen + smart address bar) that drives the SAME Camoufox page the bot
 uses via the /browser/* endpoints.
 """
 
@@ -74,7 +74,7 @@ LIVE_INJECTION = r"""
     <div class="lc-foot">
       <button class="lc-ico lc-launch" onclick="lcLaunch(true)">LAUNCH / RECONNECT</button>
       <button class="lc-ico lc-close" onclick="lcCloseBrowser()">CLOSE BROWSER</button>
-      <span class="lc-tip">This is the bot's own Chromium — watch it work or take over. CURSOR = click the page. KEYBOARD = just type on your real keyboard (no on-screen keys). The address bar already knows "youtube" means youtube.com.</span>
+      <span class="lc-tip">This is the bot's own Camoufox — watch it work or take over. CURSOR = click the page. KEYBOARD = just type on your real keyboard (no on-screen keys). The address bar already knows "youtube" means youtube.com.</span>
     </div>
   </div>
 </div>

@@ -1,20 +1,21 @@
 """
-browser_engine.py — TrueDriver engine driving ungoogled Chromium.
+browser_engine.py — Camoufox engine driving a debloated, anti-detect FIREFOX.
 
-Single engine, no fallback. The DRIVER is TrueDriver
-(https://pypi.org/project/truedriver — a blazing fast, async-first,
-undetectable CDP automation framework; a fork of nodriver). The BROWSER is
-UNGOOGLED CHROMIUM (resolved via $UNGOOGLED_CHROMIUM_BINARY / $CHROMIUM_BINARY
-/ $BRAVE_BINARY, then ungoogled-chromium / chromium / brave-browser /
-google-chrome on PATH). Incognito is ALWAYS on, so no cookies / cache /
-IndexedDB ever touch disk.
+Single engine, no fallback. The engine is Camoufox
+(https://github.com/daijro/camoufox — a Firefox fork with C++-level
+fingerprint spoofing, TLS/network-layer randomization, protocol-level WebRTC
+IP spoofing and per-context real fingerprints). Every launch and every
+new_context() mints a fresh randomized identity, geo-matched to the proxy's
+real exit region, with humanized mouse movement and a randomized native
+frame rate. Incognito is ALWAYS on — a fresh temp profile per session, so no
+cookies / cache / IndexedDB ever touch disk.
 
-truedriver_engine.py keeps the Playwright-compatible ``async_playwright``
+camoufox_engine.py keeps the Playwright-compatible ``async_playwright``
 contract the bot's workers, solver and mail client use, so every caller that
 does ``from browser_engine import async_playwright`` is unchanged.
 """
 
-from truedriver_engine import async_playwright, ENGINE
+from camoufox_engine import async_playwright, ENGINE
 
 CHANNEL = None
 

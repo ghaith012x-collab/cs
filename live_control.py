@@ -4,7 +4,7 @@ live_control.py — live-control helpers for the dashboard's LIVE tab.
 These are plain module functions (not methods on DiscordAutomation) so the
 dashboard can run them on the bot's asyncio loop without touching the big bot
 modules. They drive the SAME ``bot._page`` the bot uses — the operator and the
-bot share one real Chromium session, and every action here is a pure read or
+bot share one real Camoufox session, and every action here is a pure read or
 input over that page (no second browser is ever launched).
 """
 import asyncio
@@ -103,7 +103,7 @@ async def get_live_state(bot) -> dict:
 
 
 def _dead_page(url: str) -> bool:
-    """True when the page is a Chromium error/blank page (proxy tunnel died,
+    """True when the page is a browser error/blank page (proxy tunnel died,
     site unreachable, or navigation never happened) rather than real content."""
     u = (url or "").lower()
     if "chrome-error" in u or "err_tunnel" in u or "err_" in u:
