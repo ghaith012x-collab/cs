@@ -3043,97 +3043,89 @@ class DiscordAutomation:
 
             self._log(f"Display: {display_name}  Username: {self._username}  Pass: ***")
 
-            # ── Set ALL form fields + ToS checkbox directly via JS ──
-            # Using the native value setter + input/change events — React
-            # controlled inputs and checkboxes respond to these reliably.
-            # No humanized typing, no CDP keyboard, no timing issues.
-            form_json = json.dumps({
-                "email": self._email or "",
-                "display": display_name,
-                "username": self._username or "",
-                "password": self._password or "",
-            })
-            try:
-                result = await self._page.evaluate(f"""async () => {{
-                    const fields = {form_json};
-                    const selectors = {{
-                        email: 'input[name="email"], input[type="email"], input[autocomplete="email"], input[aria-label*="email" i], input[placeholder*="email" i], input[id*="email" i]',
-                        display: 'input[name="global_name"], input[aria-label*="display name" i], input[aria-label*="display" i]',
-                        username: 'input[name="username"], input[autocomplete="username"], input[aria-label*="username" i], input[id*="username" i], input[placeholder*="username" i]',
-                        password: 'input[name="password"], input[type="password"], input[autocomplete="new-password"], input[aria-label*="password" i]',
-                    }};
-                    // Humanized but RELIABLE fill: a human pause, then ONE
-                    // native-setter write + input event. Chunked partial
-                    // writes broke React controlled inputs — the value
-                    // tracker never updates, so Discord's next re-render
-                    // (validation, password meter) resets the field to
-                    // empty. That was the "only dates fill" bug.
-                    const typeInto = async (el, value) => {{
-                        // React installs its value TRACKER as an own-property
-                        // setter on the ELEMENT, not on the prototype. Calling
-                        // the prototype setter directly bypasses the tracker,
-                        // so React still believes the field is empty and wipes
-                        // our write on its next re-render (validation, DOB,
-                        // password meter). Use the instance's OWN setter when
-                        // present so the tracker records the value, then fire
-                        // input/change so onChange updates React state.
-                        const own = Object.getOwnPropertyDescriptor(el, 'value');
-                        const proto = Object.getOwnPropertyDescriptor(
-                            HTMLInputElement.prototype, 'value'
-                        );
-                        const setter = (own && own.set) ? own.set
-                                     : (proto && proto.set) ? proto.set : null;
-                        el.focus();
-                        el.scrollIntoView({{ block: 'center' }});
-                        await new Promise(r => setTimeout(r, 140 + Math.random() * 360));
-                        if (setter) setter.call(el, value);
-                        else el.value = value;
-                        el.dispatchEvent(new Event('input', {{ bubbles: true }}));
-                        await new Promise(r => setTimeout(r, 120 + Math.random() * 300));
-                        el.dispatchEvent(new Event('change', {{ bubbles: true }}));
-                    }};
-                    let ok = [];
-                    for (const [k, v] of Object.entries(fields)) {{
-                        const sel = selectors[k];
-                        const el = sel ? document.querySelector(sel) : null;
-                        if (!el) {{ ok.push(k + ':not_found'); continue; }}
-                        await typeInto(el, v);
-                        ok.push(k + ':ok');
-                        await new Promise(r => setTimeout(r, 350 + Math.random() * 900));
-                    }}
-
-                    // ToS checkboxes are NOT touched here — _click_tos_checkboxes
-                    // clicks them ONCE each afterwards. A JS click here + a real
-                    // mouse click later double-toggles the box back OFF.
-                    return JSON.stringify({{ fields: ok, checkboxes: 0 }});
-                }}""")
-                state = json.loads(result) if result else {}
-                self._log(f"[Form] JS set result: {state}")
-                tos_checked = bool(state.get("checkboxes", 0) > 0)
-            except Exception as e:
-                self._log_exception("[Form] JS value-set error", e)
-                tos_checked = False
-
-            if tos_checked:
-                self._log("[Form] ToS checkbox clicked")
+            # ── Fill ALL fields with REAL keystrokes, one at a time ──
+            # Discord's React controlled inputs wipe synthetic JS value sets
+            # (the old "all fields :ok but readback empty" failure), and
+            # writing every field back-to-back lets Discord's form state
+            # misalign so values get shuffled between inputs on re-render
+            # (email ending up with the username value). So fill each field
+            # with REAL trusted events — mouse click + select-all + type —
+            # and verify THAT field holds before moving to the next.
+            fields = [
+                ("email", "input[name='email'], input[type='email'], input[autocomplete='email'], input[aria-label*='email' i], input[id*='email' i]", self._email or ""),
+                ("display", "input[name='global_name'], input[aria-label*='display name' i], input[aria-label*='display' i]", display_name),
+                ("username", "input[name='username'], input[autocomplete='username'], input[aria-label*='username' i], input[id*='username' i]", self._username or ""),
+                ("password", "input[name='password'], input[type='password'], input[autocomplete='new-password'], input[aria-label*='password' i]", self._password or ""),
+            ]
+            for fname, sel, val in fields:
+                if not val:
+                    continue
+                for attempt in range(1, 4):
+                    try:
+                        loc = self._page.locator(sel)
+                        if (await loc.count()) == 0:
+                            self._log(f"[Form] Field '{fname}' not found (attempt {attempt}/3)", level="warn")
+                            break
+                        el = loc.first
+                        if not (await el.is_visible()):
+                            self._log(f"[Form] Field '{fname}' not visible yet (attempt {attempt}/3)", level="warn")
+                            await asyncio.sleep(0.6)
+                            continue
+                        # Real trusted click at the field center, then
+                        # select-all + type so React gets genuine key events.
+                        box = await el.bounding_box()
+                        if box and box.get("width") and box.get("height"):
+                            await self._page.mouse.click(
+                                box["x"] + box["width"] / 2,
+                                box["y"] + box["height"] / 2,
+                            )
+                        else:
+                            await el.click()
+                        await asyncio.sleep(random.uniform(0.15, 0.4))
+                        await self._page.keyboard.press("Control+A")
+                        await self._page.keyboard.type(val, delay=35 + random.randint(10, 60))
+                        # Let Discord's validation + React settle, then read.
+                        await asyncio.sleep(0.6)
+                        cur = ""
+                        try:
+                            cur = await el.input_value()
+                        except Exception:
+                            cur = ""
+                        if cur == val:
+                            self._log(f"[Form] Field '{fname}' verified: len={len(val)}")
+                            break
+                        self._log(f"[Form] Field '{fname}' mismatch (attempt {attempt}/3) got_len={len(cur)}", level="warn")
+                        if attempt == 3:
+                            # Last resort for THIS field: native-setter JS write.
+                            try:
+                                await self._page.evaluate(
+                                    """([sel, value]) => {
+                                        const el = document.querySelector(sel);
+                                        if (!el) return false;
+                                        const own = Object.getOwnPropertyDescriptor(el, 'value');
+                                        const proto = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value');
+                                        const setter = (own && own.set) ? own.set : (proto && proto.set) ? proto.set : null;
+                                        if (setter) setter.call(el, value); else el.value = value;
+                                        el.dispatchEvent(new Event('input', { bubbles: true }));
+                                        el.dispatchEvent(new Event('change', { bubbles: true }));
+                                        return true;
+                                    }""",
+                                    [sel.split(",")[0].strip(), val],
+                                )
+                                await asyncio.sleep(0.5)
+                            except Exception as e:
+                                self._log_exception(f"[Form] Field '{fname}' JS fallback failed", e)
+                    except Exception as e:
+                        self._log_exception(f"[Form] Field '{fname}' fill error", e)
+                        break
+                # Human pause between fields — reads like a real signup and
+                # gives Discord's React time to finish re-rendering.
+                await asyncio.sleep(random.uniform(0.4, 1.0))
 
             # ── Quick verify each field ──
             try:
-                v = await self._page.evaluate("""() => {
-                    const g = (sel) => { const e = document.querySelector(sel); return e ? (e.value || '') : ''; };
-                    return JSON.stringify({
-                        email: g('input[name="email"], input[type="email"], input[autocomplete="email"], input[aria-label*="email" i], input[id*="email" i]'),
-                        display: g('input[name="global_name"], input[aria-label*="display" i]'),
-                        username: g('input[name="username"], input[autocomplete="username"], input[aria-label*="username" i], input[id*="username" i]'),
-                        password: g('input[name="password"], input[type="password"], input[autocomplete="new-password"], input[aria-label*="password" i]'),
-                        tos: document.querySelectorAll('input[type="checkbox"]:checked, [role="checkbox"][aria-checked="true"], [role="checkbox"][data-state="checked"]').length,
-                    });
-                }""")
-                vals = json.loads(v) if v else {}
-                ok = (vals.get("email") == self._email
-                      and vals.get("username") == self._username
-                      and vals.get("password") == self._password)
-                if ok:
+                vals = await self._read_form_values()
+                if self._credentials_filled(vals):
                     self._log("[Form] All credential fields verified OK (ToS clicked separately)")
                 else:
                     safe = {
@@ -3148,13 +3140,12 @@ class DiscordAutomation:
                         f"expected={json.dumps({'email': self._email, 'username': self._username, 'password_len': len(self._password or '')})}",
                         level="warn",
                     )
-                    # ── Keyboard fallback ──
+                    # ── Playwright fill() + keystroke fallback ──
                     # If React wiped any field, type it with REAL keystrokes
                     # so the form is genuinely filled before we press Create
-                    # Account (never fake). Playwright type() sends actual
-                    # key events Discord's React handlers process directly.
-                    # Dump EVERY input on the page (type/name/aria/value/
-                    # visibility) so the exact failure is visible in ALL LOGS.
+                    # Account (never fake). Dump EVERY input on the page
+                    # (type/name/aria/value/visibility) so the exact failure
+                    # is visible in ALL LOGS.
                     try:
                         dump = await self._page.evaluate("""() => {
                             return JSON.stringify(Array.from(document.querySelectorAll('input')).map(function(e) {
