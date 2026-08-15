@@ -80,8 +80,8 @@ LIVE_INJECTION = r"""
 </div>
 <script>
 (function(){
-  window.openLive = function(){ var o=document.getElementById('liveOverlay'); o.classList.add('on'); LC.start(); };
-  window.closeLive = function(){ var o=document.getElementById('liveOverlay'); o.classList.remove('on'); LC.stop(); };
+  window.openLive = function(){ var o=document.getElementById('liveOverlay'); if(o.classList.contains('on')){ lcClose(); } else { o.classList.add('on'); LC.start(); } };
+  window.closeLive = function(){ lcClose(); };
   window.openView = function(){ window.openLive(); };
   var nav = document.querySelector('nav');
   if(nav){
@@ -150,6 +150,19 @@ function lcState(){
 }
 function lcStart(){ if(LC.timer) clearTimeout(LC.timer); LC.timer = null; lcState(); }
 function lcStop(){ if(LC.timer){ clearTimeout(LC.timer); LC.timer = null; } }
+function lcClose(){
+  var o = document.getElementById('liveOverlay');
+  o.classList.remove('on');
+  lcStop();
+  LC.cursor = false; LC.keyboard = false;
+  var c = document.getElementById('lcCur'); if(c) c.classList.remove('on');
+  var k = document.getElementById('lcKb'); if(k) k.classList.remove('on');
+  var f = document.getElementById('lcFrame'); if(f){ f.classList.remove('cursor-on'); f.classList.remove('kb-on'); }
+  if(document.fullscreenElement || document.webkitFullscreenElement){
+    if(document.exitFullscreen) document.exitFullscreen().catch(function(){});
+    else if(document.webkitExitFullscreen) document.webkitExitFullscreen();
+  }
+}
 
 function lcAction(a, quiet){
   return fetch('/browser/action?worker=' + LC.worker, {
@@ -229,6 +242,8 @@ function lcCloseBrowser(){
 
 (function(){
   var frame = document.getElementById('lcFrame');
+  var overlay = document.getElementById('liveOverlay');
+  overlay.addEventListener('click', function(e){ if(e.target === overlay) lcClose(); });
   frame.addEventListener('click', function(e){
     if(!LC.cursor) return;
     var p = lcPoint(e);
@@ -248,6 +263,16 @@ function lcCloseBrowser(){
     lcAction({action:'scroll', delta_y: (e.deltaY > 0 ? 160 : -160)}, true);
   }, {passive:false});
   document.addEventListener('keydown', function(e){
+    if(e.key === 'Escape'){
+      var o = document.getElementById('liveOverlay');
+      if(o && o.classList.contains('on')){
+        var ae = document.activeElement;
+        if(ae && (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA')){ ae.blur(); return; }
+        e.preventDefault();
+        lcClose();
+      }
+      return;
+    }
     if(!LC.keyboard) return;
     var o = document.getElementById('liveOverlay');
     if(!o.classList.contains('on')) return;
@@ -256,7 +281,7 @@ function lcCloseBrowser(){
     if(e.ctrlKey || e.metaKey || e.altKey) return;
     var k = e.key;
     if(!k) return;
-    var special = ['Enter','Backspace','Tab','Escape','Delete','ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Home','End','PageUp','PageDown'];
+    var special = ['Enter','Backspace','Tab','Delete','ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Home','End','PageUp','PageDown'];
     if(k.length > 1 && special.indexOf(k) === -1) return;
     e.preventDefault();
     lcAction({action:'key', key:k}, true);

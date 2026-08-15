@@ -760,6 +760,48 @@ def _run_in_loop(coro) -> Optional[object]:
         return None
 
 
+async def _live_navigate_robust(wid: str, bot, url: str) -> dict:
+    """Navigate the live tab and self-heal a dead proxy tunnel.
+
+    A parked/launched browser can sit on an expired residential session —
+    discord.com then shows 'site can't be reached' (ERR_TUNNEL_CONNECTION_FAILED).
+    Rotate to a fresh session (or TOR) and retry, exactly like the worker loop.
+    """
+    st = await live_control.live_navigate(bot, url)
+    if not st.get("error"):
+        return st
+    first_err = st.get("error", "")
+    _log(f"[{wid}] [Live] Navigate failed ({first_err}) — rotating session and retrying", level="warn")
+    for _attempt in range(2):
+        proxy = None
+        try:
+            proxy = await _next_proxy(force=False)
+        except Exception:
+            proxy = None
+        swapped = False
+        if proxy is not None:
+            try:
+                swapped = await bot.switch_proxy(proxy)
+                if not swapped and proxy_pool is not None:
+                    proxy_pool.release(proxy, ok=False)
+            except Exception:
+                if proxy_pool is not None:
+                    proxy_pool.release(proxy, ok=False)
+        elif TOR_FALLBACK and _tor_check():
+            try:
+                swapped = await bot.switch_proxy(None)  # fresh TOR circuit
+            except Exception:
+                swapped = False
+        if not swapped:
+            break
+        st = await live_control.live_navigate(bot, url)
+        if not st.get("error"):
+            _log(f"[{wid}] [Live] Navigation recovered after session rotation")
+            return st
+    st["error"] = f"site unreachable after retries ({first_err})"
+    return st
+
+
 async def _start_live_browser(wid: str, url: str = "") -> dict:
     """Attach (or cold-launch) the worker's real browser for the LIVE tab.
     The bot shares this same page, so the operator can watch it work or take
@@ -793,14 +835,7 @@ async def _start_live_browser(wid: str, url: str = "") -> dict:
                     "viewport_height": 1080, "browser": ENGINE,
                     "screenshot": "", "error": f"browser launch failed: {e}"}
     if url:
-        try:
-            await bot._page.goto(url, wait_until="domcontentloaded",
-                                 timeout=30000)
-        except Exception as e:
-            return {"connected": False, "worker_id": wid, "url": "",
-                    "title": "", "viewport_width": 1920,
-                    "viewport_height": 1080, "browser": ENGINE,
-                    "screenshot": "", "error": f"navigation failed: {e}"}
+        return await _live_navigate_robust(wid, bot, url)
     return await live_control.get_live_state(bot)
 
 
@@ -1038,7 +1073,7 @@ def handle_browser_navigate():
     if bot is None:
         return jsonify({"connected": False, "worker_id": wid,
                         "error": "browser not started"}), 409
-    st = _run_in_loop(live_control.live_navigate(bot, url))
+    st = _run_in_loop(_live_navigate_robust(wid, bot, url))
     if st is None:
         return jsonify({"connected": False, "worker_id": wid,
                         "error": "event loop unavailable"}), 503

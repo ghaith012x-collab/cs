@@ -79,6 +79,13 @@ async def get_live_state(bot) -> dict:
     return meta
 
 
+def _dead_page(url: str) -> bool:
+    """True when the page is a Chromium error/blank page (proxy tunnel died,
+    site unreachable) rather than real content."""
+    u = (url or "").lower()
+    return "chrome-error" in u or "err_tunnel" in u or "err_" in u
+
+
 async def live_navigate(bot, url: str) -> dict:
     page = getattr(bot, "_page", None)
     if page is None:
@@ -92,7 +99,13 @@ async def live_navigate(bot, url: str) -> dict:
         meta = await live_meta(bot)
         meta["error"] = f"navigation failed: {e}"
         return meta
-    return await get_live_state(bot)
+    meta = await get_live_state(bot)
+    # goto() can 'succeed' straight onto a chrome-error page when the proxy
+    # CONNECT tunnel is dead — treat that as a navigation failure so the
+    # caller can rotate the session.
+    if _dead_page(meta.get("url", "")):
+        meta["error"] = "site unreachable (proxy tunnel failed)"
+    return meta
 
 
 async def _live_click(page, x: float, y: float) -> None:
