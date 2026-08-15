@@ -72,7 +72,16 @@ _TOS_TARGET_JS = r"""() => {
         const low = label.toLowerCase().replace(/\s+/g, ' ').trim();
         // Skip the optional marketing / email-updates box — only the ToS
         // agreement is required to enable Continue.
-        if (/email|marketing|updat|news|promotion|newsletter|exclusive|offers|subscribe/.test(low)) continue;
+        // Skip the optional marketing / email-updates box in ANY locale
+        // (English "email updates", Swedish "mejl"/"uppdateringar"/"tips",
+        // Dutch "updates", French "e-mail"...). Only the ToS agreement is
+        // required to enable Continue.
+        if (/mejl|e-post|mail|email|marketing|updat|news|newsletter|promotion|exclusive|offers|subscribe|reklam|tips|erbjudande/.test(low)) continue;
+        // Positive signal: the required box's label mentions terms/agreement
+        // (Swedish "användarvillkor"/"godkänner", Dutch "voorwaarden",
+        // French "conditions", German "akzeptiere", Spanish "acepto"...).
+        if (/terms|service|agreement|conditions|villkor|voorwaarden|condiciones|akzeptiere|accedo|aceito|godk|aksoord|conform/i.test(low)) return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
+        // Fallback: the first unchecked non-marketing box IS the ToS box.
         return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
     }
     return null;
@@ -333,7 +342,7 @@ _MONTH_ALIASES = {
     "mei": 5, "mai": 5, "mayo": 5, "maggio": 5, "maj": 5,
     "juni": 6, "juin": 6, "junio": 6, "giugno": 6,
     "juli": 7, "juillet": 7, "julio": 7, "luglio": 7,
-    "augustus": 8, "août": 8, "aout": 8, "agosto": 8,
+    "augustus": 8, "augusti": 8, "august": 8, "août": 8, "aout": 8, "agosto": 8,
     "september": 9, "septembre": 9, "septiembre": 9, "settembre": 9,
     "oktober": 10, "octobre": 10, "octubre": 10, "ottobre": 10,
     "november": 11, "novembre": 11, "noviembre": 11,
@@ -3316,7 +3325,9 @@ class DiscordAutomation:
             # ── Pre-define DOB so the age-gate JS can use them ──
             month_val = random.randint(1, 12)
             day_val = str(random.randint(1, 28))
-            year_val = str(random.randint(1990, 1999))
+            # Always under 2003 (18+ for any 2026 signup; Discord rejects
+            # underage DOBs, and the operator demands pre-2003 years).
+            year_val = str(random.randint(1990, 2002))
             months = ['January', 'February', 'March', 'April', 'May', 'June',
                      'July', 'August', 'September', 'October', 'November', 'December']
             month_name = months[month_val - 1]

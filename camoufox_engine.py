@@ -143,6 +143,16 @@ class _CamoufoxBrowser:
 
     async def new_context(self, **opts):
         clean = {k: opts[k] for k in _CONTEXT_WHITELIST if opts.get(k) is not None}
+        # Force an ENGLISH identity: Discord localizes the register form from
+        # navigator.language + Accept-Language, and the geo-matched randomized
+        # fingerprints kept serving Swedish/Dutch/French forms whose localized
+        # labels broke the DOB/ToS handling. The operator can still override
+        # with CAMOUFOX_LOCALE (e.g. a proxy-region language).
+        locale = os.environ.get("CAMOUFOX_LOCALE") or "en-US"
+        clean["locale"] = locale
+        headers = dict(opts.get("extra_http_headers") or {})
+        headers.setdefault("Accept-Language", "en-US,en;q=0.9")
+        clean["extra_http_headers"] = headers
         return await AsyncNewContext(self._browser, **clean)
 
     async def close(self):
