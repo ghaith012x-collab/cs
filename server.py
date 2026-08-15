@@ -3042,9 +3042,6 @@ class DiscordAutomation:
             try:
                 result = await self._page.evaluate(f"""async () => {{
                     const fields = {form_json};
-                    const setter = Object.getOwnPropertyDescriptor(
-                        HTMLInputElement.prototype, 'value'
-                    ).set;
                     const selectors = {{
                         email: 'input[name="email"], input[type="email"], input[autocomplete="email"], input[aria-label*="email" i], input[placeholder*="email" i], input[id*="email" i]',
                         display: 'input[name="global_name"], input[aria-label*="display name" i], input[aria-label*="display" i]',
@@ -3058,13 +3055,25 @@ class DiscordAutomation:
                     // (validation, password meter) resets the field to
                     // empty. That was the "only dates fill" bug.
                     const typeInto = async (el, value) => {{
-                        const setter = Object.getOwnPropertyDescriptor(
+                        // React installs its value TRACKER as an own-property
+                        // setter on the ELEMENT, not on the prototype. Calling
+                        // the prototype setter directly bypasses the tracker,
+                        // so React still believes the field is empty and wipes
+                        // our write on its next re-render (validation, DOB,
+                        // password meter). Use the instance's OWN setter when
+                        // present so the tracker records the value, then fire
+                        // input/change so onChange updates React state.
+                        const own = Object.getOwnPropertyDescriptor(el, 'value');
+                        const proto = Object.getOwnPropertyDescriptor(
                             HTMLInputElement.prototype, 'value'
-                        ).set;
+                        );
+                        const setter = (own && own.set) ? own.set
+                                     : (proto && proto.set) ? proto.set : null;
                         el.focus();
                         el.scrollIntoView({{ block: 'center' }});
                         await new Promise(r => setTimeout(r, 140 + Math.random() * 360));
-                        setter.call(el, value);
+                        if (setter) setter.call(el, value);
+                        else el.value = value;
                         el.dispatchEvent(new Event('input', {{ bubbles: true }}));
                         await new Promise(r => setTimeout(r, 120 + Math.random() * 300));
                         el.dispatchEvent(new Event('change', {{ bubbles: true }}));
@@ -3483,9 +3492,12 @@ class DiscordAutomation:
     async def _fill_missing_fields(self, display_name: str) -> None:
         """Robust fallback for fields the JS fill didn't keep.
 
-        Order: Playwright fill() (React-aware input simulation) -> verify ->
-        real keystrokes (click + select-all + type). Every branch logs its
-        exact result so ALL LOGS shows which strategy worked per field.
+        Discord's React re-renders on validation (username availability,
+        email format, password meter) and can wipe a value right after it
+        was written, so a single pass is not enough. Runs up to 3 passes:
+        Playwright fill() (trusted, React-aware input events) then real
+        keystrokes, re-querying the LIVE DOM each time - never a stale
+        element handle - and stops the moment every field holds its value.
         """
         fields = (
             ("input[name='email'], input[type='email'], input[autocomplete='email'], input[aria-label*='email' i], input[id*='email' i]", self._email or ""),
@@ -3493,69 +3505,76 @@ class DiscordAutomation:
             ("input[name='username'], input[autocomplete='username'], input[aria-label*='username' i], input[id*='username' i]", self._username or ""),
             ("input[name='password'], input[type='password'], input[autocomplete='new-password'], input[aria-label*='password' i]", self._password or ""),
         )
-        for sel, val in fields:
-            if not val:
-                continue
-            short = sel.split(",")[0].strip()
+        for _pass in range(1, 4):
+            for sel, val in fields:
+                if not val:
+                    continue
+                short = sel.split(",")[0].strip()
+                try:
+                    loc = self._page.locator(sel)
+                    if (await loc.count()) == 0:
+                        self._log(f"[Form] Fallback fill: selector not found ({short})", level="warn")
+                        continue
+                    el = loc.first
+                    # Only type into a field that is actually rendered + visible.
+                    # Typing into a detached / not-yet-hydrated element is the
+                    # "typed random shit, nothing filled" failure mode.
+                    if not (await el.is_visible()):
+                        self._log(f"[Form] Fallback fill skipped ({short}): not visible yet", level="warn")
+                        continue
+                    try:
+                        cur = await el.input_value()
+                    except Exception:
+                        cur = ""
+                    if cur == val:
+                        continue
+                    # Strategy 1: Playwright fill() - trusted input events
+                    # that React's onChange actually processes.
+                    try:
+                        await el.fill(val)
+                    except Exception:
+                        pass
+                    try:
+                        cur = await el.input_value()
+                    except Exception:
+                        cur = ""
+                    if cur != val:
+                        # Strategy 2: real keystrokes (trusted key events).
+                        try:
+                            await el.click()
+                            await el.press("Control+A")
+                            await el.type(val, delay=45 + random.randint(15, 70))
+                        except Exception:
+                            pass
+                    self._log(f"[Form] Fallback fill (pass {_pass}): {short} len={len(val)}")
+                except Exception as e:
+                    self._log_exception(f"[Form] Fallback fill failed for {short}", e)
+
+            # Let Discord's React finish re-rendering, then read the LIVE
+            # DOM - detached handles lie, the DOM is the truth.
             try:
-                loc = self._page.locator(sel)
-                if (await loc.count()) == 0:
-                    self._log(f"[Form] Fallback fill: selector not found ({short})", level="warn")
-                    continue
-                el = loc.first
-                # Only type into a field that is actually rendered + visible.
-                # Typing into a detached / not-yet-hydrated element is the
-                # "typed random shit, nothing filled" failure mode.
-                if not (await el.is_visible()):
-                    self._log(f"[Form] Fallback fill skipped ({short}): not visible yet", level="warn")
-                    continue
-                if await el.input_value() == val:
-                    self._log(f"[Form] Fallback fill: {short} already correct, skipping")
-                    continue
-                # Strategy 1: Playwright fill() — simulates a real input
-                # event that React's onChange actually processes.
-                try:
-                    await el.fill(val)
-                except Exception:
-                    pass
-                try:
-                    cur = await el.input_value()
-                except Exception:
-                    cur = ""
-                if cur == val:
-                    self._log(f"[Form] Fallback fill: {short} filled via fill()")
-                    continue
-                # Strategy 2: real keystrokes (trusted key events).
-                await el.click()
-                await el.press("Control+A")
-                await el.type(val, delay=45 + random.randint(15, 70))
-                try:
-                    cur = await el.input_value()
-                except Exception:
-                    cur = ""
-                self._log(f"[Form] Fallback fill: {short} typed, value len={len(cur)} "
-                          f"({'OK' if cur == val else 'STILL WRONG'})")
-            except Exception as e:
-                self._log_exception(f"[Form] Fallback fill failed for {short}", e)
-        try:
-            await self._page.wait_for_timeout(500)
-        except Exception:
-            pass
-        # Final readback after all strategies ran — ALL LOGS shows exactly
-        # which fields ended up correct and which are still empty.
-        try:
-            final = await self._page.evaluate("""() => {
-                const g = (sel) => { const e = document.querySelector(sel); return e ? (e.value || '') : ''; };
-                return JSON.stringify({
-                    email: g('input[name="email"], input[type="email"], input[aria-label*="email" i], input[id*="email" i]'),
-                    username: g('input[name="username"], input[aria-label*="username" i], input[id*="username" i]'),
-                    password: g('input[name="password"], input[type="password"], input[aria-label*="password" i]'),
-                    tos: document.querySelectorAll('input[type="checkbox"]:checked, [role="checkbox"][aria-checked="true"]').length,
-                });
-            }""")
-            self._log(f"[Form] AFTER FALLBACK: {final}")
-        except Exception as _fe:
-            self._log_exception("[Form] AFTER FALLBACK read failed", _fe)
+                await self._page.wait_for_timeout(800)
+            except Exception:
+                pass
+            try:
+                final = await self._page.evaluate("""() => {
+                    const g = (sel) => { const e = document.querySelector(sel); return e ? (e.value || '') : ''; };
+                    return JSON.stringify({
+                        email: g('input[name="email"], input[type="email"], input[aria-label*="email" i], input[id*="email" i]'),
+                        username: g('input[name="username"], input[aria-label*="username" i], input[id*="username" i]'),
+                        password: g('input[name="password"], input[type="password"], input[aria-label*="password" i]'),
+                        tos: document.querySelectorAll('input[type="checkbox"]:checked, [role="checkbox"][aria-checked="true"]').length,
+                    });
+                }""")
+                live = json.loads(final) if final else {}
+                self._log(f"[Form] AFTER FALLBACK (pass {_pass}): {live}")
+                if (live.get("email") == self._email
+                        and live.get("username") == self._username
+                        and live.get("password") == self._password):
+                    break
+            except Exception as _fe:
+                self._log_exception("[Form] AFTER FALLBACK read failed", _fe)
+                break
 
     async def _human_pause(self) -> None:
         await asyncio.sleep(random.uniform(0.08, 0.2))
