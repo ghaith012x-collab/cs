@@ -612,6 +612,14 @@ class DiscordAutomation:
         if print_console:
             print(f"[{entry['time']}] [{level.upper()}] {tagged}", flush=True)
 
+    def _log_exception(self, message: str, exc: Exception) -> None:
+        # Record the EXACT problem (exception class + full traceback) into
+        # the activity log, so the dashboard's ALL LOGS toggle shows why a
+        # step failed instead of only a stderr traceback it never sees.
+        import traceback
+        tb = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+        self._log(f"{message} — {tb.rstrip()}", level="error")
+
     def get_activity_log(self) -> list:
         return self._activity_log
 
@@ -2817,9 +2825,7 @@ class DiscordAutomation:
 
 
         except Exception as e:
-            self._log(f"DOB error for {label}: {e}")
-            import traceback
-            traceback.print_exc()
+            self._log_exception(f"DOB error for {label}", e)
             return False
 
     async def _rate_limited(self) -> bool:
@@ -2849,6 +2855,7 @@ class DiscordAutomation:
         start = time.time()
         last_log = -1.0
         stable_since = None
+        eval_failed_logged = False
         while True:
             if self._stopped.is_set():
                 self._nav_error = "stopped by user"
@@ -2861,7 +2868,10 @@ class DiscordAutomation:
             elapsed = time.time() - start
             try:
                 st = json.loads(await self._page.evaluate(_FORM_READY_JS))
-            except Exception:
+            except Exception as e:
+                if not eval_failed_logged:
+                    eval_failed_logged = True
+                    self._log_exception("[Form] Read form-ready state failed", e)
                 st = {}
             email = bool(st.get("email"))
             username = bool(st.get("username"))
@@ -3011,7 +3021,7 @@ class DiscordAutomation:
                 self._log(f"[Form] JS set result: {state}")
                 tos_checked = bool(state.get("checkboxes", 0) > 0)
             except Exception as e:
-                self._log(f"[Form] JS value-set error: {e}", level="error")
+                self._log_exception("[Form] JS value-set error", e)
                 tos_checked = False
 
             if tos_checked:
@@ -3037,18 +3047,26 @@ class DiscordAutomation:
                 if ok:
                     self._log("[Form] All fields + ToS verified OK")
                 else:
-                    self._log(f"[Form] VERIFY: email_match={vals.get('email','?')[:20]==(self._email or '')[:20]} "
-                              f"user_match={vals.get('username','')==self._username} "
-                              f"pass_match={vals.get('password','')==self._password} "
-                              f"tos={vals.get('tos',0)}", level="warn")
+                    safe = {
+                        "email": vals.get("email", ""),
+                        "display": vals.get("display", ""),
+                        "username": vals.get("username", ""),
+                        "password_len": len(vals.get("password") or ""),
+                        "tos": vals.get("tos", 0),
+                    }
+                    self._log(
+                        f"[Form] VERIFY MISMATCH: readback={json.dumps(safe)} "
+                        f"expected={json.dumps({'email': self._email, 'username': self._username, 'password_len': len(self._password or '')})}",
+                        level="warn",
+                    )
                     # ── Keyboard fallback ──
                     # If React wiped any field, type it with REAL keystrokes
                     # so the form is genuinely filled before we press Create
                     # Account (never fake). Playwright type() sends actual
                     # key events Discord's React handlers process directly.
                     await self._fill_missing_fields(display_name)
-            except Exception:
-                pass
+            except Exception as e:
+                self._log_exception("[Form] Verify read-back failed", e)
 
             # ── DOB ──
             self._log(f"DOB: {month_name} {day_val}, {year_val}")
@@ -3073,8 +3091,8 @@ class DiscordAutomation:
                     return { native: checked, role: roleCbs.length };
                 }""")
                 self._log(f"[Form] Checkbox state: native={verify.get('native',0)} role={verify.get('role',0)}")
-            except Exception:
-                pass
+            except Exception as e:
+                self._log_exception("[Form] Checkbox state read failed", e)
 
             # ── REAL ToS click — ONE pass, exactly one click per box ──
             # Without a genuinely checked ToS, "Continue" stays disabled and
@@ -3103,8 +3121,8 @@ class DiscordAutomation:
                         if target:
                             await self._page.mouse.click(target["x"], target["y"])
                             self._log("[Form] Re-checked ToS checkbox on retry")
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        self._log_exception("[Form] ToS re-check on retry failed", e)
                     await asyncio.sleep(1.0)  # Let React process
 
                 try:
@@ -3245,15 +3263,16 @@ class DiscordAutomation:
                             }
                             return false;
                         }""".replace('__LOGIN_LINK_GUARD__', _LOGIN_LINK_GUARD)))
-                    except Exception:
+                    except Exception as e:
+                        self._log_exception("[Form] Enter-safety check failed", e)
                         safe_enter = False
                     if safe_enter:
                         try:
                             await self._page.locator('input[name="password"]').press('Enter')
                             self._log("Pressed Enter on password field")
                             create_clicked = True
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            self._log_exception("[Form] Enter key fallback failed", e)
 
             if create_clicked:
                 self._log("[OK] Create Account submitted - waiting for response...")
@@ -3276,9 +3295,7 @@ class DiscordAutomation:
 
 
         except Exception as e:
-            self._log(f"Form filling error: {e}", level="error")
-            import traceback
-            traceback.print_exc()
+            self._log_exception("Form filling error", e)
             return False
 
     async def _click_tos_checkboxes(self) -> int:
@@ -3351,24 +3368,28 @@ class DiscordAutomation:
         for sel, val in fields:
             if not val:
                 continue
+            short = sel.split(",")[0].strip()
             try:
                 loc = self._page.locator(sel)
                 if (await loc.count()) == 0:
+                    self._log(f"[Form] Fallback fill: selector not found ({short})", level="warn")
                     continue
                 el = loc.first
                 # Only type into a field that is actually rendered + visible.
                 # Typing into a detached / not-yet-hydrated element is the
                 # "typed random shit, nothing filled" failure mode.
                 if not (await el.is_visible()):
-                    self._log(f"[Form] Fallback fill skipped ({sel.split(',')[0].strip()}): not visible yet", level="warn")
+                    self._log(f"[Form] Fallback fill skipped ({short}): not visible yet", level="warn")
                     continue
                 if await el.input_value() == val:
+                    self._log(f"[Form] Fallback fill: {short} already correct, skipping")
                     continue
                 await el.click()
                 await el.press("Control+A")
                 await el.type(val, delay=45 + random.randint(15, 70))
-            except Exception:
-                pass
+                self._log(f"[Form] Fallback fill: {short} typed with real keystrokes")
+            except Exception as e:
+                self._log_exception(f"[Form] Fallback fill failed for {short}", e)
         try:
             await self._page.wait_for_timeout(500)
         except Exception:
