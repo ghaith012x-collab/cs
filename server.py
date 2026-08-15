@@ -1326,7 +1326,21 @@ class DiscordAutomation:
         except asyncio.TimeoutError:
             elapsed = time.time() - t0
             self._log(f"[Nav] Page.goto HARD TIMEOUT after {elapsed:.1f}s — proxy likely dead")
-
+        except Exception as e:
+            # The engine raises its OWN TimeoutError - Playwright's class is
+            # NOT asyncio.TimeoutError, so it used to escape this handler,
+            # blow out of _goto_register into the mail branch of
+            # start_discord_signup, wipe the fresh inbox and abort the whole
+            # attempt as "No email available". It can also raise transport
+            # errors when the circuit dies mid-commit. None of that is fatal
+            # here: the render-wait loop below is the real gate and rotates
+            # on chrome-error / dead reads, so a slow-but-alive TOR circuit
+            # gets to finish loading instead of being killed at 30s.
+            elapsed = time.time() - t0
+            if "timeout" in type(e).__name__.lower() or "timeout" in str(e).lower():
+                self._log(f"[Nav] Page.goto timeout ({type(e).__name__}) after {elapsed:.1f}s - continuing to render-wait")
+            else:
+                self._log(f"[Nav] Page.goto error ({type(e).__name__}: {e}) - continuing to render-wait", level="warn")
         # ── Check what we got ──
         try:
             page_title = await asyncio.wait_for(self._page.title(), timeout=3.0)
@@ -1727,7 +1741,6 @@ class DiscordAutomation:
         # duckmail hiccups.
         if not self._email:
             self._log(f"[Mail] No email configured - creating duckmail.sbs inbox (@{self._domain})...")
-            nav_ok = False
             try:
                 # duckmail is a pure REST client (api.duckmail.sbs, Hydra
                 # API) — no browser involved. The inbox is created on the
@@ -1748,8 +1761,6 @@ class DiscordAutomation:
                         break
                     self._log(f"[Mail] Inbox creation failed — retrying ({mail_try + 1}/2)...", level="warn")
 
-                # NOW navigate to Discord — inbox is ready (or we gave up)
-                nav_ok = await self._goto_register()
             except Exception as e:
                 self._log(f"[Mail] duckmail inbox error: {e}", level="error")
                 self._email = ""
@@ -1758,9 +1769,24 @@ class DiscordAutomation:
                 self._mail_failed = True
                 self._log("[FAIL] No email available - aborting signup", level="error")
                 return False
+            # NOW navigate to Discord - inbox is ready. Navigation is a
+            # separate concern from inbox creation: a dead circuit / 429 /
+            # block is handled INSIDE _goto_register (it never raises) and
+            # rotates the session. It must never wipe the freshly created
+            # inbox or get misreported as an email failure - that was the
+            # "duckmail inbox error: Page.goto ... No email available" lie
+            # that aborted every attempt the moment a TOR circuit was slow
+            # to commit.
+            nav_ok = await self._goto_register()
             if not nav_ok:
+                # The inbox is still unused, but app.py tears the mail client
+                # down between attempts, so a stale address cannot be verified
+                # on the next attempt. Drop it so the next attempt mints a
+                # fresh inbox on the new circuit.
+                self._email = ""
                 self._log("[FAIL] Could not navigate to Discord /register - aborting", level="error")
                 return False
+
         else:
             self._log(f"Using configured email: {self._email}")
             if not await self._goto_register():
