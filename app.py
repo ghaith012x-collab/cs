@@ -48,7 +48,6 @@ TOR_FALLBACK = (os.environ.get("TOR_FALLBACK") or "").strip().lower() not in ("0
 
 from server import DiscordAutomation, _tor_check, ENGINE
 import live_control
-from live_ui import LIVE_INJECTION
 
 # ── Global state (Flask thread + asyncio thread) ──
 
@@ -980,10 +979,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def handle_root():
-    html = DASHBOARD_HTML
-    if "</body>" in html:
-        html = html.replace("</body>", LIVE_INJECTION + "</body>", 1)
-    return Response(html, content_type='text/html')
+    return Response(DASHBOARD_HTML, content_type='text/html')
 
 
 @app.route('/start', methods=['POST'])
