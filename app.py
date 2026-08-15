@@ -867,6 +867,23 @@ async def _start_live_browser(wid: str, url: str = "",
     _workers[wid] = state
     if not url:
         url = "https://discord.com/register"
+    # The gen is already driving this SAME browser — never relaunch a second
+    # Chromium on top of it and never yank it off the page it is filling.
+    # Just report what the worker is doing so the LIVE tab shows it live.
+    if state.get("status") in ("starting", "running"):
+        bot = state.get("bot")
+        if bot is not None:
+            st = await live_control.get_live_state(bot)
+            st["launching"] = state.get("status") == "starting"
+            st["status"] = state.get("status", "")
+            return st
+        # Worker is mid-launch (bot not created yet) — wait for it instead of
+        # racing it and leaking a second Chromium.
+        return {"connected": False, "worker_id": wid, "url": url,
+                "title": "", "viewport_width": 1920,
+                "viewport_height": 1080, "browser": ENGINE,
+                "screenshot": "", "error": "", "launching": True,
+                "status": state.get("status", "")}
     if state.get("launching"):
         # A launch is already in flight — report it instead of starting a
         # second Chromium on top of the first (which would leak the first).
@@ -1157,6 +1174,10 @@ def handle_browser_state():
         s["last_shot_b64"] = st["screenshot"]
     elif s.get("last_shot_b64"):
         st["screenshot"] = s["last_shot_b64"]
+    # Surface the gen's status so the LIVE tab shows "launching browser…"
+    # during START instead of a misleading "browser not started".
+    st["launching"] = bool(s.get("launching") or s.get("status") == "starting")
+    st["status"] = s.get("status", "")
     return jsonify(st)
 
 

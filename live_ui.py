@@ -114,7 +114,7 @@ function lcRender(st){
     st.screenshot = prev.screenshot;
   }
   LC.last = st;
-  var launching = LC.launching || !!st.launching;
+  var launching = LC.launching || !!st.launching || st.status === 'starting';
   var dot = document.getElementById('lcDot');
   if(dot) dot.className = 'dot' + (st.connected ? ' on' : '');
   var stEl = document.getElementById('lcState');
@@ -142,8 +142,8 @@ function lcRender(st){
     if(ph){
       ph.style.display = 'flex';
       if(st.connected && st.error) ph.textContent = '⚠ ' + st.error;
-      else if(st.connected) ph.textContent = 'waiting for frame…';
       else if(launching) ph.textContent = 'launching browser…';
+      else if(st.connected) ph.textContent = 'waiting for frame…';
       else ph.textContent = 'browser not started — press LAUNCH';
     }
   }
