@@ -2997,7 +2997,6 @@ class DiscordAutomation:
                         el.scrollIntoView({{ block: 'center' }});
                         await new Promise(r => setTimeout(r, 140 + Math.random() * 360));
                         setter.call(el, value);
-                        try {{ if (el._valueTracker) el._valueTracker.setValue(el.value); }} catch (e) {{}}
                         el.dispatchEvent(new Event('input', {{ bubbles: true }}));
                         await new Promise(r => setTimeout(r, 120 + Math.random() * 300));
                         el.dispatchEvent(new Event('change', {{ bubbles: true }}));
@@ -3064,6 +3063,25 @@ class DiscordAutomation:
                     # so the form is genuinely filled before we press Create
                     # Account (never fake). Playwright type() sends actual
                     # key events Discord's React handlers process directly.
+                    # Dump EVERY input on the page (type/name/aria/value/
+                    # visibility) so the exact failure is visible in ALL LOGS.
+                    try:
+                        dump = await self._page.evaluate("""() => {
+                            return JSON.stringify(Array.from(document.querySelectorAll('input')).map(function(e) {
+                                return {
+                                    type: e.type || '',
+                                    name: e.name || '',
+                                    id: e.id || '',
+                                    aria: e.getAttribute('aria-label') || '',
+                                    placeholder: e.placeholder || '',
+                                    value: e.value || '',
+                                    visible: e.offsetParent !== null
+                                };
+                            }));
+                        }""")
+                        self._log(f"[Form] INPUT DUMP: {dump}", level="warn")
+                    except Exception as _de:
+                        self._log_exception("[Form] INPUT DUMP failed", _de)
                     await self._fill_missing_fields(display_name)
             except Exception as e:
                 self._log_exception("[Form] Verify read-back failed", e)
@@ -3358,7 +3376,12 @@ class DiscordAutomation:
         return 0
 
     async def _fill_missing_fields(self, display_name: str) -> None:
-        """Real-keystroke fallback for fields the JS fill didn't keep."""
+        """Robust fallback for fields the JS fill didn't keep.
+
+        Order: Playwright fill() (React-aware input simulation) -> verify ->
+        real keystrokes (click + select-all + type). Every branch logs its
+        exact result so ALL LOGS shows which strategy worked per field.
+        """
         fields = (
             ("input[name='email'], input[type='email'], input[autocomplete='email'], input[aria-label*='email' i], input[id*='email' i]", self._email or ""),
             ("input[name='global_name'], input[aria-label*='display name' i], input[aria-label*='display' i]", display_name),
@@ -3384,16 +3407,50 @@ class DiscordAutomation:
                 if await el.input_value() == val:
                     self._log(f"[Form] Fallback fill: {short} already correct, skipping")
                     continue
+                # Strategy 1: Playwright fill() — simulates a real input
+                # event that React's onChange actually processes.
+                try:
+                    await el.fill(val)
+                except Exception:
+                    pass
+                try:
+                    cur = await el.input_value()
+                except Exception:
+                    cur = ""
+                if cur == val:
+                    self._log(f"[Form] Fallback fill: {short} filled via fill()")
+                    continue
+                # Strategy 2: real keystrokes (trusted key events).
                 await el.click()
                 await el.press("Control+A")
                 await el.type(val, delay=45 + random.randint(15, 70))
-                self._log(f"[Form] Fallback fill: {short} typed with real keystrokes")
+                try:
+                    cur = await el.input_value()
+                except Exception:
+                    cur = ""
+                self._log(f"[Form] Fallback fill: {short} typed, value len={len(cur)} "
+                          f"({'OK' if cur == val else 'STILL WRONG'})")
             except Exception as e:
                 self._log_exception(f"[Form] Fallback fill failed for {short}", e)
         try:
             await self._page.wait_for_timeout(500)
         except Exception:
             pass
+        # Final readback after all strategies ran — ALL LOGS shows exactly
+        # which fields ended up correct and which are still empty.
+        try:
+            final = await self._page.evaluate("""() => {
+                const g = (sel) => { const e = document.querySelector(sel); return e ? (e.value || '') : ''; };
+                return JSON.stringify({
+                    email: g('input[name="email"], input[type="email"], input[aria-label*="email" i], input[id*="email" i]'),
+                    username: g('input[name="username"], input[aria-label*="username" i], input[id*="username" i]'),
+                    password: g('input[name="password"], input[type="password"], input[aria-label*="password" i]'),
+                    tos: document.querySelectorAll('input[type="checkbox"]:checked, [role="checkbox"][aria-checked="true"]').length,
+                });
+            }""")
+            self._log(f"[Form] AFTER FALLBACK: {final}")
+        except Exception as _fe:
+            self._log_exception("[Form] AFTER FALLBACK read failed", _fe)
 
     async def _human_pause(self) -> None:
         await asyncio.sleep(random.uniform(0.08, 0.2))
