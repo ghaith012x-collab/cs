@@ -164,7 +164,7 @@ _FORM_READY_JS = r"""() => {
     const DOB_LABELS = __DOB_LABELS__;
     const seen = {};
     const controls = Array.from(document.querySelectorAll(
-        'select, [role="combobox"], [role="listbox"], [class*="select" i], [class*="dropdown" i], [class*="control" i]'
+        'select, [role="combobox"], [role="listbox"], [role="button"], [class*="select" i], [class*="dropdown" i], [class*="control" i]'
     ));
     for (const el of controls) {
         if (!vis(el)) continue;
@@ -369,17 +369,34 @@ def _dob_text_matches(text: str, option_text: str) -> bool:
 
 # Locate a DOB dropdown control by its localized label ("Day"/"Month"/"Year"
 # with the locale alias table — Dutch "Dag/Maand/Jaar", French
-# "Jour/Mois/Année", ...). Scans ONLY control-like elements (role=button,
+# "Jour/Mois/Année", ...). Scans control-like elements (role=button,
 # combobox, select/dropdown/control classes, native select) so page body
-# copy can never be mistaken for a label. Picks the DEEPEST match — the
+# copy can never be mistaken for a label, with a text-walker fallback for
+# controls that carry none of those markers. Picks the DEEPEST match — the
 # individual control, never the DOB group container that holds all three
 # labels. Marks the element with data-dob-target so the caller can drive it
-# with trusted Playwright clicks.
-_DOB_LOCATE_JS = r"""([label, aliases]) => {
+# with trusted Playwright clicks. Also accepts the selected VALUE text
+# (alias-aware) so a control whose placeholder was replaced by the value
+# ("Januari" instead of "Maand") is still found for verification.
+_DOB_LOCATE_JS = r"""([label, aliases, valueText, monthAliases]) => {
     const norm = (s) => (s == null ? '' : String(s)).replace(/\s+/g, ' ').trim();
     const low = (s) => norm(s).toLowerCase();
     const labels = (aliases && aliases[label]) || [label.toLowerCase()];
     const re = new RegExp('(^|[^a-z0-9])(' + labels.join('|') + ')([^a-z0-9]|$)');
+    const MONTHS = ['january','february','march','april','may','june','july',
+        'august','september','october','november','december'];
+    const want = valueText ? low(valueText) : null;
+    const wantNum = want ? ((MONTHS.indexOf(want) + 1) || (monthAliases && monthAliases[want]) || (parseInt(valueText, 10) || 0)) : 0;
+    const valueHits = (t) => {
+        if (!want || !t) return false;
+        if (t === want) return true;
+        if (wantNum && ((monthAliases && monthAliases[t]) === wantNum || MONTHS.indexOf(t) + 1 === wantNum)) return true;
+        if (wantNum) {
+            const n = String(wantNum);
+            return t === n || t === (n.length === 1 ? '0' + n : n);
+        }
+        return false;
+    };
     const hits = [];
     const scan = document.querySelectorAll(
         '[role="button"], [role="combobox"], [class*="select" i], [class*="dropdown" i], [class*="control" i], select'
@@ -390,11 +407,31 @@ _DOB_LOCATE_JS = r"""([label, aliases]) => {
                              (el.getAttribute('placeholder') || '') + ' ' +
                              (el.getAttribute('data-label') || '') + ' ' +
                              (el.textContent || '').slice(0, 80)));
-        if (!re.test(acc)) continue;
-        let depth = 0;
-        let p = el.parentElement;
-        while (p) { depth++; p = p.parentElement; }
-        hits.push({ el: el, depth: depth });
+        if (re.test(acc) || valueHits(low(norm(el.textContent || '')).slice(0, 80))) {
+            let depth = 0;
+            let p = el.parentElement;
+            while (p) { depth++; p = p.parentElement; }
+            hits.push({ el: el, depth: depth });
+        }
+    }
+    // Text-walker fallback: controls with none of the role/class markers
+    // (their placeholder text still identifies them).
+    if (!hits.length) {
+        const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null);
+        let node;
+        while ((node = walker.nextNode())) {
+            const t = low(norm(node.textContent));
+            if (!re.test(t)) continue;
+            let p = node.parentElement;
+            for (let i = 0; p && i < 6; i++) {
+                if (p.offsetParent !== null && (p.textContent || '').trim().length <= 40) {
+                    hits.push({ el: p, depth: 0 });
+                    break;
+                }
+                p = p.parentElement;
+            }
+            if (hits.length) break;
+        }
     }
     if (!hits.length) return null;
     hits.sort((a, b) => b.depth - a.depth);
@@ -404,7 +441,7 @@ _DOB_LOCATE_JS = r"""([label, aliases]) => {
 }"""
 
 # Options of an open DOB menu (custom dropdowns and native <select>).
-_DOB_OPTION_SEL = '[role="option"], [id*="option" i], [class*="option" i], option, li'
+_DOB_OPTION_SEL = '[role="option"], [id*="option" i], [class*="option" i], option, li, [role="menuitem"]'
 
 # Find the index (within _DOB_OPTION_SEL) of the option that represents
 # `optionText` in the page's locale. Months resolve to their numeric index so
@@ -438,6 +475,42 @@ _DOB_OPTION_INDEX_JS = r"""([optionText, monthAliases]) => {
     return -1;
 }"""
 
+# Coordinates fallback for option selection: any visible element (leaf-ish)
+# whose text represents `optionText` in the page's locale. Handles menus whose
+# options carry none of the usual role/class markers. Returns viewport center
+# coords for a trusted page.mouse.click.
+_DOB_OPTION_POS_JS = r"""([optionText, monthAliases]) => {
+    const norm = (s) => (s == null ? '' : String(s)).replace(/\s+/g, ' ').trim();
+    const low = (s) => norm(s).toLowerCase();
+    const MONTHS = ['january','february','march','april','may','june','july',
+        'august','september','october','november','december'];
+    const wantStr = low(optionText);
+    const wantNum = (MONTHS.indexOf(wantStr) + 1) || monthAliases[wantStr] || (parseInt(optionText, 10) || 0);
+    const matches = (t, v) => {
+        const a = low(t || ''); const b = low(v || '');
+        if (!a && !b) return false;
+        if (a === wantStr) return true;
+        if (wantNum && (monthAliases[a] === wantNum || MONTHS.indexOf(a) + 1 === wantNum)) return true;
+        if (!wantNum) return false;
+        const n = String(wantNum);
+        const p = n.length === 1 ? '0' + n : n;
+        return a === n || b === n || a === p || b === p;
+    };
+    const all = document.querySelectorAll('[role="option"], [role="menuitem"], li, div, span');
+    for (const el of all) {
+        if (!el.offsetParent) continue;
+        el.scrollIntoView({ block: 'nearest' });
+        const r = el.getBoundingClientRect();
+        if (r.width < 5 || r.height < 5) continue;
+        const t = norm(el.textContent || el.getAttribute('aria-label') || '');
+        if (!t) continue;
+        const v = el.getAttribute('data-value') || el.getAttribute('value') || t;
+        if (matches(t, v)) {
+            return { x: r.left + r.width / 2, y: r.top + r.height / 2, text: t.slice(0, 30) };
+        }
+    }
+    return null;
+}"""
 
 
 # React-safe value write: native prototype setter (REPLACES the whole value —
@@ -2802,56 +2875,40 @@ class DiscordAutomation:
         ignore JS-dispatched synthetic mouse events — the old all-JS click
         strategies opened no menu at all, so the form was submitted with the
         placeholders still showing and Discord rejected it. This locates the
-        control by its localized label, opens it with a trusted Playwright
-        click, matches the option locale-aware (months resolve to their
-        numeric index, so "January" picks the Dutch "Januari"), and selects it
-        with a trusted click. Falls back to the JS setter for native
-        <select> / legacy builds.
+        control by its localized label (with a text-walker fallback for
+        controls that carry no role/class markers), opens it with a trusted
+        Playwright click, matches the option locale-aware (months resolve to
+        their numeric index, so "January" picks the Dutch "Januari"), and
+        selects it with a trusted click (index click, then a coordinates
+        fallback for options with no usual markers). Falls back to the JS
+        setter for native <select> / legacy builds.
         """
         try:
             self._log(f"Selecting {label}: {option_text}")
 
-            # The register SPA hydrates the DOB dropdowns a beat after the
-            # credential inputs. Poll briefly for a DOB control to exist
-            # before attempting any click.
-            control_ready = False
-            for _probe in range(8):
-                try:
-                    _st = await self._form_ready()
-                except Exception:
-                    _st = {}
-                if int(_st.get("dob") or 0) >= 1:
-                    control_ready = True
-                    break
-                await asyncio.sleep(0.4)
-            if not control_ready:
-                self._log(f"[Form] DOB control for {label} not rendered after ~3s — aborting", level="warn")
-                return False
-
-            # ── Locate the control by its localized label ──
+            # Gate on the CONTROL ITSELF (not _form_ready's DOB scan, which
+            # misses role="button" controls and could abort before anything
+            # was attempted).
             located = None
-            try:
-                located = await self._page.evaluate(
-                    _DOB_LOCATE_JS, [label, _DOB_LABEL_ALIASES])
-            except Exception as e:
-                self._log_exception(f"[DOB] locate {label} failed", e)
+            for _probe in range(12):
+                try:
+                    located = await self._page.evaluate(
+                        _DOB_LOCATE_JS, [label, _DOB_LABEL_ALIASES, None, None])
+                except Exception:
+                    located = None
+                if located:
+                    break
+                await asyncio.sleep(0.35)
             if not located:
-                self._log(f"[DOB] no control located for {label} — JS fallback", level="warn")
+                self._log(f"[DOB] control for {label} not found after ~4s — JS fallback", level="warn")
                 return await self._dob_js_fallback(label, option_text)
 
-            marker = f'[data-dob-target="{label}"]'
             is_select = located.get("tag") == "select"
-            ctrl = self._page.locator(marker)
-            try:
-                if (await ctrl.count()) == 0:
-                    self._log(f"[DOB] control for {label} vanished — JS fallback", level="warn")
-                    return await self._dob_js_fallback(label, option_text)
-            except Exception:
-                return await self._dob_js_fallback(label, option_text)
 
             # ── Native <select>: select_option by matched index ──
             if is_select:
                 try:
+                    ctrl = self._page.locator(f'[data-dob-target="{label}"]')
                     idx = await self._page.evaluate(
                         _DOB_OPTION_INDEX_JS.replace("__OPT_SEL__", json.dumps(_DOB_OPTION_SEL)),
                         [option_text, _MONTH_ALIASES])
@@ -2866,6 +2923,17 @@ class DiscordAutomation:
 
             # ── Custom dropdown: trusted click to open, then click option ──
             for attempt in range(1, 3):
+                # Re-locate every attempt: React may have replaced the
+                # control after the previous attempt.
+                try:
+                    located = await self._page.evaluate(
+                        _DOB_LOCATE_JS, [label, _DOB_LABEL_ALIASES, None, None])
+                except Exception:
+                    located = None
+                if not located:
+                    self._log(f"[DOB] control for {label} vanished — JS fallback", level="warn")
+                    return await self._dob_js_fallback(label, option_text)
+                ctrl = self._page.locator(f'[data-dob-target="{label}"]')
                 try:
                     await ctrl.scroll_into_view_if_needed()
                     await ctrl.click()
@@ -2874,10 +2942,11 @@ class DiscordAutomation:
                     await asyncio.sleep(0.5)
                     continue
                 # Options render async after the menu opens — poll for the
-                # matching option's index.
-                idx = -1
+                # matching option (index click first, coordinates fallback).
+                picked = False
                 for _poll in range(8):
                     await asyncio.sleep(0.3)
+                    idx = -1
                     try:
                         idx = await self._page.evaluate(
                             _DOB_OPTION_INDEX_JS.replace("__OPT_SEL__", json.dumps(_DOB_OPTION_SEL)),
@@ -2885,19 +2954,24 @@ class DiscordAutomation:
                     except Exception:
                         idx = -1
                     if isinstance(idx, int) and idx >= 0:
-                        break
-                if not (isinstance(idx, int) and idx >= 0):
-                    # Close the menu before retrying (Escape), then reopen.
+                        try:
+                            await self._page.locator(_DOB_OPTION_SEL).nth(idx).click()
+                            picked = True
+                            break
+                        except Exception as e:
+                            self._log(f"[DOB] option click for {label} failed: {e}", level="warn")
                     try:
-                        await self._page.keyboard.press("Escape")
+                        pos = await self._page.evaluate(
+                            _DOB_OPTION_POS_JS, [option_text, _MONTH_ALIASES])
                     except Exception:
-                        pass
-                    await asyncio.sleep(0.3)
-                    continue
-                try:
-                    await self._page.locator(_DOB_OPTION_SEL).nth(idx).click()
-                except Exception as e:
-                    self._log(f"[DOB] option click for {label} failed: {e}", level="warn")
+                        pos = None
+                    if pos and pos.get("x"):
+                        await self._page.mouse.click(float(pos["x"]), float(pos["y"]))
+                        self._log(f"[DOB] option for {label} clicked by coords ({pos.get('text')})")
+                        picked = True
+                        break
+                if not picked:
+                    # Close the menu before retrying (Escape), then reopen.
                     try:
                         await self._page.keyboard.press("Escape")
                     except Exception:
@@ -2923,16 +2997,12 @@ class DiscordAutomation:
             return False
 
     async def _dob_verify(self, label: str, option_text: str) -> bool:
-        """Re-locate the DOB control and confirm it now shows the selected
-        value (locale-aware). Re-locating handles React replacing the control
-        element after selection."""
-        try:
-            located = await self._page.evaluate(
-                _DOB_LOCATE_JS, [label, _DOB_LABEL_ALIASES])
-        except Exception:
-            located = None
-        if not located:
-            return False
+        """Confirm the DOB control now shows the selected value.
+
+        Tries the marked element first (React usually re-renders it in
+        place), then re-locates by label. The value text itself is accepted
+        too — after selection the control shows "Januari", not the "Maand"
+        placeholder, so a label-only re-locate would miss it."""
         try:
             txt = await self._page.locator(
                 f'[data-dob-target="{label}"]').first.inner_text()
@@ -2940,6 +3010,16 @@ class DiscordAutomation:
             txt = ""
         if _dob_text_matches(txt, option_text):
             return True
+        try:
+            located = await self._page.evaluate(
+                _DOB_LOCATE_JS, [label, _DOB_LABEL_ALIASES, option_text, _MONTH_ALIASES])
+            if located:
+                txt2 = await self._page.locator(
+                    f'[data-dob-target="{label}"]').first.inner_text()
+                if _dob_text_matches(txt2, option_text):
+                    return True
+        except Exception:
+            pass
         try:
             self._log(f"[DOB] verify {label}: control shows '{txt[:60]}' expected '{option_text}'", level="warn")
         except Exception:
