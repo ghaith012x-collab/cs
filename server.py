@@ -403,6 +403,22 @@ async () => {
 # ALL languages, not just English. These feed _FORM_READY_JS, _DOB_LOCATE_JS
 # and _DOB_FALLBACK_JS (via json.dumps), so the filler works on any form
 # Discord serves.
+# ── Credential field selectors (shared by fill AND verify) ──
+# name-first; the username selector deliberately EXCLUDES
+# input[autocomplete="username"]: Discord's email box can carry
+# autocomplete="username", and querySelector resolves in document order, so
+# that term made the username READ resolve to the EMAIL field — the
+# "username reads back the email value" verify abort that killed runs
+# before DOB was ever attempted (fields were actually filled; the read
+# was lying). Fill and verify MUST use the same strings so they can never
+# drift apart again.
+_CRED_FIELD_SELECTORS = {
+    "email": "input[name='email'], input[type='email'], input[autocomplete='email'], input[aria-label*='email' i], input[id*='email' i]",
+    "display": "input[name='global_name'], input[aria-label*='display name' i], input[aria-label*='display' i]",
+    "username": "input[name='username'], input[id*='username' i], input[aria-label*='username' i], input[placeholder*='username' i]",
+    "password": "input[name='password'], input[type='password'], input[autocomplete='new-password'], input[aria-label*='password' i]",
+}
+
 _DOB_LABEL_ALIASES = {
     "Month": [
         "month", "maand", "mois", "monat", "mes", "mês", "mese",
@@ -3237,6 +3253,23 @@ class DiscordAutomation:
             pass
         return False
 
+    async def _dob_current_value(self, label: str) -> str:
+        """What a DOB control currently displays ('' = placeholder/not found).
+
+        Used by the post-fill verify so a swallowed selection is caught and
+        re-selected instead of submitting with placeholders still showing.
+        """
+        try:
+            located = await self._page.evaluate(
+                _DOB_LOCATE_JS, [label, _DOB_LABEL_ALIASES, None, None])
+            if located:
+                txt = await self._page.locator(
+                    f'[data-dob-target="{label}"]').first.inner_text()
+                return (txt or "").strip()
+        except Exception:
+            pass
+        return ""
+
     async def _dob_js_fallback(self, label: str, option_text: str) -> bool:
         """Last-resort JS setter for native <select> / legacy builds."""
         try:
@@ -3333,15 +3366,16 @@ class DiscordAutomation:
         wipes a field can never be submitted as if it were still filled."""
         try:
             v = await self._page.evaluate("""() => {
+                const F = __CRED_FIELDS__;
                 const g = (sel) => { const e = document.querySelector(sel); return e ? (e.value || '') : ''; };
                 return JSON.stringify({
-                    email: g('input[name="email"], input[type="email"], input[autocomplete="email"], input[aria-label*="email" i], input[id*="email" i]'),
-                    display: g('input[name="global_name"], input[aria-label*="display" i]'),
-                    username: g('input[name="username"], input[autocomplete="username"], input[aria-label*="username" i], input[id*="username" i]'),
-                    password: g('input[name="password"], input[type="password"], input[autocomplete="new-password"], input[aria-label*="password" i]'),
+                    email: g(F.email),
+                    display: g(F.display),
+                    username: g(F.username),
+                    password: g(F.password),
                     tos: document.querySelectorAll('input[type="checkbox"]:checked, [role="checkbox"][aria-checked="true"], [role="checkbox"][data-state="checked"]').length,
                 });
-            }""")
+            }""".replace('__CRED_FIELDS__', json.dumps(_CRED_FIELD_SELECTORS)))
             return json.loads(v) if v else {}
         except Exception as e:
             self._log_exception("[Form] Read-back failed", e)
@@ -3366,10 +3400,10 @@ class DiscordAutomation:
         land in the email field.
         """
         return [
-            ("username", "input[name='username'], input[id*='username' i], input[aria-label*='username' i], input[placeholder*='username' i]", self._username or ""),
-            ("display", "input[name='global_name'], input[aria-label*='display name' i], input[aria-label*='display' i]", display_name),
-            ("password", "input[name='password'], input[type='password'], input[autocomplete='new-password'], input[aria-label*='password' i]", self._password or ""),
-            ("email", "input[name='email'], input[type='email'], input[autocomplete='email'], input[aria-label*='email' i], input[id*='email' i]", self._email or ""),
+            ("username", _CRED_FIELD_SELECTORS["username"], self._username or ""),
+            ("display", _CRED_FIELD_SELECTORS["display"], display_name),
+            ("password", _CRED_FIELD_SELECTORS["password"], self._password or ""),
+            ("email", _CRED_FIELD_SELECTORS["email"], self._email or ""),
         ]
 
     async def _read_field_value(self, sel: str) -> str:
@@ -3658,6 +3692,28 @@ class DiscordAutomation:
             await self._human_pause()
             await self._select_dob("Year", year_val)
             await self._human_pause()
+
+            # ── DOB post-verify: every control must hold its value ──
+            # Discord's React can swallow a selection; never proceed (or
+            # worse, submit) with Tag/Monat/Jahr still showing their
+            # placeholders. Re-read each control and re-select anything
+            # that didn't stick, then log the final state.
+            dob_targets = (("Month", month_name), ("Day", day_val), ("Year", year_val))
+            try:
+                dob_missing = []
+                for dob_label, dob_opt in dob_targets:
+                    dob_cur = await self._dob_current_value(dob_label)
+                    if not _dob_text_matches(dob_cur, dob_opt):
+                        dob_missing.append(dob_label)
+                        self._log(f"[DOB] {dob_label} not set after fill (shows '{dob_cur[:40]}') - re-selecting", level="warn")
+                for dob_label, dob_opt in dob_targets:
+                    if dob_label in dob_missing:
+                        await self._select_dob(dob_label, dob_opt)
+                        await self._human_pause()
+                dob_state = {lbl: await self._dob_current_value(lbl) for lbl, _ in dob_targets}
+                self._log(f"[DOB] Post-fill state: {json.dumps(dob_state)}")
+            except Exception as _de:
+                self._log_exception("[DOB] Post-fill verify failed", _de)
 
             await asyncio.sleep(1.0)
 
