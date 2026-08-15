@@ -322,6 +322,122 @@ _DOB_LABEL_ALIASES = {
     "Day": ["day", "dag", "jour", "tag", "día", "dia", "giorno", "dzień"],
     "Year": ["year", "jaar", "an", "année", "annee", "jahr", "año", "ano", "anno", "rok", "år"],
 }
+# Localized month names → numeric index, so the English month names the bot
+# generates ("January"...) can be matched against the localized options
+# Discord renders (Dutch "Januari", French "janvier", German "März", ...).
+_MONTH_ALIASES = {
+    "januari": 1, "janvier": 1, "januar": 1, "enero": 1, "gennaio": 1,
+    "februari": 2, "février": 2, "fevrier": 2, "februar": 2, "febrero": 2, "febbraio": 2,
+    "maart": 3, "mars": 3, "märz": 3, "marzo": 3, "março": 3, "marzec": 3,
+    "april": 4, "avril": 4, "abril": 4,
+    "mei": 5, "mai": 5, "mayo": 5, "maggio": 5, "maj": 5,
+    "juni": 6, "juin": 6, "junio": 6, "giugno": 6,
+    "juli": 7, "juillet": 7, "julio": 7, "luglio": 7,
+    "augustus": 8, "août": 8, "aout": 8, "agosto": 8,
+    "september": 9, "septembre": 9, "septiembre": 9, "settembre": 9,
+    "oktober": 10, "octobre": 10, "octubre": 10, "ottobre": 10,
+    "november": 11, "novembre": 11, "noviembre": 11,
+    "december": 12, "décembre": 12, "dezember": 12, "diciembre": 12, "dicembre": 12,
+}
+
+_MONTHS_EN = ("january", "february", "march", "april", "may", "june", "july",
+              "august", "september", "october", "november", "december")
+
+
+def _month_index(name: str) -> int:
+    """Numeric month index for an English or localized month name (0 = not a month)."""
+    n = (name or "").strip().lower()
+    if n in _MONTHS_EN:
+        return _MONTHS_EN.index(n) + 1
+    return _MONTH_ALIASES.get(n, 0)
+
+
+def _dob_text_matches(text: str, option_text: str) -> bool:
+    """True when a DOB control's current text represents `option_text` in the
+    page's locale (e.g. the Dutch 'Januari' matches the English 'January')."""
+    t = (text or "").strip().lower()
+    o = (option_text or "").strip().lower()
+    if not t or not o:
+        return False
+    if t == o:
+        return True
+    want = _month_index(o)
+    if want:
+        return _month_index(t) == want
+    return t.lstrip("0") == o.lstrip("0")
+
+
+# Locate a DOB dropdown control by its localized label ("Day"/"Month"/"Year"
+# with the locale alias table — Dutch "Dag/Maand/Jaar", French
+# "Jour/Mois/Année", ...). Scans ONLY control-like elements (role=button,
+# combobox, select/dropdown/control classes, native select) so page body
+# copy can never be mistaken for a label. Picks the DEEPEST match — the
+# individual control, never the DOB group container that holds all three
+# labels. Marks the element with data-dob-target so the caller can drive it
+# with trusted Playwright clicks.
+_DOB_LOCATE_JS = r"""([label, aliases]) => {
+    const norm = (s) => (s == null ? '' : String(s)).replace(/\s+/g, ' ').trim();
+    const low = (s) => norm(s).toLowerCase();
+    const labels = (aliases && aliases[label]) || [label.toLowerCase()];
+    const re = new RegExp('(^|[^a-z0-9])(' + labels.join('|') + ')([^a-z0-9]|$)');
+    const hits = [];
+    const scan = document.querySelectorAll(
+        '[role="button"], [role="combobox"], [class*="select" i], [class*="dropdown" i], [class*="control" i], select'
+    );
+    for (const el of scan) {
+        if (!el.offsetParent) continue;
+        const acc = low(norm((el.getAttribute('aria-label') || '') + ' ' +
+                             (el.getAttribute('placeholder') || '') + ' ' +
+                             (el.getAttribute('data-label') || '') + ' ' +
+                             (el.textContent || '').slice(0, 80)));
+        if (!re.test(acc)) continue;
+        let depth = 0;
+        let p = el.parentElement;
+        while (p) { depth++; p = p.parentElement; }
+        hits.push({ el: el, depth: depth });
+    }
+    if (!hits.length) return null;
+    hits.sort((a, b) => b.depth - a.depth);
+    const target = hits[0].el;
+    target.setAttribute('data-dob-target', label);
+    return { tag: target.tagName.toLowerCase(), depth: hits[0].depth };
+}"""
+
+# Options of an open DOB menu (custom dropdowns and native <select>).
+_DOB_OPTION_SEL = '[role="option"], [id*="option" i], [class*="option" i], option, li'
+
+# Find the index (within _DOB_OPTION_SEL) of the option that represents
+# `optionText` in the page's locale. Months resolve to their numeric index so
+# the English "January" matches the Dutch "Januari" / French "janvier" / ...
+# options Discord renders. Returns -1 when the menu isn't open or nothing
+# matches.
+_DOB_OPTION_INDEX_JS = r"""([optionText, monthAliases]) => {
+    const norm = (s) => (s == null ? '' : String(s)).replace(/\s+/g, ' ').trim();
+    const low = (s) => norm(s).toLowerCase();
+    const MONTHS = ['january','february','march','april','may','june','july',
+        'august','september','october','november','december'];
+    const wantStr = low(optionText);
+    const wantNum = (MONTHS.indexOf(wantStr) + 1) || monthAliases[wantStr] || (parseInt(optionText, 10) || 0);
+    const matches = (t, v) => {
+        const a = low(t || ''); const b = low(v || '');
+        if (!a && !b) return false;
+        if (a === wantStr) return true;
+        if (wantNum && (monthAliases[a] === wantNum || MONTHS.indexOf(a) + 1 === wantNum)) return true;
+        if (!wantNum) return false;
+        const n = String(wantNum);
+        const p = n.length === 1 ? '0' + n : n;
+        return a === n || b === n || a === p || b === p;
+    };
+    const sel = __OPT_SEL__;
+    const opts = Array.from(document.querySelectorAll(sel));
+    for (let i = 0; i < opts.length; i++) {
+        const t = norm(opts[i].textContent || opts[i].getAttribute('aria-label') || '');
+        const v = opts[i].getAttribute('data-value') || opts[i].getAttribute('value') || t;
+        if (matches(t, v)) return i;
+    }
+    return -1;
+}"""
+
 
 
 # React-safe value write: native prototype setter (REPLACES the whole value —
@@ -2679,14 +2795,25 @@ class DiscordAutomation:
             return {}
 
     async def _select_dob(self, label: str, option_text: str) -> bool:
-        """Select DOB dropdown. Discord uses custom React-Select components."""
+        """Select one DOB dropdown (Month/Day/Year) with REAL trusted clicks.
+
+        Discord's register form localizes the DOB controls (Dutch
+        "Dag/Maand/Jaar", French "Jour/Mois/Année", ...) and its newer builds
+        ignore JS-dispatched synthetic mouse events — the old all-JS click
+        strategies opened no menu at all, so the form was submitted with the
+        placeholders still showing and Discord rejected it. This locates the
+        control by its localized label, opens it with a trusted Playwright
+        click, matches the option locale-aware (months resolve to their
+        numeric index, so "January" picks the Dutch "Januari"), and selects it
+        with a trusted click. Falls back to the JS setter for native
+        <select> / legacy builds.
+        """
         try:
             self._log(f"Selecting {label}: {option_text}")
 
             # The register SPA hydrates the DOB dropdowns a beat after the
             # credential inputs. Poll briefly for a DOB control to exist
-            # before attempting any click - clicking a not-yet-rendered
-            # control is how the old build typed into the wrong field.
+            # before attempting any click.
             control_ready = False
             for _probe in range(8):
                 try:
@@ -2701,99 +2828,140 @@ class DiscordAutomation:
                 self._log(f"[Form] DOB control for {label} not rendered after ~3s — aborting", level="warn")
                 return False
 
-            # Strategy 1: JS click on placeholder, then find and click option.
-            # Label matching is locale-aware (Dutch "Dag/Maand/Jaar", ...).
-            label_re = "|".join(_DOB_LABEL_ALIASES.get(label, [label]))
-            success = await self._page.evaluate(f"""
-                async () => {{
-                    const walker = document.createTreeWalker(
-                        document.body, NodeFilter.SHOW_TEXT, null
-                    );
-                    let node;
-                    let targetEl = null;
-                    const labelRe = new RegExp('(^|[^a-z0-9])(' + '{label_re}' + ')([^a-z0-9]|$)');
-                    while (node = walker.nextNode()) {{
-                        if (labelRe.test(node.textContent.trim())) {{
-                            const parent = node.parentElement;
-                            if (parent && parent.offsetParent !== null &&
-                                !parent.querySelector('input[name="email"]')) {{
-                                targetEl = parent;
-                                break;
-                            }}
-                        }}
-                    }}
-
-                    if (!targetEl) return 'no_element';
-
-                    let clickTarget = targetEl;
-                    for (let i = 0; i < 5; i++) {{
-                        clickTarget = clickTarget.parentElement;
-                        if (!clickTarget) break;
-                        const style = window.getComputedStyle(clickTarget);
-                        if (style.cursor === 'pointer' ||
-                            clickTarget.getAttribute('tabindex') !== null ||
-                            clickTarget.className.includes('control') ||
-                            clickTarget.className.includes('css-')) {{
-                            break;
-                        }}
-                    }}
-
-                    if (!clickTarget) clickTarget = targetEl;
-                    clickTarget.dispatchEvent(new MouseEvent('mousedown', {{bubbles: true, cancelable: true}}));
-                    clickTarget.dispatchEvent(new MouseEvent('mouseup', {{bubbles: true, cancelable: true}}));
-                    clickTarget.dispatchEvent(new MouseEvent('click', {{bubbles: true, cancelable: true}}));
-                    // Options render async after the menu opens — poll for
-                    // them instead of scanning once and giving up early.
-                    for (let attempt = 0; attempt < 6; attempt++) {{
-                        if (attempt > 0) await new Promise(r => setTimeout(r, 300));
-                        const allOptions = document.querySelectorAll(
-                            '[id*="option"], [role="option"], [class*="option"]'
-                        );
-                        for (const opt of allOptions) {{
-                            const text = opt.textContent.trim();
-                            if (text === '{option_text}') {{
-                                opt.scrollIntoView({{block: 'nearest'}});
-                                opt.dispatchEvent(new MouseEvent('mousedown', {{bubbles: true}}));
-                                opt.dispatchEvent(new MouseEvent('mouseup', {{bubbles: true}}));
-                                opt.dispatchEvent(new MouseEvent('click', {{bubbles: true}}));
-                                return 'selected';
-                            }}
-                        }}
-                    }}
-                    return 'option_not_found';
-                }}
-            """)
-
-            if success and 'selected' in str(success):
-                self._log(f"Selected {label}: {option_text} ({success})")
-                await asyncio.sleep(0.3)
-                return True
-
-            self._log(f"JS result for {label}: {success}")
-
-            # Strategy 2: robust native-<select> / labeled-combobox setter.
-            # Never tab-navigation roulette or type into "whatever has focus"
-            # — that is how the birth year leaked into the email field.
+            # ── Locate the control by its localized label ──
+            located = None
             try:
-                result2 = await self._page.evaluate(_DOB_FALLBACK_JS
-                    .replace("__LABEL__", json.dumps(label))
-                    .replace("__OPT__", json.dumps(option_text))
-                    .replace("__DOB_LABELS__", json.dumps(_DOB_LABEL_ALIASES)))
-                if result2 and str(result2).startswith(("native:", "combo:")):
-                    self._log(f"Selected {label} ({result2})")
-                    await asyncio.sleep(0.3)
-                    return True
-                self._log(f"DOB fallback for {label}: {result2}")
+                located = await self._page.evaluate(
+                    _DOB_LOCATE_JS, [label, _DOB_LABEL_ALIASES])
             except Exception as e:
-                self._log(f"DOB fallback error for {label}: {e}", level="warn")
+                self._log_exception(f"[DOB] locate {label} failed", e)
+            if not located:
+                self._log(f"[DOB] no control located for {label} — JS fallback", level="warn")
+                return await self._dob_js_fallback(label, option_text)
 
-            self._log(f"All DOB strategies failed for {label}", level="warn")
-            return False
+            marker = f'[data-dob-target="{label}"]'
+            is_select = located.get("tag") == "select"
+            ctrl = self._page.locator(marker)
+            try:
+                if (await ctrl.count()) == 0:
+                    self._log(f"[DOB] control for {label} vanished — JS fallback", level="warn")
+                    return await self._dob_js_fallback(label, option_text)
+            except Exception:
+                return await self._dob_js_fallback(label, option_text)
 
+            # ── Native <select>: select_option by matched index ──
+            if is_select:
+                try:
+                    idx = await self._page.evaluate(
+                        _DOB_OPTION_INDEX_JS.replace("__OPT_SEL__", json.dumps(_DOB_OPTION_SEL)),
+                        [option_text, _MONTH_ALIASES])
+                    if isinstance(idx, int) and idx >= 0:
+                        await ctrl.select_option(index=idx)
+                        await asyncio.sleep(0.3)
+                        self._log(f"Selected {label} (native select index {idx})")
+                        return True
+                except Exception as e:
+                    self._log(f"[DOB] native select failed for {label}: {e}", level="warn")
+                return await self._dob_js_fallback(label, option_text)
+
+            # ── Custom dropdown: trusted click to open, then click option ──
+            for attempt in range(1, 3):
+                try:
+                    await ctrl.scroll_into_view_if_needed()
+                    await ctrl.click()
+                except Exception as e:
+                    self._log(f"[DOB] open click for {label} (attempt {attempt}) failed: {e}", level="warn")
+                    await asyncio.sleep(0.5)
+                    continue
+                # Options render async after the menu opens — poll for the
+                # matching option's index.
+                idx = -1
+                for _poll in range(8):
+                    await asyncio.sleep(0.3)
+                    try:
+                        idx = await self._page.evaluate(
+                            _DOB_OPTION_INDEX_JS.replace("__OPT_SEL__", json.dumps(_DOB_OPTION_SEL)),
+                            [option_text, _MONTH_ALIASES])
+                    except Exception:
+                        idx = -1
+                    if isinstance(idx, int) and idx >= 0:
+                        break
+                if not (isinstance(idx, int) and idx >= 0):
+                    # Close the menu before retrying (Escape), then reopen.
+                    try:
+                        await self._page.keyboard.press("Escape")
+                    except Exception:
+                        pass
+                    await asyncio.sleep(0.3)
+                    continue
+                try:
+                    await self._page.locator(_DOB_OPTION_SEL).nth(idx).click()
+                except Exception as e:
+                    self._log(f"[DOB] option click for {label} failed: {e}", level="warn")
+                    try:
+                        await self._page.keyboard.press("Escape")
+                    except Exception:
+                        pass
+                    await asyncio.sleep(0.3)
+                    continue
+                await asyncio.sleep(0.4)
+                if await self._dob_verify(label, option_text):
+                    self._log(f"Selected {label}: {option_text} (trusted click)")
+                    return True
+                # Selection didn't stick — close menu, reopen and retry.
+                try:
+                    await self._page.keyboard.press("Escape")
+                except Exception:
+                    pass
+                await asyncio.sleep(0.4)
+
+            self._log(f"[DOB] trusted-click path failed for {label} — JS fallback", level="warn")
+            return await self._dob_js_fallback(label, option_text)
 
         except Exception as e:
             self._log_exception(f"DOB error for {label}", e)
             return False
+
+    async def _dob_verify(self, label: str, option_text: str) -> bool:
+        """Re-locate the DOB control and confirm it now shows the selected
+        value (locale-aware). Re-locating handles React replacing the control
+        element after selection."""
+        try:
+            located = await self._page.evaluate(
+                _DOB_LOCATE_JS, [label, _DOB_LABEL_ALIASES])
+        except Exception:
+            located = None
+        if not located:
+            return False
+        try:
+            txt = await self._page.locator(
+                f'[data-dob-target="{label}"]').first.inner_text()
+        except Exception:
+            txt = ""
+        if _dob_text_matches(txt, option_text):
+            return True
+        try:
+            self._log(f"[DOB] verify {label}: control shows '{txt[:60]}' expected '{option_text}'", level="warn")
+        except Exception:
+            pass
+        return False
+
+    async def _dob_js_fallback(self, label: str, option_text: str) -> bool:
+        """Last-resort JS setter for native <select> / legacy builds."""
+        try:
+            result2 = await self._page.evaluate(_DOB_FALLBACK_JS
+                .replace("__LABEL__", json.dumps(label))
+                .replace("__OPT__", json.dumps(option_text))
+                .replace("__DOB_LABELS__", json.dumps(_DOB_LABEL_ALIASES)))
+            if result2 and str(result2).startswith(("native:", "combo:")):
+                self._log(f"Selected {label} ({result2})")
+                await asyncio.sleep(0.3)
+                return True
+            self._log(f"DOB fallback for {label}: {result2}")
+        except Exception as e:
+            self._log(f"DOB fallback error for {label}: {e}", level="warn")
+        self._log(f"All DOB strategies failed for {label}", level="warn")
+        return False
 
     async def _rate_limited(self) -> bool:
         """True when Discord shows its rate-limit message ("The resource is
