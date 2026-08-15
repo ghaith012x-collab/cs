@@ -3,6 +3,7 @@ import base64
 import json
 import os
 import random
+import re
 import socket
 import time
 from typing import Optional
@@ -158,8 +159,9 @@ _FORM_READY_JS = r"""() => {
     const username = q('input[name="username"], input[autocomplete="username"], input[aria-label*="username" i], input[id*="username" i], input[placeholder*="username" i]');
     const password = q('input[name="password"], input[type="password"], input[autocomplete="new-password"], input[aria-label*="password" i]');
     // DOB controls: native <select> or React-Select combobox/container whose
-    // label/placeholder/text mentions month/day/year (word-bounded so a
-    // "birthday" heading doesn't count as the "day" dropdown).
+    // label/placeholder/text mentions month/day/year in the page's locale
+    // (Dutch "Dag/Maand/Jaar", French "Jour/Mois/Année", ...).
+    const DOB_LABELS = __DOB_LABELS__;
     const seen = {};
     const controls = Array.from(document.querySelectorAll(
         'select, [role="combobox"], [role="listbox"], [class*="select" i], [class*="dropdown" i], [class*="control" i]'
@@ -171,8 +173,11 @@ _FORM_READY_JS = r"""() => {
                      (el.getAttribute('name') || '') + ' ' + (el.getAttribute('id') || '') + ' ' +
                      (el.getAttribute('placeholder') || '') + ' ' +
                      ((el.textContent || '').slice(0, 80))).toLowerCase();
-        for (const lbl of ['month', 'day', 'year']) {
-            if (new RegExp('\\b' + lbl + '\\b').test(acc)) { seen[lbl] = true; break; }
+        for (const key of Object.keys(DOB_LABELS)) {
+            for (const al of DOB_LABELS[key]) {
+                if (new RegExp('(^|[^a-z0-9])' + al + '([^a-z0-9]|$)').test(acc)) { seen[key] = true; break; }
+            }
+            if (seen[key]) break;
         }
     }
     const body = document.body ? document.body.innerText : '';
@@ -198,21 +203,42 @@ _DOB_FALLBACK_JS = r"""
 async () => {
     const LABEL = __LABEL__;
     const OPT = __OPT__;
+    const DOB_LABELS = __DOB_LABELS__;
     const norm = (s) => (s == null ? '' : String(s)).replace(/\s+/g, ' ').trim();
     const low = (s) => norm(s).toLowerCase();
     const monthIndex = ['january','february','march','april','may','june',
         'july','august','september','october','november','december']
         .indexOf(low(OPT)) + 1;
-    const wantNum = monthIndex || (parseInt(OPT, 10) || 0);
+    // Localized month names (Dutch "januari", "maart", French "janvier",
+    // "mars", ...) resolve to their numeric index so the option match works
+    // in whatever locale Discord is serving.
+    const MONTH_ALIASES = {
+        'januari':1,'janvier':1,'januar':1,'enero':1,'gennaio':1,
+        'februari':2,'février':2,'fevrier':2,'februar':2,'febrero':2,'febbraio':2,
+        'maart':3,'mars':3,'märz':3,'marzo':3,'março':3,'marzec':3,
+        'april':4,'avril':4,'abril':4,
+        'mei':5,'mai':5,'mayo':5,'maggio':5,'maj':5,
+        'juni':6,'juin':6,'junio':6,'giugno':6,
+        'juli':7,'juillet':7,'julio':7,'luglio':7,
+        'augustus':8,'août':8,'aout':8,'agosto':8,
+        'september':9,'septembre':9,'septiembre':9,'settembre':9,
+        'oktober':10,'octobre':10,'octubre':10,'ottobre':10,
+        'november':11,'novembre':11,'noviembre':11,
+        'december':12,'décembre':12,'dezember':12,'diciembre':12,'dicembre':12,
+    };
+    const wantNum = monthIndex || MONTH_ALIASES[low(OPT)] || (parseInt(OPT, 10) || 0);
     const wantStr = low(OPT);
     const optionMatches = (text, value) => {
         const t = low(text || ''); const v = low(value || '');
         if (!t && !v) return false;
         if (t === wantStr) return true;
+        if (MONTH_ALIASES[t] && MONTH_ALIASES[t] === wantNum) return true;
         if (!wantNum) return false;
         const n = String(wantNum);
         const p = n.length === 1 ? '0' + n : n;
-        return t === n || v === n || t === p || v === p;
+        const z = wantNum > 1 ? String(wantNum - 1) : '0';
+        const zp = z.length === 1 ? '0' + z : z;
+        return t === n || v === n || t === p || v === p || t === z || v === z || t === zp || v === zp;
     };
     const labelHits = (el) => {
         const cls = (typeof el.className === 'string') ? el.className : '';
@@ -222,7 +248,12 @@ async () => {
                     norm(el.getAttribute('placeholder') || '') + ' ' +
                     norm(el.getAttribute('data-label') || '') + ' ' +
                     norm(cls);
-        return low(acc).includes(low(LABEL));
+        const a = low(acc);
+        const labels = DOB_LABELS[LABEL] || [LABEL.toLowerCase()];
+        for (const al of labels) {
+            if (new RegExp('(^|[^a-z0-9])' + al + '([^a-z0-9]|$)').test(a)) return true;
+        }
+        return false;
     };
     let candidates = Array.from(document.querySelectorAll(
         'select, [role="combobox"], [role="listbox"], [class*="select" i], [class*="dropdown" i], [class*="control" i]'
@@ -230,8 +261,10 @@ async () => {
     if (!candidates.length) {
         const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null);
         let node;
+        const labels = DOB_LABELS[LABEL] || [LABEL.toLowerCase()];
+        const re = new RegExp('(^|[^a-z0-9])(' + labels.join('|') + ')([^a-z0-9]|$)');
         while ((node = walker.nextNode())) {
-            if (norm(node.textContent) !== norm(LABEL)) continue;
+            if (!re.test(low(norm(node.textContent)))) continue;
             let p = node.parentElement;
             for (let i = 0; p && i < 5; i++) {
                 if (p.matches && p.matches('select, [role="combobox"], [class*="select" i], [class*="dropdown" i], [class*="control" i]')) {
@@ -280,6 +313,15 @@ async () => {
     return 'not_found';
 }
 """
+
+# Locale-aware DOB dropdown labels — Discord localizes the register form to
+# the proxy's region (e.g. Dutch "Dag/Maand/Jaar"), so label matching accepts
+# the common spellings, not just English.
+_DOB_LABEL_ALIASES = {
+    "Month": ["month", "maand", "mois", "monat", "mes", "mês", "mese", "miesiąc", "månad", "måned", "měsíc"],
+    "Day": ["day", "dag", "jour", "tag", "día", "dia", "giorno", "dzień"],
+    "Year": ["year", "jaar", "an", "année", "annee", "jahr", "año", "ano", "anno", "rok", "år"],
+}
 
 
 # ── Log verbosity ─────────────────────────────────────────
@@ -2603,6 +2645,15 @@ class DiscordAutomation:
             traceback.print_exc()
             return False
 
+    async def _form_ready(self) -> dict:
+        """Evaluate _FORM_READY_JS with the locale-aware DOB label table."""
+        try:
+            v = await self._page.evaluate(
+                _FORM_READY_JS.replace("__DOB_LABELS__", json.dumps(_DOB_LABEL_ALIASES)))
+            return json.loads(v) if v else {}
+        except Exception:
+            return {}
+
     async def _select_dob(self, label: str, option_text: str) -> bool:
         """Select DOB dropdown. Discord uses custom React-Select components."""
         try:
@@ -2615,7 +2666,7 @@ class DiscordAutomation:
             control_ready = False
             for _probe in range(8):
                 try:
-                    _st = json.loads(await self._page.evaluate(_FORM_READY_JS))
+                    _st = await self._form_ready()
                 except Exception:
                     _st = {}
                 if int(_st.get("dob") or 0) >= 1:
@@ -2626,7 +2677,9 @@ class DiscordAutomation:
                 self._log(f"[Form] DOB control for {label} not rendered after ~3s — aborting", level="warn")
                 return False
 
-            # Strategy 1: JS click on placeholder, then find and click option
+            # Strategy 1: JS click on placeholder, then find and click option.
+            # Label matching is locale-aware (Dutch "Dag/Maand/Jaar", ...).
+            label_re = "|".join(_DOB_LABEL_ALIASES.get(label, [label]))
             success = await self._page.evaluate(f"""
                 async () => {{
                     const walker = document.createTreeWalker(
@@ -2634,8 +2687,9 @@ class DiscordAutomation:
                     );
                     let node;
                     let targetEl = null;
+                    const labelRe = new RegExp('(^|[^a-z0-9])(' + '{label_re}' + ')([^a-z0-9]|$)');
                     while (node = walker.nextNode()) {{
-                        if (node.textContent.trim() === '{label}') {{
+                        if (labelRe.test(node.textContent.trim())) {{
                             const parent = node.parentElement;
                             if (parent && parent.offsetParent !== null &&
                                 !parent.querySelector('input[name="email"]')) {{
@@ -2699,7 +2753,8 @@ class DiscordAutomation:
             try:
                 result2 = await self._page.evaluate(_DOB_FALLBACK_JS
                     .replace("__LABEL__", json.dumps(label))
-                    .replace("__OPT__", json.dumps(option_text)))
+                    .replace("__OPT__", json.dumps(option_text))
+                    .replace("__DOB_LABELS__", json.dumps(_DOB_LABEL_ALIASES)))
                 if result2 and str(result2).startswith(("native:", "combo:")):
                     self._log(f"Selected {label} ({result2})")
                     await asyncio.sleep(0.3)
@@ -2755,7 +2810,7 @@ class DiscordAutomation:
                 return None
             elapsed = time.time() - start
             try:
-                st = json.loads(await self._page.evaluate(_FORM_READY_JS))
+                st = await self._form_ready()
             except Exception as e:
                 if not eval_failed_logged:
                     eval_failed_logged = True
@@ -2814,6 +2869,135 @@ class DiscordAutomation:
         return (vals.get("email") == self._email
                 and vals.get("username") == self._username
                 and vals.get("password") == self._password)
+
+    async def _fill_credential_fields(self, display_name: str) -> None:
+        """Fill every credential field and keep them filled (self-healing).
+
+        This is the fix for the "email ends up holding the username" loop:
+          1. Fill order is username → display → password → EMAIL LAST. Any
+             keystroke that leaks (Discord's React re-renders mid-type,
+             replaces the target input, so the characters go to whatever
+             still has focus) lands in the still-empty email field — and the
+             element-targeted email write below overwrites it instead of
+             corrupting it.
+          2. Primary write is Playwright fill() — native value setter +
+             input event, targeted AT the element, with no global-keyboard
+             focus dependency. Keystrokes are only a per-field last resort.
+          3. After every write every credential field is re-read and any
+             leaked/wiped value is healed with another targeted fill().
+        """
+        fields = [
+            ("username", "input[name='username'], input[autocomplete='username'], input[aria-label*='username' i], input[id*='username' i]", self._username or ""),
+            ("display", "input[name='global_name'], input[aria-label*='display name' i], input[aria-label*='display' i]", display_name),
+            ("password", "input[name='password'], input[type='password'], input[autocomplete='new-password'], input[aria-label*='password' i]", self._password or ""),
+            ("email", "input[name='email'], input[type='email'], input[autocomplete='email'], input[aria-label*='email' i], input[id*='email' i]", self._email or ""),
+        ]
+        for fname, sel, val in fields:
+            if not val:
+                continue
+            for attempt in range(1, 4):
+                try:
+                    loc = self._page.locator(sel)
+                    if (await loc.count()) == 0:
+                        self._log(f"[Form] Field '{fname}' not found (attempt {attempt}/3)", level="warn")
+                        break
+                    el = loc.first
+                    if not (await el.is_visible()):
+                        self._log(f"[Form] Field '{fname}' not visible yet (attempt {attempt}/3)", level="warn")
+                        await asyncio.sleep(0.6)
+                        continue
+                    try:
+                        cur = await el.input_value()
+                    except Exception:
+                        cur = ""
+                    if cur == val:
+                        self._log(f"[Form] Field '{fname}' already holds value len={len(val)}")
+                        break
+                    # 1) Playwright fill() — React-compatible targeted write.
+                    try:
+                        await el.fill(val)
+                        await asyncio.sleep(0.35)
+                        try:
+                            cur = await el.input_value()
+                        except Exception:
+                            cur = ""
+                    except Exception:
+                        cur = ""
+                    # 2) Element-targeted keystrokes (only if fill() did not
+                    #    stick — real trusted keys are the most human input).
+                    if cur != val:
+                        try:
+                            await el.click()
+                            await el.press("Control+A")
+                            await el.press_sequentially(val, delay=40 + random.randint(10, 50))
+                            await asyncio.sleep(0.45)
+                            try:
+                                cur = await el.input_value()
+                            except Exception:
+                                cur = ""
+                        except Exception:
+                            cur = ""
+                    # 3) Native-setter JS write (React-compatible, last resort).
+                    if cur != val:
+                        try:
+                            await self._page.evaluate(
+                                """([sel, value]) => {
+                                    const el = document.querySelector(sel);
+                                    if (!el) return false;
+                                    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+                                    setter.call(el, value);
+                                    el.dispatchEvent(new Event('input', { bubbles: true }));
+                                    el.dispatchEvent(new Event('change', { bubbles: true }));
+                                    return true;
+                                }""",
+                                [sel.split(",")[0].strip(), val],
+                            )
+                            await asyncio.sleep(0.4)
+                        except Exception as e:
+                            self._log_exception(f"[Form] Field '{fname}' JS fallback failed", e)
+                    try:
+                        cur = await el.input_value()
+                    except Exception:
+                        cur = ""
+                    if cur == val:
+                        self._log(f"[Form] Field '{fname}' verified: len={len(val)}")
+                        break
+                    self._log(f"[Form] Field '{fname}' mismatch (attempt {attempt}/3) got_len={len(cur)}", level="warn")
+                except Exception as e:
+                    self._log_exception(f"[Form] Field '{fname}' fill error", e)
+                    break
+                # Human pause between fields — reads like a real signup and
+                # gives Discord's React time to finish re-rendering.
+                await asyncio.sleep(random.uniform(0.4, 0.9))
+            # Heal pass: THIS field's write (or its re-render) may have leaked
+            # into / wiped another field. Re-fill anything that slipped.
+            await self._heal_credential_fields(fields)
+
+    async def _heal_credential_fields(self, fields) -> None:
+        """Re-fill any credential field whose value got wiped or leaked."""
+        for fname, sel, val in fields:
+            if not val:
+                continue
+            try:
+                loc = self._page.locator(sel)
+                if (await loc.count()) == 0:
+                    continue
+                el = loc.first
+                if not (await el.is_visible()):
+                    continue
+                try:
+                    cur = await el.input_value()
+                except Exception:
+                    cur = ""
+                if cur == val:
+                    continue
+                try:
+                    await el.fill(val)
+                    await asyncio.sleep(0.25)
+                except Exception:
+                    pass
+            except Exception:
+                pass
 
     async def _fill_registration_form(self) -> bool:
         try:
@@ -2878,86 +3062,17 @@ class DiscordAutomation:
 
             self._log(f"Display: {display_name}  Username: {self._username}  Pass: ***")
 
-            # ── Fill ALL fields with REAL keystrokes, one at a time ──
+            # ── Fill ALL fields, one at a time, self-healing ──
             # Discord's React controlled inputs wipe synthetic JS value sets
             # (the old "all fields :ok but readback empty" failure), and
-            # writing every field back-to-back lets Discord's form state
-            # misalign so values get shuffled between inputs on re-render
-            # (email ending up with the username value). So fill each field
-            # with REAL trusted events — mouse click + select-all + type —
-            # and verify THAT field holds before moving to the next.
-            fields = [
-                ("email", "input[name='email'], input[type='email'], input[autocomplete='email'], input[aria-label*='email' i], input[id*='email' i]", self._email or ""),
-                ("display", "input[name='global_name'], input[aria-label*='display name' i], input[aria-label*='display' i]", display_name),
-                ("username", "input[name='username'], input[autocomplete='username'], input[aria-label*='username' i], input[id*='username' i]", self._username or ""),
-                ("password", "input[name='password'], input[type='password'], input[autocomplete='new-password'], input[aria-label*='password' i]", self._password or ""),
-            ]
-            for fname, sel, val in fields:
-                if not val:
-                    continue
-                for attempt in range(1, 4):
-                    try:
-                        loc = self._page.locator(sel)
-                        if (await loc.count()) == 0:
-                            self._log(f"[Form] Field '{fname}' not found (attempt {attempt}/3)", level="warn")
-                            break
-                        el = loc.first
-                        if not (await el.is_visible()):
-                            self._log(f"[Form] Field '{fname}' not visible yet (attempt {attempt}/3)", level="warn")
-                            await asyncio.sleep(0.6)
-                            continue
-                        # Element-targeted input, NEVER the global keyboard.
-                        # The old mouse.click + keyboard.type sent keystrokes
-                        # to WHATEVER had focus — when Discord's React
-                        # re-rendered between the click and the typing (its
-                        # username/email validation re-renders the whole
-                        # form), the click's focus was lost and the username
-                        # got typed into the still-focused email field, which
-                        # React happily stored (the "email ends up holding the
-                        # username" failure). el.click() / el.press() /
-                        # el.press_sequentially() each re-resolve and focus
-                        # THE element itself, so every value lands in its own
-                        # field and survives.
-                        await el.click()
-                        await el.press("Control+A")
-                        await el.press_sequentially(val, delay=35 + random.randint(10, 60))
-                        # Let Discord's validation + React settle, then read.
-                        await asyncio.sleep(0.6)
-                        cur = ""
-                        try:
-                            cur = await el.input_value()
-                        except Exception:
-                            cur = ""
-                        if cur == val:
-                            self._log(f"[Form] Field '{fname}' verified: len={len(val)}")
-                            break
-                        self._log(f"[Form] Field '{fname}' mismatch (attempt {attempt}/3) got_len={len(cur)}", level="warn")
-                        if attempt == 3:
-                            # Last resort for THIS field: native-setter JS write.
-                            try:
-                                await self._page.evaluate(
-                                    """([sel, value]) => {
-                                        const el = document.querySelector(sel);
-                                        if (!el) return false;
-                                        const own = Object.getOwnPropertyDescriptor(el, 'value');
-                                        const proto = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value');
-                                        const setter = (own && own.set) ? own.set : (proto && proto.set) ? proto.set : null;
-                                        if (setter) setter.call(el, value); else el.value = value;
-                                        el.dispatchEvent(new Event('input', { bubbles: true }));
-                                        el.dispatchEvent(new Event('change', { bubbles: true }));
-                                        return true;
-                                    }""",
-                                    [sel.split(",")[0].strip(), val],
-                                )
-                                await asyncio.sleep(0.5)
-                            except Exception as e:
-                                self._log_exception(f"[Form] Field '{fname}' JS fallback failed", e)
-                    except Exception as e:
-                        self._log_exception(f"[Form] Field '{fname}' fill error", e)
-                        break
-                # Human pause between fields — reads like a real signup and
-                # gives Discord's React time to finish re-rendering.
-                await asyncio.sleep(random.uniform(0.4, 1.0))
+            # keystrokes typed while React is re-rendering leak into whatever
+            # element still has focus — the "email ends up holding the
+            # username" loop. The fill order is username → display → password
+            # → EMAIL LAST: any leak lands in the still-empty email field and
+            # the element-targeted email write overwrites it instead of
+            # looping forever. After every write every field is re-verified
+            # and leaks are healed.
+            await self._fill_credential_fields(display_name)
 
             # ── Quick verify each field ──
             try:
@@ -3332,106 +3447,13 @@ class DiscordAutomation:
         return 0
 
     async def _fill_missing_fields(self, display_name: str) -> None:
-        """Robust fallback for fields the JS fill didn't keep.
+        """Robust fallback for fields a write didn't keep.
 
-        Discord's React re-renders on validation (username availability,
-        email format, password meter) and can wipe a value right after it
-        was written, so a single pass is not enough. Runs up to 3 passes:
-        Playwright fill() (trusted, React-aware input events) then real
-        keystrokes, re-querying the LIVE DOM each time - never a stale
-        element handle - and stops the moment every field holds its value.
+        Delegates to the self-healing credential fill: fill order ends with
+        email (so any keystroke leak is overwritten by the email write) and
+        every field is re-verified + healed after each write.
         """
-        fields = (
-            ("input[name='email'], input[type='email'], input[autocomplete='email'], input[aria-label*='email' i], input[id*='email' i]", self._email or ""),
-            ("input[name='global_name'], input[aria-label*='display name' i], input[aria-label*='display' i]", display_name),
-            ("input[name='username'], input[autocomplete='username'], input[aria-label*='username' i], input[id*='username' i]", self._username or ""),
-            ("input[name='password'], input[type='password'], input[autocomplete='new-password'], input[aria-label*='password' i]", self._password or ""),
-        )
-        for _pass in range(1, 4):
-            for sel, val in fields:
-                if not val:
-                    continue
-                short = sel.split(",")[0].strip()
-                try:
-                    loc = self._page.locator(sel)
-                    if (await loc.count()) == 0:
-                        self._log(f"[Form] Fallback fill: selector not found ({short})", level="warn")
-                        continue
-                    el = loc.first
-                    # Only type into a field that is actually rendered + visible.
-                    # Typing into a detached / not-yet-hydrated element is the
-                    # "typed random shit, nothing filled" failure mode.
-                    if not (await el.is_visible()):
-                        self._log(f"[Form] Fallback fill skipped ({short}): not visible yet", level="warn")
-                        continue
-                    try:
-                        cur = await el.input_value()
-                    except Exception:
-                        cur = ""
-                    if cur == val:
-                        continue
-                    # Strategy 1: Playwright fill() - trusted input events
-                    # that React's onChange actually processes.
-                    try:
-                        await el.fill(val)
-                    except Exception:
-                        pass
-                    try:
-                        cur = await el.input_value()
-                    except Exception:
-                        cur = ""
-                    # Strategy 2: real keystrokes (trusted key events), all
-                    # element-targeted (never the global keyboard — that is
-                    # how a username ends up typed into the still-focused
-                    # email field). Retry the write until it sticks, because
-                    # Discord's React re-renders on validation and can wipe a
-                    # freshly typed value mid-pass.
-                    for _write in range(2):
-                        if cur == val:
-                            break
-                        try:
-                            await el.click()
-                            await el.press("Control+A")
-                            await el.press_sequentially(val, delay=45 + random.randint(15, 70))
-                        except Exception:
-                            pass
-                        try:
-                            await self._page.wait_for_timeout(400)
-                        except Exception:
-                            pass
-                        try:
-                            cur = await el.input_value()
-                        except Exception:
-                            cur = ""
-                    self._log(f"[Form] Fallback fill (pass {_pass}): {short} len={len(cur)}/{len(val)}")
-                except Exception as e:
-                    self._log_exception(f"[Form] Fallback fill failed for {short}", e)
-
-            # Let Discord's React finish re-rendering, then read the LIVE
-            # DOM - detached handles lie, the DOM is the truth.
-            try:
-                await self._page.wait_for_timeout(800)
-            except Exception:
-                pass
-            try:
-                final = await self._page.evaluate("""() => {
-                    const g = (sel) => { const e = document.querySelector(sel); return e ? (e.value || '') : ''; };
-                    return JSON.stringify({
-                        email: g('input[name="email"], input[type="email"], input[aria-label*="email" i], input[id*="email" i]'),
-                        username: g('input[name="username"], input[aria-label*="username" i], input[id*="username" i]'),
-                        password: g('input[name="password"], input[type="password"], input[aria-label*="password" i]'),
-                        tos: document.querySelectorAll('input[type="checkbox"]:checked, [role="checkbox"][aria-checked="true"]').length,
-                    });
-                }""")
-                live = json.loads(final) if final else {}
-                self._log(f"[Form] AFTER FALLBACK (pass {_pass}): {live}")
-                if (live.get("email") == self._email
-                        and live.get("username") == self._username
-                        and live.get("password") == self._password):
-                    break
-            except Exception as _fe:
-                self._log_exception("[Form] AFTER FALLBACK read failed", _fe)
-                break
+        await self._fill_credential_fields(display_name)
 
     async def _human_pause(self) -> None:
         await asyncio.sleep(random.uniform(0.08, 0.2))
