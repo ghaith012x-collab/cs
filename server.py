@@ -551,6 +551,10 @@ class DiscordAutomation:
         self._page = None
         self._ua = ""
         self._tor_enabled = False
+        # True when the browser is running DIRECT (no proxy, no TOR) — the
+        # last-resort transport when every residential session is dead and
+        # TOR is unreachable. _build_context() honors it instead of raising.
+        self._direct = False
         self._screenshots: list = []
         self._activity_log: list = []
         self._email = (email or os.environ.get("ACCOUNT_EMAIL", "")).strip()
@@ -831,6 +835,8 @@ class DiscordAutomation:
             if ENGINE != "shardx":
                 ctx_opts['proxy'] = {'server': 'socks5://127.0.0.1:9050'}
             await asyncio.sleep(1)
+        elif getattr(self, "_direct", False):
+            self._log("[Proxy] Direct connection - no proxy and TOR unavailable")
         else:
             self._log("[TOR] [FATAL] TOR SOCKS5 (127.0.0.1:9050) NOT reachable - TOR-only mode requires TOR running on this instance", level="error")
             self._tor_enabled = False
@@ -859,6 +865,8 @@ class DiscordAutomation:
         DIFFERENT session relaunches the browser; reusing the same session
         only rebuilds the context (and keeps the fingerprint — rotating an
         identity on an unchanged IP just churns fingerprints)."""
+        if new_proxy:
+            self._direct = False
         same_session = bool(
             new_proxy and self.proxy
             and new_proxy.get("key") == self.proxy.get("key")
@@ -899,6 +907,29 @@ class DiscordAutomation:
             return True
         except Exception as e:
             self._log(f"[Switch] Context rebuild failed: {e}", level="error")
+            return False
+
+    async def switch_direct(self) -> bool:
+        """Relaunch the browser with NO proxy (direct egress). Last resort when
+        every residential session is dead and TOR is unavailable — the LIVE
+        tab still renders a real page instead of chrome-error."""
+        self.proxy = None
+        self._direct = True
+        try:
+            if self._page:
+                await self._page.close()
+            if self._context:
+                await self._context.close()
+        except Exception:
+            pass
+        self._page = None
+        self._context = None
+        try:
+            await self._relaunch_browser()
+            self._log("[Switch] Relaunched with direct connection (no proxy)")
+            return True
+        except Exception as e:
+            self._log(f"[Switch] Direct relaunch failed: {e}", level="error")
             return False
 
     async def is_alive(self) -> bool:

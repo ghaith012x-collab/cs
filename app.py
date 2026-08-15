@@ -241,6 +241,36 @@ async def _next_proxy(force: bool = False):
     return None
 
 
+async def _probe_gated_proxy(wid: str, bot, tries: int = 2):
+    """Draw the next session and only accept it if it probes live against
+    discord.com (the same gate the worker loop uses). Dead sessions are
+    blacklisted as they're found, so an expired proxies.txt can't trap the
+    LIVE tab in a chrome-error loop. Returns a proven-live proxy or None."""
+    for _ in range(tries):
+        try:
+            proxy = await _next_proxy(force=PROXY_FORCE)
+        except Exception:
+            proxy = None
+        if proxy is None:
+            return None
+        if (bot.proxy or {}).get("key") == proxy.get("key"):
+            return proxy  # already the session the browser is on
+        if proxy_pool is None:
+            return proxy
+        try:
+            live = await asyncio.wait_for(proxy_pool.probe(proxy), timeout=5.0)
+        except Exception:
+            live = False
+        if live:
+            return proxy
+        _log(f"[{wid}] [Live] Probe failed - dead session, blacklisting {proxy.get('key','?')[:44]}", level="info")
+        try:
+            proxy_pool.release(proxy, ok=False)
+        except Exception:
+            pass
+    return None
+
+
 def _proxy_stats_line(wid: str) -> None:
     """Log live proxy usage counters (used / working / failed) for the terminal."""
     try:
@@ -765,39 +795,62 @@ async def _live_navigate_robust(wid: str, bot, url: str) -> dict:
 
     A parked/launched browser can sit on an expired residential session —
     discord.com then shows 'site can't be reached' (ERR_TUNNEL_CONNECTION_FAILED).
-    Rotate to a fresh session (or TOR) and retry, exactly like the worker loop.
+    Probe-gate the next session exactly like the worker loop, then fall back
+    to TOR, then to a direct connection, so the LIVE tab never stays stuck on
+    chrome-error://chromewebdata/.
     """
     st = await live_control.live_navigate(bot, url)
     if not st.get("error"):
         return st
     first_err = st.get("error", "")
     _log(f"[{wid}] [Live] Navigate failed ({first_err}) — rotating session and retrying", level="warn")
-    for _attempt in range(2):
-        proxy = None
+    # The session the browser is currently on just produced chrome-error:
+    # blacklist it so it is never handed out again this run.
+    if bot.proxy and proxy_pool is not None:
         try:
-            proxy = await _next_proxy(force=False)
+            proxy_pool.release(bot.proxy, ok=False)
         except Exception:
-            proxy = None
+            pass
+    for _attempt in range(3):
+        proxy = await _probe_gated_proxy(wid, bot)
         swapped = False
+        via = ""
         if proxy is not None:
+            via = "proxy"
             try:
                 swapped = await bot.switch_proxy(proxy)
-                if not swapped and proxy_pool is not None:
-                    proxy_pool.release(proxy, ok=False)
             except Exception:
-                if proxy_pool is not None:
+                swapped = False
+            if not swapped and proxy_pool is not None:
+                try:
                     proxy_pool.release(proxy, ok=False)
+                except Exception:
+                    pass
         elif TOR_FALLBACK and _tor_check():
+            via = "tor"
+            _log(f"[{wid}] [Live] No live proxy sessions — falling back to TOR", level="warn")
             try:
                 swapped = await bot.switch_proxy(None)  # fresh TOR circuit
             except Exception:
                 swapped = False
+        else:
+            via = "direct"
+            _log(f"[{wid}] [Live] No live proxy and TOR unavailable — using direct connection", level="warn")
+            try:
+                swapped = await bot.switch_direct()
+            except Exception:
+                swapped = False
         if not swapped:
-            break
+            continue
         st = await live_control.live_navigate(bot, url)
         if not st.get("error"):
-            _log(f"[{wid}] [Live] Navigation recovered after session rotation")
+            _log(f"[{wid}] [Live] Navigation recovered via {via}")
             return st
+        if via == "proxy" and proxy is not None and proxy_pool is not None:
+            try:
+                proxy_pool.release(proxy, ok=False)
+            except Exception:
+                pass
     st["error"] = f"site unreachable after retries ({first_err})"
     return st
 
@@ -825,8 +878,16 @@ async def _start_live_browser(wid: str, url: str = "") -> dict:
         alive = False
     if not alive:
         try:
-            proxy = await _next_proxy(force=False)
-            bot.proxy = proxy
+            # Probe-gate the first session: launching straight onto an expired
+            # residential tunnel is what left the LIVE tab on chrome-error.
+            proxy = await _probe_gated_proxy(wid, bot)
+            if proxy is not None:
+                bot.proxy = proxy
+            elif TOR_FALLBACK and _tor_check():
+                bot.proxy = None
+            else:
+                bot._direct = True
+                bot.proxy = None
             await bot.initialize()
         except Exception as e:
             _log(f"[{wid}] Live browser launch failed: {e}", level="error")
