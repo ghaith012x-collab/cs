@@ -3071,19 +3071,21 @@ class DiscordAutomation:
                             self._log(f"[Form] Field '{fname}' not visible yet (attempt {attempt}/3)", level="warn")
                             await asyncio.sleep(0.6)
                             continue
-                        # Real trusted click at the field center, then
-                        # select-all + type so React gets genuine key events.
-                        box = await el.bounding_box()
-                        if box and box.get("width") and box.get("height"):
-                            await self._page.mouse.click(
-                                box["x"] + box["width"] / 2,
-                                box["y"] + box["height"] / 2,
-                            )
-                        else:
-                            await el.click()
-                        await asyncio.sleep(random.uniform(0.15, 0.4))
-                        await self._page.keyboard.press("Control+A")
-                        await self._page.keyboard.type(val, delay=35 + random.randint(10, 60))
+                        # Element-targeted input, NEVER the global keyboard.
+                        # The old mouse.click + keyboard.type sent keystrokes
+                        # to WHATEVER had focus — when Discord's React
+                        # re-rendered between the click and the typing (its
+                        # username/email validation re-renders the whole
+                        # form), the click's focus was lost and the username
+                        # got typed into the still-focused email field, which
+                        # React happily stored (the "email ends up holding the
+                        # username" failure). el.click() / el.press() /
+                        # el.press_sequentially() each re-resolve and focus
+                        # THE element itself, so every value lands in its own
+                        # field and survives.
+                        await el.click()
+                        await el.press("Control+A")
+                        await el.press_sequentially(val, delay=35 + random.randint(10, 60))
                         # Let Discord's validation + React settle, then read.
                         await asyncio.sleep(0.6)
                         cur = ""
@@ -3543,15 +3545,30 @@ class DiscordAutomation:
                         cur = await el.input_value()
                     except Exception:
                         cur = ""
-                    if cur != val:
-                        # Strategy 2: real keystrokes (trusted key events).
+                    # Strategy 2: real keystrokes (trusted key events), all
+                    # element-targeted (never the global keyboard — that is
+                    # how a username ends up typed into the still-focused
+                    # email field). Retry the write until it sticks, because
+                    # Discord's React re-renders on validation and can wipe a
+                    # freshly typed value mid-pass.
+                    for _write in range(2):
+                        if cur == val:
+                            break
                         try:
                             await el.click()
                             await el.press("Control+A")
-                            await el.type(val, delay=45 + random.randint(15, 70))
+                            await el.press_sequentially(val, delay=45 + random.randint(15, 70))
                         except Exception:
                             pass
-                    self._log(f"[Form] Fallback fill (pass {_pass}): {short} len={len(val)}")
+                        try:
+                            await self._page.wait_for_timeout(400)
+                        except Exception:
+                            pass
+                        try:
+                            cur = await el.input_value()
+                        except Exception:
+                            cur = ""
+                    self._log(f"[Form] Fallback fill (pass {_pass}): {short} len={len(cur)}/{len(val)}")
                 except Exception as e:
                     self._log_exception(f"[Form] Fallback fill failed for {short}", e)
 
