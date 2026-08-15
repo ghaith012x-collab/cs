@@ -2937,6 +2937,35 @@ class DiscordAutomation:
                 return None
             await asyncio.sleep(0.3)
 
+    async def _read_form_values(self) -> dict:
+        """Authoritative read-back of the register form's credential fields.
+
+        Returns the CURRENT raw values (email/display/username/password plus a
+        ToS count) so the filler can confirm a write actually landed — and
+        re-check right before Create Account so a Discord re-render that
+        wipes a field can never be submitted as if it were still filled."""
+        try:
+            v = await self._page.evaluate("""() => {
+                const g = (sel) => { const e = document.querySelector(sel); return e ? (e.value || '') : ''; };
+                return JSON.stringify({
+                    email: g('input[name="email"], input[type="email"], input[autocomplete="email"], input[aria-label*="email" i], input[id*="email" i]'),
+                    display: g('input[name="global_name"], input[aria-label*="display" i]'),
+                    username: g('input[name="username"], input[autocomplete="username"], input[aria-label*="username" i], input[id*="username" i]'),
+                    password: g('input[name="password"], input[type="password"], input[autocomplete="new-password"], input[aria-label*="password" i]'),
+                    tos: document.querySelectorAll('input[type="checkbox"]:checked, [role="checkbox"][aria-checked="true"], [role="checkbox"][data-state="checked"]').length,
+                });
+            }""")
+            return json.loads(v) if v else {}
+        except Exception as e:
+            self._log_exception("[Form] Read-back failed", e)
+            return {}
+
+    def _credentials_filled(self, vals: dict) -> bool:
+        """The three credential fields actually hold the expected values."""
+        return (vals.get("email") == self._email
+                and vals.get("username") == self._username
+                and vals.get("password") == self._password)
+
     async def _fill_registration_form(self) -> bool:
         try:
             self._log("=" * 40)
@@ -3080,10 +3109,9 @@ class DiscordAutomation:
                 vals = json.loads(v) if v else {}
                 ok = (vals.get("email") == self._email
                       and vals.get("username") == self._username
-                      and vals.get("password") == self._password
-                      and (vals.get("tos", 0) > 0))
+                      and vals.get("password") == self._password)
                 if ok:
-                    self._log("[Form] All fields + ToS verified OK")
+                    self._log("[Form] All credential fields verified OK (ToS clicked separately)")
                 else:
                     safe = {
                         "email": vals.get("email", ""),
@@ -3122,6 +3150,24 @@ class DiscordAutomation:
                     except Exception as _de:
                         self._log_exception("[Form] INPUT DUMP failed", _de)
                     await self._fill_missing_fields(display_name)
+                    # Re-read AFTER the fallback. If Discord's React still
+                    # won't hold the values, rotating beats faking a Create
+                    # Account submit on an empty form.
+                    vals = await self._read_form_values()
+                    if not self._credentials_filled(vals):
+                        self._log(
+                            "[Form] [FAIL] Fields still empty after JS + Playwright "
+                            "fallback — aborting (never submit a blank form): "
+                            + json.dumps({
+                                "email": vals.get("email", ""),
+                                "username": vals.get("username", ""),
+                                "password_len": len(vals.get("password") or ""),
+                            }),
+                            level="error",
+                        )
+                        await self.capture_screenshot()
+                        return False
+                    self._log("[Form] Credential fields OK after fallback")
             except Exception as e:
                 self._log_exception("[Form] Verify read-back failed", e)
 
@@ -3158,6 +3204,26 @@ class DiscordAutomation:
             n = await self._click_tos_checkboxes()
             if n > 0:
                 self._log("[Form] ToS checkbox(es) verified checked")
+
+            # ── FINAL gate: never submit an empty form ──
+            # DOB selection + the ToS clicks make Discord's React re-render,
+            # which is exactly when a value it silently dropped reappears
+            # empty. Read the fields one last time; if anything is missing,
+            # rotate instead of "faking" a Create Account on a blank form.
+            final_vals = await self._read_form_values()
+            if not self._credentials_filled(final_vals):
+                self._log(
+                    "[Form] [FAIL] Fields empty right before Create Account — "
+                    "aborting instead of faking a submit: "
+                    + json.dumps({
+                        "email": final_vals.get("email", ""),
+                        "username": final_vals.get("username", ""),
+                        "password_len": len(final_vals.get("password") or ""),
+                    }),
+                    level="error",
+                )
+                await self.capture_screenshot()
+                return False
 
             # ── Create Account Button — try multiple strategies ────────
             # Humanization: pause to review the filled form before submitting.
