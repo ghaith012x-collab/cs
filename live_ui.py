@@ -107,6 +107,12 @@ function lcSmartUrl(raw){
 
 function lcRender(st){
   st = st || {};
+  // Keep the last good frame when a state arrives without a screenshot — a
+  // transient empty capture must never blank the feed to 'waiting for frame'.
+  var prev = LC.last || {};
+  if(!st.screenshot && prev.screenshot && st.connected !== false){
+    st.screenshot = prev.screenshot;
+  }
   LC.last = st;
   var launching = LC.launching || !!st.launching;
   var dot = document.getElementById('lcDot');

@@ -88,8 +88,17 @@ async def live_screenshot(bot) -> str:
 
 async def get_live_state(bot) -> dict:
     meta = await live_meta(bot)
-    meta["screenshot"] = (
-        await live_screenshot(bot) if meta["connected"] else "")
+    shot = ""
+    if meta["connected"]:
+        shot = await live_screenshot(bot)
+        if not shot:
+            # Never flash a black screen just because one capture failed —
+            # keep the last good frame the bot already has.
+            try:
+                shot = bot.get_latest_screenshot() or ""
+            except Exception:
+                shot = ""
+    meta["screenshot"] = shot
     return meta
 
 
@@ -178,9 +187,11 @@ async def live_action(bot, action: dict) -> dict:
     if page is None:
         meta = await live_meta(bot)
         meta["error"] = "browser not started"
+        meta["screenshot"] = ""
         return meta
     action = action or {}
     kind = str(action.get("action", ""))
+    err = None
     try:
         if kind == "back":
             await page.evaluate("window.history.back()")
@@ -199,11 +210,17 @@ async def live_action(bot, action: dict) -> dict:
         elif kind == "type":
             await page.keyboard.type(str(action.get("text", "")), delay=0)
         else:
-            meta = await live_meta(bot)
-            meta["error"] = f"unknown action: {kind}"
-            return meta
+            err = f"unknown action: {kind}"
     except Exception as e:
-        meta = await live_meta(bot)
-        meta["error"] = f"action {kind} failed: {e}"
-        return meta
-    return await live_meta(bot)
+        err = f"action {kind} failed: {e}"
+    # Visual actions refresh the frame immediately (with a screenshot) so the
+    # operator SEES the result of the click; bare-meta responses were blanking
+    # the feed to "waiting for frame". Input actions (key/scroll/type) stay
+    # fast — the next 1.4s poll refreshes the frame for those.
+    if kind in ("click", "back", "forward", "reload"):
+        st = await get_live_state(bot)
+    else:
+        st = await live_meta(bot)
+    if err:
+        st["error"] = err
+    return st
