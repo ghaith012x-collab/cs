@@ -786,7 +786,7 @@ from stealth import (
 # these pages are light and a hang this long only wastes a dead-session slot.
 NAV_TIMEOUT_MS = 30000
 
-# Hard cap on the /register render-wait. A page can sit "loaded but no form"
+# Hard cap on the /register render-wait.  A page can sit "loaded but no form"
 # forever: Cloudflare serves a canned shell (title + #app-mount + the "You
 # need to enable JavaScript" stub) to flagged IPs, JS bundles can drop, and
 # half-dead circuits stall. Without a budget the worker polls indefinitely
