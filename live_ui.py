@@ -72,7 +72,7 @@ LIVE_INJECTION = r"""
       <div class="lc-kbhint">&#9000; KEYBOARD ACTIVE — your physical keys are sent to the browser</div>
     </div>
     <div class="lc-foot">
-      <button class="lc-ico lc-launch" onclick="lcLaunch()">LAUNCH / RECONNECT</button>
+      <button class="lc-ico lc-launch" onclick="lcLaunch(true)">LAUNCH / RECONNECT</button>
       <button class="lc-ico lc-close" onclick="lcCloseBrowser()">CLOSE BROWSER</button>
       <span class="lc-tip">This is the bot's own Chromium — watch it work or take over. CURSOR = click the page. KEYBOARD = just type on your real keyboard (no on-screen keys). The address bar already knows "youtube" means youtube.com.</span>
     </div>
@@ -80,7 +80,7 @@ LIVE_INJECTION = r"""
 </div>
 <script>
 (function(){
-  window.openLive = function(){ var o=document.getElementById('liveOverlay'); if(o.classList.contains('on')){ lcClose(); } else { o.classList.add('on'); LC.start(); } };
+  window.openLive = function(){ var o=document.getElementById('liveOverlay'); if(o.classList.contains('on')){ lcClose(); } else { o.classList.add('on'); LC.start(); lcAutoLaunch(); } };
   window.closeLive = function(){ lcClose(); };
   window.openView = function(){ window.openLive(); };
   var nav = document.querySelector('nav');
@@ -94,7 +94,7 @@ LIVE_INJECTION = r"""
   }
 })();
 
-var LC = {worker:'B1', cursor:false, keyboard:false, timer:null, busy:false, last:null};
+var LC = {worker:'B1', cursor:false, keyboard:false, timer:null, busy:false, launching:false, last:null};
 
 function lcSmartUrl(raw){
   var t = String(raw==null?'':raw).trim();
@@ -108,12 +108,18 @@ function lcSmartUrl(raw){
 function lcRender(st){
   st = st || {};
   LC.last = st;
+  var launching = LC.launching || !!st.launching;
   var dot = document.getElementById('lcDot');
   if(dot) dot.className = 'dot' + (st.connected ? ' on' : '');
   var stEl = document.getElementById('lcState');
   if(stEl){
-    if(!st.connected) stEl.textContent = st.error ? ('error: ' + st.error) : 'browser not started — press LAUNCH';
-    else stEl.textContent = 'LIVE · ' + (st.worker_id || LC.worker) + ' · ' + (st.viewport_width || '?') + '×' + (st.viewport_height || '?') + (st.error ? (' · ' + st.error) : '');
+    if(!st.connected){
+      if(st.error) stEl.textContent = 'error: ' + st.error;
+      else if(launching) stEl.textContent = 'launching browser…';
+      else stEl.textContent = 'browser not started — press LAUNCH';
+    } else {
+      stEl.textContent = 'LIVE · ' + (st.worker_id || LC.worker) + ' · ' + (st.viewport_width || '?') + '×' + (st.viewport_height || '?') + (st.error ? (' · ' + st.error) : '');
+    }
   }
   var tEl = document.getElementById('lcTitle');
   if(tEl) tEl.textContent = (st.title || st.url) || '';
@@ -129,7 +135,9 @@ function lcRender(st){
     if(img) img.style.display = 'none';
     if(ph){
       ph.style.display = 'flex';
-      ph.textContent = st.connected ? 'waiting for frame…' : 'browser not started — press LAUNCH';
+      if(st.connected) ph.textContent = 'waiting for frame…';
+      else if(launching) ph.textContent = 'launching browser…';
+      else ph.textContent = 'browser not started — press LAUNCH';
     }
   }
   var dis = !st.connected || LC.busy;
@@ -224,15 +232,26 @@ function lcFullscreen(){
   else if(f.webkitRequestFullscreen) f.webkitRequestFullscreen();
 }
 
-function lcLaunch(){
+function lcLaunch(force){
+  if(LC.launching) return;
+  LC.launching = true;
+  lcRender(LC.last || {});
   toast('Launching browser…');
-  fetch('/browser/start?worker=' + LC.worker, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({})})
+  var u = lcSmartUrl(document.getElementById('lcAddr').value);
+  if(!u) u = 'https://discord.com';
+  fetch('/browser/start?worker=' + LC.worker, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({url:u, force:!!force})})
     .then(function(r){ return r.json(); })
     .then(function(st){
       lcRender(st);
       toast(st.connected ? 'browser live' : ('launch failed: ' + (st.error || 'unknown')));
     })
-    .catch(function(){ toast('launch failed'); });
+    .catch(function(){ toast('launch failed'); })
+    .finally(function(){ LC.launching = false; lcRender(LC.last || {}); });
+}
+function lcAutoLaunch(){
+  var last = LC.last || {};
+  if(last.connected || last.launching) return;
+  lcLaunch(false);
 }
 function lcCloseBrowser(){
   fetch('/browser/close?worker=' + LC.worker, {method:'POST'})

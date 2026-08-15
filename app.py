@@ -202,6 +202,7 @@ def _init_worker(wid: str) -> dict:
         "finished_at": 0,
         "screenshots": 0,
         "last_shot_b64": "",
+        "launching": False,
     }
 
 
@@ -855,49 +856,76 @@ async def _live_navigate_robust(wid: str, bot, url: str) -> dict:
     return st
 
 
-async def _start_live_browser(wid: str, url: str = "") -> dict:
+async def _start_live_browser(wid: str, url: str = "",
+                              force: bool = False) -> dict:
     """Attach (or cold-launch) the worker's real browser for the LIVE tab.
     The bot shares this same page, so the operator can watch it work or take
-    over. Proxy-first, TOR fallback — exactly like the worker."""
+    over. Proxy-first, TOR fallback — exactly like the worker. Navigates only
+    on a cold launch or when ``force`` is set, so opening the tab never yanks
+    a running signup off the page it is filling."""
     state = _workers.get(wid) or _init_worker(wid)
     _workers[wid] = state
-    bot = state.get("bot")
-    cfg = load_config()
-    if bot is None:
-        bot = DiscordAutomation(
-            headless=bool(cfg.get("headless", True)),
-            proxy=None,
-            worker_id=wid,
-            domain=_pick_domain(cfg),
-            email=cfg.get("custom_email") or "",
-        )
-        state["bot"] = bot
+    if not url:
+        url = "https://discord.com"
+    if state.get("launching"):
+        # A launch is already in flight — report it instead of starting a
+        # second Chromium on top of the first (which would leak the first).
+        return {"connected": False, "worker_id": wid, "url": url,
+                "title": "", "viewport_width": 1920,
+                "viewport_height": 1080, "browser": ENGINE,
+                "screenshot": "", "error": "", "launching": True}
+    state["launching"] = True
+    via = "attach"
+    launched = False
     try:
-        alive = await bot.is_alive()
-    except Exception:
-        alive = False
-    if not alive:
+        bot = state.get("bot")
+        cfg = load_config()
+        if bot is None:
+            bot = DiscordAutomation(
+                headless=bool(cfg.get("headless", True)),
+                proxy=None,
+                worker_id=wid,
+                domain=_pick_domain(cfg),
+                email=cfg.get("custom_email") or "",
+            )
+            state["bot"] = bot
         try:
+            alive = await bot.is_alive()
+        except Exception:
+            alive = False
+        if not alive:
             # Probe-gate the first session: launching straight onto an expired
             # residential tunnel is what left the LIVE tab on chrome-error.
             proxy = await _probe_gated_proxy(wid, bot)
             if proxy is not None:
                 bot.proxy = proxy
+                bot._direct = False
+                via = "proxy"
             elif TOR_FALLBACK and _tor_check():
                 bot.proxy = None
+                bot._direct = False
+                via = "tor"
             else:
                 bot._direct = True
                 bot.proxy = None
-            await bot.initialize()
-        except Exception as e:
-            _log(f"[{wid}] Live browser launch failed: {e}", level="error")
-            return {"connected": False, "worker_id": wid, "url": "",
-                    "title": "", "viewport_width": 1920,
-                    "viewport_height": 1080, "browser": ENGINE,
-                    "screenshot": "", "error": f"browser launch failed: {e}"}
-    if url:
-        return await _live_navigate_robust(wid, bot, url)
-    return await live_control.get_live_state(bot)
+                via = "direct"
+            _log(f"[{wid}] [Live] Launching browser ({via}, engine={ENGINE})…")
+            await asyncio.wait_for(bot.initialize(), timeout=90)
+            _log(f"[{wid}] [Live] Browser launched ({via})")
+            launched = True
+        if url and (force or launched):
+            return await _live_navigate_robust(wid, bot, url)
+        return await live_control.get_live_state(bot)
+    except Exception as e:
+        import traceback
+        tb = "".join(traceback.format_exception(type(e), e, e.__traceback__))
+        _log(f"[{wid}] [Live] Live browser failed ({via}): {e}\n{tb}", level="error")
+        return {"connected": False, "worker_id": wid, "url": "",
+                "title": "", "viewport_width": 1920,
+                "viewport_height": 1080, "browser": ENGINE,
+                "screenshot": "", "error": f"browser launch failed: {e}"}
+    finally:
+        state["launching"] = False
 
 
 async def _close_live_browser(wid: str) -> bool:
@@ -1164,7 +1192,8 @@ def handle_browser_start():
     wid = request.args.get("worker", "B1")
     data = request.get_json(silent=True) or {}
     url = str(data.get("url") or "").strip()
-    st = _run_in_loop(_start_live_browser(wid, url))
+    force = bool(data.get("force"))
+    st = _run_in_loop(_start_live_browser(wid, url, force=force))
     if st is None:
         return jsonify({"connected": False, "worker_id": wid,
                         "error": "event loop unavailable"}), 503

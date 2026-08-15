@@ -683,8 +683,17 @@ class DiscordAutomation:
                 pass
             self._browser = None
         args = launch_args(headless=self.headless)
+        # The engine pins the proxy at browser launch. When there is no sticky
+        # residential session, relaunch must ride TOR exactly like initialize()
+        # does — otherwise switch_proxy(None) silently goes DIRECT (the
+        # context-level proxy is ignored by the engine) and Discord's
+        # Cloudflare blocks the datacenter IP with chrome-error.
+        launch_proxy = self._launch_proxy()
+        if launch_proxy is None and not self._direct and _tor_check():
+            launch_proxy = {"server": "socks5://127.0.0.1:9050"}
+            self._tor_enabled = True
         self._browser = await self._playwright.chromium.launch(
-            headless=self.headless, args=args, proxy=self._launch_proxy(),
+            headless=self.headless, args=args, proxy=launch_proxy,
             **self._launch_opts())
         await self._build_context()
 
@@ -865,8 +874,7 @@ class DiscordAutomation:
         DIFFERENT session relaunches the browser; reusing the same session
         only rebuilds the context (and keeps the fingerprint — rotating an
         identity on an unchanged IP just churns fingerprints)."""
-        if new_proxy:
-            self._direct = False
+        self._direct = False
         same_session = bool(
             new_proxy and self.proxy
             and new_proxy.get("key") == self.proxy.get("key")
