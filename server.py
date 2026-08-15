@@ -1539,6 +1539,20 @@ class DiscordAutomation:
             self._log("[Nav] Discord site rendered")
             await self.capture_screenshot()
 
+            # ── Settle wait before touching the form ──
+            # Discord's SPA keeps re-rendering after the form first paints;
+            # writing values during that window gets them wiped on the next
+            # re-render (the "fields stay empty" bug). Wait a fixed 20s so
+            # hydration fully finishes before the filler runs.
+            self._log("[Nav] Waiting 20s for Discord to fully settle before filling...")
+            settle_deadline = time.time() + 20.0
+            while time.time() < settle_deadline:
+                if self._stopped.is_set():
+                    self._nav_error = "stopped by user"
+                    self._log("[Nav] Stopped by user during settle wait")
+                    return False
+                await asyncio.sleep(0.5)
+
             # Fill the form
             form_ok = await self._fill_registration_form()
             success = False
