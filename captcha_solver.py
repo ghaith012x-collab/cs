@@ -4616,7 +4616,8 @@ def build_llm_prompt(question: str) -> str:
         scored.append((score, eq, ea))
     scored.sort(key=lambda x: -x[0])
     lines = ["Answer each question with exactly ONE word or number.",
-             "No punctuation, no explanation, no quotes."]
+             "No punctuation, no explanation, no quotes.",
+             "Answer in the SAME LANGUAGE as the question."]
     for _score, eq, ea in scored[:4]:
         lines.append("Question: " + eq)
         lines.append("Answer: " + ea)
@@ -4948,7 +4949,8 @@ async def solve_hcaptcha_accessibility(page, iframe,
         "- click: give the center pixel of EVERY image/tile you must click "
         "(the ones matching the prompt), exact integers.\n"
         "- text: the single word/number/phrase that answers the question "
-        "shown (the challenge is displayed as an image).\n"
+        "shown (the challenge is displayed as an image). Answer in the "
+        "SAME LANGUAGE as the question.\n"
         "Be exact - wrong coordinates fail the challenge."
     )
 
@@ -5096,7 +5098,8 @@ async def solve_hcaptcha_accessibility(page, iframe,
             scored.append((score, eq, ea))
         scored.sort(key=lambda x: -x[0])
         lines = ["Answer each question with exactly ONE word or number.",
-                 "No punctuation, no explanation, no quotes."]
+                 "No punctuation, no explanation, no quotes.",
+                 "Answer in the SAME LANGUAGE as the question."]
         for _score, eq, ea in scored[:4]:
             lines.append("Question: " + eq)
             lines.append("Answer: " + ea)
@@ -5273,7 +5276,8 @@ async def solve_hcaptcha_accessibility(page, iframe,
                         "messages": [
                             {"role": "system", "content": (
                                 "You are solving a CAPTCHA accessibility question. "
-                                "Answer with exactly ONE word, number, or short phrase. "
+                                "Answer with exactly ONE word, number, or short phrase "
+                                "in the SAME LANGUAGE as the question. "
                                 "No punctuation, no explanation, no quotes, lowercase."
                             )},
                             {"role": "user", "content": _build_llm_prompt(question)},
@@ -5414,7 +5418,13 @@ async def solve_hcaptcha_accessibility(page, iframe,
             '[class*="prompt"]',
             'h2:has-text("Accessibility")',
             'button:has-text("Set Accessibility Cookie")',
+            'button:has-text("Cookie")',
+            'button:has-text("Barrierefreiheit")',
+            'button:has-text("Accessibilité")',
+            'button:has-text("Accesibilidad")',
             'button:has-text("Start")',
+            'button:has-text("Commencer")',
+            'button:has-text("Loslegen")',
             '[class*="challenge-text"]',
             '[class*="task-text"]',
             '[class*="instruction"]',
@@ -5568,28 +5578,45 @@ async def solve_hcaptcha_accessibility(page, iframe,
             # so textContent works but children.length > 0 would wrongly skip them.
             try:
                 clicked = await _challenge_js("""() => {
-                    // Match any element with short text matching the label
+                    // ALL locales: the menu item is localized (French "Défi
+                    // d'accessibilité", German "Herausforderung zur
+                    // Barrierefreiheit", Spanish "Reto de accesibilidad"...).
+                    const ACC = /accessib|barrierefrei|défi|reto|sfida|desaf|toegankelijk|dostępn|přístupn|прыступ|доступн|utmaning|udfordring|haaste|a11y/i;
+                    const META = /about|why|report|close|über|warum|melden|schließen|à propos|pourquoi|signaler|fermer|acerca|por qué|informar|cerrar|perché|segnala|chiudi|over|waarom|rapporteer|sluit|varför|stäng|hvorfor|luk|zamknij|o nas|zgłoś|закрыть|о нас|сообщить|hakkında|kapat|về|đóng|닫기|정보|閉じる|关闭|关于/i;
                     const all = document.querySelectorAll('*');
+                    const candidates = [];
                     for (const el of all) {
                         if (el.offsetParent === null) continue;
                         const t = (el.textContent || '').trim();
                         if (!t || t.length > 60 || t.length < 8) continue;
-                        if (/^Accessibility Challenge$/i.test(t)) {
+                        if (META.test(t)) continue;
+                        candidates.push(el);
+                    }
+                    // 1) Any candidate that looks like the accessibility item
+                    for (const el of candidates) {
+                        const t = (el.textContent || '').trim();
+                        if (ACC.test(t)) {
                             el.scrollIntoView({block: 'center'});
                             el.click();
                             return t;
                         }
                     }
-                    // Fallback: partial match on short text
-                    for (const el of all) {
-                        if (el.offsetParent === null) continue;
+                    // 2) The single remaining non-meta item IS the
+                    // accessibility challenge (About/Why/Report are meta).
+                    if (candidates.length === 1) {
+                        const el = candidates[0];
                         const t = (el.textContent || '').trim();
-                        if (t.length > 60 || t.length < 5) continue;
-                        if (/accessibility.*challenge/i.test(t)) {
-                            el.scrollIntoView({block: 'center'});
-                            el.click();
-                            return t;
-                        }
+                        el.scrollIntoView({block: 'center'});
+                        el.click();
+                        return t;
+                    }
+                    // 3) Last non-meta item as a final fallback
+                    if (candidates.length > 1) {
+                        const el = candidates[candidates.length - 1];
+                        const t = (el.textContent || '').trim();
+                        el.scrollIntoView({block: 'center'});
+                        el.click();
+                        return t;
                     }
                     return null;
                 }""")
@@ -7763,8 +7790,15 @@ async def solve_hcaptcha_accessibility(page, iframe,
                 r'|(?:please\s+)?answer\s+the\s+following\s+question\.?\s*',
                 '', text, flags=re.IGNORECASE
             )
-            text = re.sub(r'please\s+try\s+again.*', '', text,
-                          flags=re.IGNORECASE | re.DOTALL)
+            text = re.sub(
+                r'(?:please\s+try\s+again|réessayer|versuchen\s+sie\s+es\s+erneut|'
+                r'versuchen.*erneut|inténtalo\s+de\s+nuevo|inténtelo\s+de\s+nuevo|'
+                r'prova\s+di\s+nuovo|riprova|probeer\s+het\s+opnieuw|probeer\s+opnieuw|'
+                r'försök\s+igen|prøv\s+igjen|prøv\s+igen|spróbuj\s+ponownie|'
+                r'попробуйте\s+еще|попробуйте\s+ещё|попробуйте\s+снова|'
+                r'tente\s+novamente|tente\s+de\s+novo|tekrar\s+deneyin|'
+                r'pokušte\s+znovu|yritä\s+uudelleen).*',
+                '', text, flags=re.IGNORECASE | re.DOTALL)
             text = re.sub(r'\s*\u26a0\ufe0f\s*', ' ', text)
             text = re.sub(r'\s*(?:verify|skip)\s+en\b[^\w]*$', '', text,
                           flags=re.IGNORECASE)
@@ -7774,7 +7808,15 @@ async def solve_hcaptcha_accessibility(page, iframe,
         # question stays on screen — retry it instead of skipping. Capped at
         # 2 attempts per question so a truly unanswerable one gets skipped
         # rather than looping forever. ──
-        if raw and re.search(r'please\s+try\s+again', raw, re.IGNORECASE):
+        if raw and re.search(
+                r'please\s+try\s+again|try\s+again|réessayer|'
+                r'versuchen\s+sie\s+es\s+erneut|versuchen.*erneut|'
+                r'inténtalo\s+de\s+nuevo|inténtelo\s+de\s+nuevo|'
+                r'prova\s+di\s+nuovo|riprova|probeer\s+het\s+opnieuw|probeer\s+opnieuw|'
+                r'försök\s+igen|prøv\s+igjen|prøv\s+igen|spróbuj\s+ponownie|'
+                r'попробуйте\s+еще|попробуйте\s+ещё|попробуйте\s+снова|'
+                r'tente\s+novamente|tente\s+de\s+novo|tekrar\s+deneyin|'
+                r'pokušte\s+znovu|yritä\s+uudelleen', raw, re.IGNORECASE):
             if not text:
                 log(f"[Accessibility] Q{q} rejected but no question text left — skipping",
                     level="warn")
@@ -8023,7 +8065,14 @@ async def solve_hcaptcha_accessibility(page, iframe,
 
         # ── Primary: JS injection — click the visible action button ──
         js_click = r"""() => {
-            const names = ['Next', 'Submit', 'Verify', 'Continue', 'OK', 'Done'];
+            const names = ['Next', 'Submit', 'Verify', 'Continue', 'OK', 'Done',
+                'Weiter', 'Suivant', 'Soumettre', 'Envoyer', 'Vérifier', 'Siguiente',
+                'Enviar', 'Verificar', 'Continuar', 'Avanti', 'Invia', 'Verifica',
+                'Volgende', 'Verzenden', 'Verifieer', 'Nästa', 'Skicka', 'Verifiera',
+                'Neste', 'Send', 'Næste', 'Dalej', 'Wyślij', 'Potwierdź', 'Далее',
+                'Отправить', 'Подтвердить', 'Продолжить', 'Avançar', 'Devam',
+                'Gönder', 'Doğrula', 'Další', 'Seuraava', '다음', '제출', '확인',
+                '次へ', '送信', '下一步', '提交', 'Tiếp theo', 'Gửi', 'Xác minh'];
             const btns = document.querySelectorAll('button, [role="button"]');
             for (const b of btns) {
                 const txt = (b.textContent || '').trim().toLowerCase();
@@ -8054,7 +8103,10 @@ async def solve_hcaptcha_accessibility(page, iframe,
             log(f"[Accessibility] JS click error: {e}")
 
         # ── Fallback 1: get_by_role ──
-        for name in ("Next", "Submit", "Verify", "Continue", "OK"):
+        for name in ("Next", "Submit", "Verify", "Continue", "OK",
+                     "Weiter", "Suivant", "Siguiente", "Avanti", "Volgende",
+                     "Nästa", "Neste", "Dalej", "Далее", "Avançar", "Devam",
+                     "다음", "次へ", "下一步", "Tiếp theo"):
             try:
                 btn = hcaptcha.get_by_role("button", name=name).first
                 await btn.wait_for(state="visible", timeout=2000)
@@ -8076,6 +8128,15 @@ async def solve_hcaptcha_accessibility(page, iframe,
             'button:has-text("Verify")',
             'button:has-text("OK")',
             'button:has-text("Continue")',
+            'button:has-text("Weiter")',
+            'button:has-text("Suivant")',
+            'button:has-text("Siguiente")',
+            'button:has-text("Avanti")',
+            'button:has-text("Volgende")',
+            'button:has-text("Dalej")',
+            'button:has-text("Далее")',
+            'button:has-text("Avançar")',
+            'button:has-text("Devam")',
         ]:
             try:
                 await hcaptcha.locator(btn_sel).first.click(timeout=2000)
@@ -8291,7 +8352,7 @@ async def solve_hcaptcha_accessibility(page, iframe,
                                     const btns = document.querySelectorAll('button, [role="button"]');
                                     for (const b of btns) {
                                         const txt = ((b.textContent || '') + ' ' + (b.getAttribute('aria-label') || '')).toLowerCase().trim();
-                                        if (txt.includes('skip') && b.offsetParent !== null) {
+                                        if (/(skip|überspringen|passer|sauter|saltar|omitir|hoppe over|hoppa över|pomiń|przeskocz)/.test(txt) && b.offsetParent !== null) {
                                             b.click();
                                             return 'clicked_skip';
                                         }

@@ -38,8 +38,31 @@ _LOGIN_LINK_GUARD = r"""const __isLoginLink = (el) => {
                 (el.getAttribute('title') || '') + ' ' +
                 (el.value || '');
     const t = raw.toLowerCase().replace(/\s+/g, ' ').trim();
-    return /(already|have an account|log ?in|sign ?in|signin|back to|forgot|login)/.test(t);
+    // ALL locales: clicking the "Already have an account?" / back-to-login
+    // control navigates to /login and silently kills the run, so the guard
+    // has to recognize it in whatever language Discord is serving (Swedish
+    // "Har du redan ett konto?", French "Déjà un compte ?", German
+    // "Bereits ein Konto?", Dutch "Al een account?", Russian
+    // "Уже есть аккаунт?"...).
+    return /(already|have an account|have account|account\?|log ?in|sign ?in|signin|back to|forgot|login|einloggen|anmelden|logga in|logg inn|log ind|connexion|se connecter|connecte|iniciar sesi|acceder|entrar|conectar|accedi|inloggen|přihlásit|zaloguj|zalogować|войти|вход|войдите|로그인|ログイン|登录|登入|đăng nhập|giriş yap|kirjaudu|åter till|tillbaka|terug|retour|zurück|volver|indietro|tilbage|tilbake)/.test(t);
 };"""
+
+# Shared JS regex: the register form's submit button label in EVERY locale
+# (German "Konto erstellen", French "Créer un compte", Spanish "Crear
+# cuenta", Russian "Создать аккаунт", Korean "가입"...). Injected into the
+# button-click evaluates with __SUBMIT_TEXT_RE__ so the Create Account click
+# works no matter what language Discord serves.
+_SUBMIT_TEXT_RE = (
+    "create account|create an account|sign up|signup|continue|"
+    "registrieren|konto erstellen|erstelle konto|créer un compte|s'inscrire|"
+    "inscription|crear cuenta|registrarse|criar conta|cadastrar|cadastre|"
+    "aanmelden|account aanmaken|registrera|skapa konto|opret konto|"
+    "opret bruger|załóż konto|zarejestruj|создать аккаунт|зарегистрироваться|"
+    "регистрация|tạo tài khoản|đăng ký|가입|회원가입|注册|创建|アカウント作成|登録|"
+    "üye ol|kayıt ol|weiter|continuer|continuar|continua|"
+    "volgende|fortsätt|fortsett|fortsæt|kontynuuj|продолжить|devam et|"
+    "tiếp tục|계속|继续|続ける"
+)
 
 # ── Shared JS: find Discord's REQUIRED ToS checkbox (real controls only) ──
 # Discord's register form has two checkboxes: the required Terms-of-Service
@@ -89,6 +112,9 @@ _TOS_TARGET_JS = r"""() => {
 
 
 # ── Discord rate-limit phrases — rotate the proxy the moment these show ──
+# Discord localizes the 429 page to the region's language, so include the
+# common spellings (German "zu viele Anfragen", French "trop de requêtes",
+# Spanish "demasiadas solicitudes", Russian "слишком много запросов"...).
 _RATE_LIMIT_KEYWORDS = (
     "the resource is being rate limited",
     "resource is being rate limited",
@@ -98,6 +124,20 @@ _RATE_LIMIT_KEYWORDS = (
     "too many requests",
     "slowdown",
     "try again later",
+    "zu viele anfragen",
+    "trop de requêtes",
+    "trop de demandes",
+    "demasiadas solicitudes",
+    "demasiadas peticiones",
+    "muitas solicitações",
+    "te veel verzoeken",
+    "för många förfrågningar",
+    "for mange forespørsler",
+    "for mange anmodninger",
+    "слишком много запросов",
+    "zbyt wiele żądań",
+    "çok fazla istek",
+    "limite de débit",
 )
 
 
@@ -119,9 +159,14 @@ _NAV_STATE_JS = r"""() => {
     const email = document.querySelector('input[name="email"], input[type="email"], input[aria-label*="email" i], input[aria-label*="Email"], input[id*="email" i]');
     const username = document.querySelector('input[name="username"], input[aria-label*="username" i], input[aria-label*="display" i]');
     const password = document.querySelector('input[name="password"], input[type="password"], input[aria-label*="password" i]');
-    const hasAge = /birthday|date of birth|born|how old/i.test(text.substring(0, 400));
-    const hasMonth = document.querySelector('[class*="month" i], [aria-label*="month" i], select');
-    const isLogin = /login|sign in|welcome back/i.test(text.substring(0, 400));
+    // Age-gate + login detection is locale-agnostic: Discord localizes the
+    // register page to the proxy region, so accept the common spellings
+    // (Dutch "geboortedatum", French "date de naissance", German
+    // "Geburtsdatum", Swedish "födelsedatum", Russian "дата рождения",
+    // Korean "생년월일"...).
+    const hasAge = /birthday|date of birth|born|how old|geboortedatum|date de naissance|geburtsdatum|fecha de nacimiento|data di nascita|data de nascimento|födelsedatum|fødselsdato|fødselsdato|data urodzenia|дата рождения|datum narození|doğum tarihi|tanggal lahir|생년월일|生年月日|出生日期/i.test(text.substring(0, 400));
+    const hasMonth = document.querySelector('[class*="month" i], [aria-label*="month" i], [class*="maand" i], [class*="mois" i], [class*="monat" i], select');
+    const isLogin = /login|sign in|welcome back|anmelden|einloggen|logga in|logg inn|log ind|connexion|se connecter|iniciar sesi|acceder|entrar|conectar|accedi|inloggen|přihlásit|zaloguj|войти|вход|로그인|ログイン|登录|đăng nhập|giriş yap|kirjaudu/i.test(text.substring(0, 400));
     const hasQR = document.querySelector('img[src*="qr" i], [class*="qr" i]');
     const continueBtn = document.querySelector('button[type="submit"], button[class*="continue" i]');
     return JSON.stringify({
@@ -195,7 +240,7 @@ _FORM_READY_JS = r"""() => {
         username: vis(username),
         password: vis(password),
         dob: Object.keys(seen).length,
-        dobText: /date of birth|birthday/i.test(body),
+        dobText: /date of birth|birthday|geboortedatum|date de naissance|geburtsdatum|fecha de nacimiento|data di nascita|data de nascimento|födelsedatum|fødselsdato|data urodzenia|дата рождения|datum narození|doğum tarihi|tanggal lahir|생년월일|生年月日|出生日期/i.test(body),
         inputs: document.querySelectorAll('input').length,
         buttons: document.querySelectorAll('button').length,
         readyState: document.readyState || '',
@@ -222,18 +267,47 @@ async () => {
     // "mars", ...) resolve to their numeric index so the option match works
     // in whatever locale Discord is serving.
     const MONTH_ALIASES = {
-        'januari':1,'janvier':1,'januar':1,'enero':1,'gennaio':1,
+        'januari':1,'janvier':1,'januar':1,'enero':1,'gennaio':1,'styczeń':1,
+        'январь':1,'січень':1,'януари':1,'tammikuu':1,'jaanuar':1,'janvāris':1,
+        'sausis':1,'Ιανουάριος':1,'ocak':1,'január':1,'ianuarie':1,'يناير':1,
+        'जनवरी':1,'1월':1,'1月':1,'มกราคม':1,
         'februari':2,'février':2,'fevrier':2,'februar':2,'febrero':2,'febbraio':2,
-        'maart':3,'mars':3,'märz':3,'marzo':3,'março':3,'marzec':3,
-        'april':4,'avril':4,'abril':4,
-        'mei':5,'mai':5,'mayo':5,'maggio':5,'maj':5,
-        'juni':6,'juin':6,'junio':6,'giugno':6,
-        'juli':7,'juillet':7,'julio':7,'luglio':7,
-        'augustus':8,'août':8,'aout':8,'agosto':8,
-        'september':9,'septembre':9,'septiembre':9,'settembre':9,
-        'oktober':10,'octobre':10,'octubre':10,'ottobre':10,
-        'november':11,'novembre':11,'noviembre':11,
+        'luty':2,'февраль':2,'лютий':2,'февруари':2,'helmikuu':2,'veebruar':2,
+        'februāris':2,'vasaris':2,'Φεβρουάριος':2,'şubat':2,'február':2,'februarie':2,
+        'فبراير':2,'फरवरी':2,'2월':2,'2月':2,'กุมภาพันธ์':2,
+        'maart':3,'mars':3,'märz':3,'marts':3,'marzo':3,'março':3,'marzec':3,
+        'март':3,'березень':3,'maaliskuu':3,'märts':3,'kovas':3,'Μάρτιος':3,
+        'mart':3,'március':3,'martie':3,'مارس':3,'मार्च':3,'3월':3,'3月':3,'มีนาคม':3,
+        'april':4,'avril':4,'abril':4,'kwiecień':4,'апрель':4,'квітень':4,
+        'април':4,'huhtikuu':4,'aprill':4,'aprīlis':4,'balandis':4,'Απρίλιος':4,
+        'nisan':4,'április':4,'aprilie':4,'أبريل':4,'अप्रैल':4,'4월':4,'4月':4,'เมษายน':4,
+        'mei':5,'mai':5,'mayo':5,'maggio':5,'maj':5,'май':5,'травень':5,
+        'toukokuu':5,'maijs':5,'gegužė':5,'Μάιος':5,'mayıs':5,'május':5,
+        'مايو':5,'मई':5,'5월':5,'5月':5,'พฤษภาคม':5,
+        'juni':6,'juin':6,'junio':6,'giugno':6,'июнь':6,'червень':6,'юни':6,
+        'kesäkuu':6,'juuni':6,'jūnijs':6,'birželis':6,'Ιούνιος':6,'haziran':6,
+        'június':6,'iunie':6,'يونيو':6,'जून':6,'6월':6,'6月':6,'มิถุนายน':6,
+        'juli':7,'juillet':7,'julio':7,'luglio':7,'июль':7,'липень':7,'юли':7,
+        'heinäkuu':7,'juuli':7,'jūlijs':7,'liepa':7,'Ιούλιος':7,'temmuz':7,
+        'július':7,'iulie':7,'يوليو':7,'जुलाई':7,'7월':7,'7月':7,'กรกฎาคม':7,
+        'augustus':8,'augusti':8,'august':8,'août':8,'aout':8,'agosto':8,
+        'август':8,'серпень':8,'elokuu':8,'augusts':8,'rugpjūtis':8,'Αύγουστος':8,
+        'ağustos':8,'augusztus':8,'أغسطس':8,'अगस्त':8,'8월':8,'8月':8,'สิงหาคม':8,
+        'september':9,'septembre':9,'septiembre':9,'settembre':9,'сентябрь':9,
+        'вересень':9,'септември':9,'syyskuu':9,'septembris':9,'rugsėjis':9,
+        'Σεπτέμβριος':9,'eylül':9,'szeptember':9,'septembrie':9,'سبتمبر':9,
+        'सितंबर':9,'9월':9,'9月':9,'กันยายน':9,
+        'oktober':10,'octobre':10,'octubre':10,'ottobre':10,'октябрь':10,
+        'жовтень':10,'октомври':10,'lokakuu':10,'oktoober':10,'oktobris':10,
+        'spalis':10,'Οκτώβριος':10,'ekim':10,'október':10,'octombrie':10,'أكتوبر':10,
+        'अक्टूबर':10,'10월':10,'10月':10,'ตุลาคม':10,
+        'november':11,'novembre':11,'noviembre':11,'ноябрь':11,'листопад':11,
+        'ноември':11,'marraskuu':11,'novembris':11,'lapkritis':11,'Νοέμβριος':11,
+        'kasım':11,'noiembrie':11,'نوفمبر':11,'नवंबर':11,'11월':11,'11月':11,'พฤศจิกายน':11,
         'december':12,'décembre':12,'dezember':12,'diciembre':12,'dicembre':12,
+        'desember':12,'декабрь':12,'грудень':12,'декември':12,'joulukuu':12,
+        'detsember':12,'decembris':12,'gruodis':12,'Δεκέμβριος':12,'aralık':12,
+        'decembrie':12,'ديسمبر':12,'दिसंबर':12,'12월':12,'12月':12,'ธันวาคม':12,
     };
     const wantNum = monthIndex || MONTH_ALIASES[low(OPT)] || (parseInt(OPT, 10) || 0);
     const wantStr = low(OPT);
@@ -324,29 +398,85 @@ async () => {
 """
 
 # Locale-aware DOB dropdown labels — Discord localizes the register form to
-# the proxy's region (e.g. Dutch "Dag/Maand/Jaar"), so label matching accepts
-# the common spellings, not just English.
+# the proxy's region ("Dag/Maand/Jaar", "Jour/Mois/Année", "Tag/Monat/Jahr",
+# "день/месяц/год"...), so label matching accepts the common spellings across
+# ALL languages, not just English. These feed _FORM_READY_JS, _DOB_LOCATE_JS
+# and _DOB_FALLBACK_JS (via json.dumps), so the filler works on any form
+# Discord serves.
 _DOB_LABEL_ALIASES = {
-    "Month": ["month", "maand", "mois", "monat", "mes", "mês", "mese", "miesiąc", "månad", "måned", "měsíc"],
-    "Day": ["day", "dag", "jour", "tag", "día", "dia", "giorno", "dzień"],
-    "Year": ["year", "jaar", "an", "année", "annee", "jahr", "año", "ano", "anno", "rok", "år"],
+    "Month": [
+        "month", "maand", "mois", "monat", "mes", "mês", "mese",
+        "miesiąc", "månad", "måned", "měsíc", "mesiac", "месяц", "місяць",
+        "месец", "kuukausi", "kuu", "mēnesis", "mėnuo", "μήνας", "ay",
+        "hónap", "lună", "bulan", "tháng", "월", "月", "شهر", "महीना", "เดือน",
+    ],
+    "Day": [
+        "day", "dag", "jour", "tag", "día", "dia", "giorno", "dzień",
+        "deň", "den", "день", "ден", "päivä", "päev", "diena", "ημέρα",
+        "gün", "nap", "zi", "hari", "ngày", "일", "日", "يوم", "दिन", "วัน",
+    ],
+    "Year": [
+        "year", "jaar", "an", "année", "annee", "jahr", "año", "ano",
+        "anno", "rok", "år", "год", "рік", "година", "vuosi", "aasta",
+        "gads", "metai", "έτος", "yıl", "év", "tahun", "năm", "년", "年",
+        "سنة", "साल", "ปี",
+    ],
 }
 # Localized month names → numeric index, so the English month names the bot
 # generates ("January"...) can be matched against the localized options
-# Discord renders (Dutch "Januari", French "janvier", German "März", ...).
+# Discord renders in ANY language (Dutch "Januari", French "janvier", German
+# "März", Russian "март", Korean "3월", ...).
 _MONTH_ALIASES = {
     "januari": 1, "janvier": 1, "januar": 1, "enero": 1, "gennaio": 1,
+    "styczeń": 1, "январь": 1, "січень": 1, "януари": 1, "tammikuu": 1,
+    "jaanuar": 1, "janvāris": 1, "sausis": 1, "Ιανουάριος": 1, "ocak": 1,
+    "január": 1, "ianuarie": 1, "يناير": 1, "जनवरी": 1, "1월": 1, "1月": 1,
+    "มกราคม": 1,
     "februari": 2, "février": 2, "fevrier": 2, "februar": 2, "febrero": 2, "febbraio": 2,
-    "maart": 3, "mars": 3, "märz": 3, "marzo": 3, "março": 3, "marzec": 3,
-    "april": 4, "avril": 4, "abril": 4,
+    "luty": 2, "февраль": 2, "лютий": 2, "февруари": 2, "helmikuu": 2,
+    "veebruar": 2, "februāris": 2, "vasaris": 2, "Φεβρουάριος": 2, "şubat": 2,
+    "február": 2, "februarie": 2, "فبراير": 2, "फरवरी": 2, "2월": 2, "2月": 2,
+    "กุมภาพันธ์": 2,
+    "maart": 3, "mars": 3, "märz": 3, "marts": 3, "marzo": 3, "março": 3, "marzec": 3,
+    "март": 3, "березень": 3, "maaliskuu": 3, "märts": 3, "kovas": 3,
+    "Μάρτιος": 3, "mart": 3, "március": 3, "martie": 3, "مارس": 3, "मार्च": 3,
+    "3월": 3, "3月": 3, "มีนาคม": 3,
+    "april": 4, "avril": 4, "abril": 4, "kwiecień": 4, "апрель": 4, "квітень": 4,
+    "април": 4, "huhtikuu": 4, "aprill": 4, "aprīlis": 4, "balandis": 4,
+    "Απρίλιος": 4, "nisan": 4, "április": 4, "aprilie": 4, "أبريل": 4, "अप्रैल": 4,
+    "4월": 4, "4月": 4, "เมษายน": 4,
     "mei": 5, "mai": 5, "mayo": 5, "maggio": 5, "maj": 5,
+    "май": 5, "травень": 5, "toukokuu": 5, "maijs": 5, "gegužė": 5,
+    "Μάιος": 5, "mayıs": 5, "május": 5, "مايو": 5, "मई": 5,
+    "5월": 5, "5月": 5, "พฤษภาคม": 5,
     "juni": 6, "juin": 6, "junio": 6, "giugno": 6,
+    "июнь": 6, "червень": 6, "юни": 6, "kesäkuu": 6, "juuni": 6, "jūnijs": 6,
+    "birželis": 6, "Ιούνιος": 6, "haziran": 6, "június": 6, "iunie": 6,
+    "يونيو": 6, "जून": 6, "6월": 6, "6月": 6, "มิถุนายน": 6,
     "juli": 7, "juillet": 7, "julio": 7, "luglio": 7,
+    "июль": 7, "липень": 7, "юли": 7, "heinäkuu": 7, "juuli": 7, "jūlijs": 7,
+    "liepa": 7, "Ιούλιος": 7, "temmuz": 7, "július": 7, "iulie": 7,
+    "يوليو": 7, "जुलाई": 7, "7월": 7, "7月": 7, "กรกฎาคม": 7,
     "augustus": 8, "augusti": 8, "august": 8, "août": 8, "aout": 8, "agosto": 8,
+    "август": 8, "серпень": 8, "elokuu": 8, "augusts": 8, "rugpjūtis": 8,
+    "Αύγουστος": 8, "ağustos": 8, "augusztus": 8, "أغسطس": 8, "अगस्त": 8,
+    "8월": 8, "8月": 8, "สิงหาคม": 8,
     "september": 9, "septembre": 9, "septiembre": 9, "settembre": 9,
+    "сентябрь": 9, "вересень": 9, "септември": 9, "syyskuu": 9, "septembris": 9,
+    "rugsėjis": 9, "Σεπτέμβριος": 9, "eylül": 9, "szeptember": 9, "septembrie": 9,
+    "سبتمبر": 9, "सितंबर": 9, "9월": 9, "9月": 9, "กันยายน": 9,
     "oktober": 10, "octobre": 10, "octubre": 10, "ottobre": 10,
+    "октябрь": 10, "жовтень": 10, "октомври": 10, "lokakuu": 10, "oktoober": 10,
+    "oktobris": 10, "spalis": 10, "Οκτώβριος": 10, "ekim": 10, "október": 10,
+    "octombrie": 10, "أكتوبر": 10, "अक्टूबर": 10, "10월": 10, "10月": 10, "ตุลาคม": 10,
     "november": 11, "novembre": 11, "noviembre": 11,
+    "ноябрь": 11, "листопад": 11, "ноември": 11, "marraskuu": 11, "novembris": 11,
+    "lapkritis": 11, "Νοέμβριος": 11, "kasım": 11, "noiembrie": 11,
+    "نوفمبر": 11, "नवंबर": 11, "11월": 11, "11月": 11, "พฤศจิกายน": 11,
     "december": 12, "décembre": 12, "dezember": 12, "diciembre": 12, "dicembre": 12,
+    "desember": 12, "декабрь": 12, "грудень": 12, "декември": 12, "joulukuu": 12,
+    "detsember": 12, "decembris": 12, "gruodis": 12, "Δεκέμβριος": 12, "aralık": 12,
+    "decembrie": 12, "ديسمبر": 12, "दिसंबर": 12, "12월": 12, "12月": 12, "ธันวาคม": 12,
 }
 
 _MONTHS_EN = ("january", "february", "march", "april", "may", "june", "july",
@@ -1497,7 +1627,7 @@ class DiscordAutomation:
                             const all = document.querySelectorAll('a, button, [role="link"], [role="button"]');
                             for (const el of all) {
                                 const t = (el.textContent || '').toLowerCase().replace(/\s+/g, ' ').trim();
-                                if (t && /register|sign up|create account/i.test(t) && el.offsetParent !== null) {
+                                if (t && /register|sign up|create account|registrieren|inscription|s'inscrire|registrarse|registreren|registrera|opret konto|załóż konto|создать аккаунт|регистрация|đăng ký|가입|注册|登録|kayıt ol/i.test(t) && el.offsetParent !== null) {
                                     el.scrollIntoView({block: 'center'});
                                     el.click();
                                     return 'clicked';
@@ -2462,7 +2592,10 @@ class DiscordAutomation:
                     if (btn.disabled || btn.getAttribute('aria-disabled') === 'true') continue;
                     if (__isLoginLink(btn)) continue;
                     const t = _norm(btn.textContent);
-                    if (t.includes('create account') || t.includes('continue') || t.includes('sign up')) {
+                    // ALL locales: the submit label is localized (German "Konto
+                    // erstellen", French "Créer un compte", Russian "Создать
+                    // аккаунт"...), so match the common spellings.
+                    if (RegExp(__SUBMIT_TEXT_RE__).test(t)) {
                         btn.scrollIntoView({block: 'center'});
                         btn.click();
                         return t.slice(0, 24);
@@ -2490,7 +2623,8 @@ class DiscordAutomation:
                     }
                 }
                 return '';
-            }""".replace('__LOGIN_LINK_GUARD__', _LOGIN_LINK_GUARD))
+            }""".replace('__LOGIN_LINK_GUARD__', _LOGIN_LINK_GUARD)
+                .replace('__SUBMIT_TEXT_RE__', _SUBMIT_TEXT_RE))
             if result:
                 self._log(f"[Captcha] [OK] Submit clicked: {result}")
                 return True
@@ -3546,8 +3680,12 @@ class DiscordAutomation:
                             if (__isLoginLink(btn)) continue;
                             const t = _norm(btn.textContent);
                             const v = _norm(btn.value);
-                            if (t.includes('create account') || t.includes('sign up') || t.includes('continue') ||
-                                v.includes('create account') || v.includes('sign up')) {
+                            // ALL locales: Discord labels the submit button in
+                            // the page's language (German "Konto erstellen",
+                            // French "Créer un compte", Russian "Создать
+                            // аккаунт", Korean "가입"...), so match the common
+                            // spellings, not just English.
+                            if (RegExp(__SUBMIT_TEXT_RE__).test(t + ' ' + v)) {
                                 btn.scrollIntoView({block: 'center'});
                                 btn.click();
                                 return 'btn_' + t.slice(0, 20);
@@ -3596,7 +3734,8 @@ class DiscordAutomation:
                         }
 
                         return 'failed';
-                    }""".replace('__LOGIN_LINK_GUARD__', _LOGIN_LINK_GUARD))
+                    }""".replace('__LOGIN_LINK_GUARD__', _LOGIN_LINK_GUARD)
+                        .replace('__SUBMIT_TEXT_RE__', _SUBMIT_TEXT_RE))
                     if result and result != 'failed':
                         create_clicked = True
                         self._log(f"[OK] Account button clicked: {result}")
@@ -3611,6 +3750,20 @@ class DiscordAutomation:
                             'button:has-text("Create Account")',
                             'button:has-text("Sign Up")',
                             'button:has-text("Continue")',
+                            'button:has-text("Registrieren")',
+                            'button:has-text("Konto erstellen")',
+                            'button:has-text("Créer un compte")',
+                            'button:has-text("S\'inscrire")',
+                            'button:has-text("Crear cuenta")',
+                            'button:has-text("Registrarse")',
+                            'button:has-text("Criar conta")',
+                            'button:has-text("Cadastrar")',
+                            'button:has-text("Aanmelden")',
+                            'button:has-text("Registrera")',
+                            'button:has-text("Opret konto")',
+                            'button:has-text("Załóż konto")',
+                            'button:has-text("Создать аккаунт")',
+                            'button:has-text("Đăng ký")',
                             'button[type="submit"]',
                         ]
                         for sel in btn_selectors:
@@ -3748,12 +3901,12 @@ class DiscordAutomation:
             continue_enabled = bool(await self._page.evaluate("""() => {
                 for (const b of document.querySelectorAll('button')) {
                     const t = (b.textContent || '').toLowerCase().replace(/\s+/g, ' ').trim();
-                    if (!(t.includes('continue') || t.includes('create account'))) continue;
+                    if (!RegExp(__SUBMIT_TEXT_RE__).test(t)) continue;
                     if (b.disabled || b.getAttribute('aria-disabled') === 'true') continue;
                     return true;
                 }
                 return false;
-            }"""))
+            }""".replace('__SUBMIT_TEXT_RE__', _SUBMIT_TEXT_RE)))
         except Exception:
             pass
         self._log(f"[Form] ToS checkboxes: clicked {clicked}, verified {verified}, continue_enabled={continue_enabled}")
