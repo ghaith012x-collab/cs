@@ -324,6 +324,30 @@ _DOB_LABEL_ALIASES = {
 }
 
 
+# React-safe value write: native prototype setter (REPLACES the whole value —
+# never appends to whatever is already in the field) + React value-tracker
+# sync + real input/change events. Element-targeted: it writes to the resolved
+# element directly and NEVER depends on focus or the global keyboard, so a
+# stray keystroke can never land in another field. The old
+# click + Control+A + press_sequentially fallback typed into WHATEVER held
+# focus (Discord's register page keeps focus on the first input, the email
+# box) — that is exactly how the username ended up concatenated inside the
+# email field while the username input stayed empty.
+_REACT_SET_VALUE_JS = r"""([sel, value]) => {
+    const el = document.querySelector(sel);
+    if (!el) return false;
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+    setter.call(el, value);
+    try {
+        const t = el._valueTracker;
+        if (t && typeof t.setValue === 'function') t.setValue(value);
+    } catch (e) {}
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+    return true;
+}"""
+
+
 # ── Log verbosity ─────────────────────────────────────────
 # Normal mode prints ONLY the essential signup events listed below (plus
 # warnings / errors, which always print). Everything else — proxy sweeps,
@@ -2870,134 +2894,161 @@ class DiscordAutomation:
                 and vals.get("username") == self._username
                 and vals.get("password") == self._password)
 
-    async def _fill_credential_fields(self, display_name: str) -> None:
-        """Fill every credential field and keep them filled (self-healing).
+    def _build_cred_fields(self, display_name: str) -> list:
+        """(fname, name-first selector, value) for the four credential fields.
 
-        This is the fix for the "email ends up holding the username" loop:
-          1. Fill order is username → display → password → EMAIL LAST. Any
-             keystroke that leaks (Discord's React re-renders mid-type,
-             replaces the target input, so the characters go to whatever
-             still has focus) lands in the still-empty email field — and the
-             element-targeted email write below overwrites it instead of
-             corrupting it.
-          2. Primary write is Playwright fill() — native value setter +
-             input event, targeted AT the element, with no global-keyboard
-             focus dependency. Keystrokes are only a per-field last resort.
-          3. After every write every credential field is re-read and any
-             leaked/wiped value is healed with another targeted fill().
+        Discord's register form uses stable `name` attributes (email /
+        global_name / username / password — confirmed by the INPUT DUMP), so
+        every selector leads with input[name=...] and only falls back to loose
+        aria/id/placeholder matching when the name lookup finds nothing.
+        `input[autocomplete='username']` is deliberately NOT in the username
+        selector: an email input carrying autocomplete="username" would make
+        `.first` resolve to the email box and every "username" write would
+        land in the email field.
         """
-        fields = [
-            ("username", "input[name='username'], input[autocomplete='username'], input[aria-label*='username' i], input[id*='username' i]", self._username or ""),
+        return [
+            ("username", "input[name='username'], input[id*='username' i], input[aria-label*='username' i], input[placeholder*='username' i]", self._username or ""),
             ("display", "input[name='global_name'], input[aria-label*='display name' i], input[aria-label*='display' i]", display_name),
             ("password", "input[name='password'], input[type='password'], input[autocomplete='new-password'], input[aria-label*='password' i]", self._password or ""),
             ("email", "input[name='email'], input[type='email'], input[autocomplete='email'], input[aria-label*='email' i], input[id*='email' i]", self._email or ""),
         ]
+
+    async def _read_field_value(self, sel: str) -> str:
+        """Read one field's current value; empty string on any failure."""
+        try:
+            loc = self._page.locator(sel)
+            if (await loc.count()) == 0:
+                return ""
+            try:
+                return await loc.first.input_value()
+            except Exception:
+                return ""
+        except Exception:
+            return ""
+
+    async def _write_field_value(self, sel: str, val: str) -> bool:
+        """Element-targeted write of ONE field, verified. True when the field
+        holds `val` afterwards.
+
+        Writes are 1) Playwright fill() — trusted input events React accepts,
+        then 2) the native-setter JS write (_REACT_SET_VALUE_JS) which
+        REPLACES the whole value and never depends on focus or the global
+        keyboard. The old click + Control+A + press_sequentially fallback is
+        GONE: it typed into whatever field held focus (Discord's register
+        page keeps focus on the first input, the email box), which is exactly
+        how the username ended up concatenated inside the email field.
+        """
+        if not val:
+            return False
+        # Release focus from any field first, so a stale focused element can
+        # never intercept a write or receive stray input.
+        try:
+            await self._page.evaluate(
+                "() => { const a = document.activeElement; if (a && a.blur) a.blur(); }")
+        except Exception:
+            pass
+        # 1) Playwright fill() — replaces the whole value, React-compatible.
+        try:
+            loc = self._page.locator(sel)
+            if (await loc.count()) == 0 or not (await loc.first.is_visible()):
+                return False
+            await loc.first.fill(val)
+            await asyncio.sleep(0.25)
+            try:
+                if (await loc.first.input_value()) == val:
+                    return True
+            except Exception:
+                pass
+        except Exception:
+            pass
+        # 2) Native-setter JS — focus-independent replace + tracker sync.
+        try:
+            await self._page.evaluate(
+                _REACT_SET_VALUE_JS, [sel.split(",")[0].strip(), val])
+            await asyncio.sleep(0.25)
+            try:
+                return (await self._page.locator(sel).first.input_value()) == val
+            except Exception:
+                return False
+        except Exception as e:
+            self._log_exception("[Form] JS value write failed", e)
+            return False
+
+    async def _fill_credential_fields(self, display_name: str) -> None:
+        """Fill every credential field and keep them filled (self-healing).
+
+        Fix for the "email ends up holding the username" corruption:
+          1. Fill order is username → display → password → EMAIL LAST, so any
+             leak lands in the still-empty email field and the targeted email
+             write overwrites it.
+          2. ALL writes are element-targeted (Playwright fill() or the
+             native-setter JS write). No keystroke fallback exists anymore —
+             keystrokes typed into whatever field had focus (the email box),
+             producing the email+username concatenation in the screenshot.
+          3. After every write every credential field is re-read and any
+             leaked/wiped value is healed with another targeted write.
+          4. A final stability pass re-applies writes until the whole form
+             holds its values for two consecutive reads (React re-renders
+             during DOB/ToS can wipe a controlled input even after a clean
+             fill).
+        """
+        fields = self._build_cred_fields(display_name)
         for fname, sel, val in fields:
             if not val:
                 continue
             for attempt in range(1, 4):
-                try:
-                    loc = self._page.locator(sel)
-                    if (await loc.count()) == 0:
-                        self._log(f"[Form] Field '{fname}' not found (attempt {attempt}/3)", level="warn")
-                        break
-                    el = loc.first
-                    if not (await el.is_visible()):
-                        self._log(f"[Form] Field '{fname}' not visible yet (attempt {attempt}/3)", level="warn")
-                        await asyncio.sleep(0.6)
-                        continue
-                    try:
-                        cur = await el.input_value()
-                    except Exception:
-                        cur = ""
-                    if cur == val:
-                        self._log(f"[Form] Field '{fname}' already holds value len={len(val)}")
-                        break
-                    # 1) Playwright fill() — React-compatible targeted write.
-                    try:
-                        await el.fill(val)
-                        await asyncio.sleep(0.35)
-                        try:
-                            cur = await el.input_value()
-                        except Exception:
-                            cur = ""
-                    except Exception:
-                        cur = ""
-                    # 2) Element-targeted keystrokes (only if fill() did not
-                    #    stick — real trusted keys are the most human input).
-                    if cur != val:
-                        try:
-                            await el.click()
-                            await el.press("Control+A")
-                            await el.press_sequentially(val, delay=40 + random.randint(10, 50))
-                            await asyncio.sleep(0.45)
-                            try:
-                                cur = await el.input_value()
-                            except Exception:
-                                cur = ""
-                        except Exception:
-                            cur = ""
-                    # 3) Native-setter JS write (React-compatible, last resort).
-                    if cur != val:
-                        try:
-                            await self._page.evaluate(
-                                """([sel, value]) => {
-                                    const el = document.querySelector(sel);
-                                    if (!el) return false;
-                                    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
-                                    setter.call(el, value);
-                                    el.dispatchEvent(new Event('input', { bubbles: true }));
-                                    el.dispatchEvent(new Event('change', { bubbles: true }));
-                                    return true;
-                                }""",
-                                [sel.split(",")[0].strip(), val],
-                            )
-                            await asyncio.sleep(0.4)
-                        except Exception as e:
-                            self._log_exception(f"[Form] Field '{fname}' JS fallback failed", e)
-                    try:
-                        cur = await el.input_value()
-                    except Exception:
-                        cur = ""
-                    if cur == val:
-                        self._log(f"[Form] Field '{fname}' verified: len={len(val)}")
-                        break
-                    self._log(f"[Form] Field '{fname}' mismatch (attempt {attempt}/3) got_len={len(cur)}", level="warn")
-                except Exception as e:
-                    self._log_exception(f"[Form] Field '{fname}' fill error", e)
+                if await self._write_field_value(sel, val):
+                    self._log(f"[Form] Field '{fname}' verified: len={len(val)}")
                     break
-                # Human pause between fields — reads like a real signup and
-                # gives Discord's React time to finish re-rendering.
-                await asyncio.sleep(random.uniform(0.4, 0.9))
-            # Heal pass: THIS field's write (or its re-render) may have leaked
-            # into / wiped another field. Re-fill anything that slipped.
+                cur = await self._read_field_value(sel)
+                self._log(f"[Form] Field '{fname}' mismatch (attempt {attempt}/3) got_len={len(cur)}", level="warn")
+                await asyncio.sleep(0.5)
+            # Human pause between fields — reads like a real signup and gives
+            # Discord's React time to finish re-rendering.
+            await asyncio.sleep(random.uniform(0.4, 0.9))
+            # Heal pass: THIS field's write (or its re-render) may have
+            # leaked into / wiped another field. Re-fill anything that
+            # slipped — element-targeted, so it can never write elsewhere.
             await self._heal_credential_fields(fields)
+        # Final stability pass — two consecutive clean reads before moving on.
+        await self._stabilize_credential_fields(fields)
 
     async def _heal_credential_fields(self, fields) -> None:
         """Re-fill any credential field whose value got wiped or leaked."""
         for fname, sel, val in fields:
             if not val:
                 continue
-            try:
-                loc = self._page.locator(sel)
-                if (await loc.count()) == 0:
+            cur = await self._read_field_value(sel)
+            if cur == val:
+                continue
+            self._log(f"[Form] Heal '{fname}': value wiped/leaked — re-writing", level="warn")
+            await self._write_field_value(sel, val)
+
+    async def _stabilize_credential_fields(self, fields, passes: int = 3) -> None:
+        """Re-apply targeted writes until the whole form holds its values for
+        two consecutive reads.
+
+        Discord's React re-renders (username availability checks, DOB
+        selection, ToS clicks) can wipe a controlled input even after a clean
+        fill. Because every write here is element-targeted there is no
+        keystroke that could leak into another field, so repeated passes are
+        safe."""
+        prev_ok = False
+        for _pass in range(passes):
+            await asyncio.sleep(0.4)
+            ok = True
+            for fname, sel, val in fields:
+                if not val:
                     continue
-                el = loc.first
-                if not (await el.is_visible()):
-                    continue
-                try:
-                    cur = await el.input_value()
-                except Exception:
-                    cur = ""
+                cur = await self._read_field_value(sel)
                 if cur == val:
                     continue
-                try:
-                    await el.fill(val)
-                    await asyncio.sleep(0.25)
-                except Exception:
-                    pass
-            except Exception:
-                pass
+                ok = False
+                self._log(f"[Form] Stabilize: '{fname}' wiped — re-writing", level="warn")
+                await self._write_field_value(sel, val)
+            if ok and prev_ok:
+                return
+            prev_ok = ok
 
     async def _fill_registration_form(self) -> bool:
         try:
@@ -3072,6 +3123,7 @@ class DiscordAutomation:
             # the element-targeted email write overwrites it instead of
             # looping forever. After every write every field is re-verified
             # and leaks are healed.
+            self._display_name = display_name
             await self._fill_credential_fields(display_name)
 
             # ── Quick verify each field ──
@@ -3174,8 +3226,12 @@ class DiscordAutomation:
             # ── FINAL gate: never submit an empty form ──
             # DOB selection + the ToS clicks make Discord's React re-render,
             # which is exactly when a value it silently dropped reappears
-            # empty. Read the fields one last time; if anything is missing,
-            # rotate instead of "faking" a Create Account on a blank form.
+            # empty. Re-stabilize the fields first (element-targeted
+            # re-writes are safe — nothing can leak into another field now),
+            # then read once more; if anything is STILL missing, rotate
+            # instead of "faking" a Create Account on a blank form.
+            await self._stabilize_credential_fields(
+                self._build_cred_fields(self._display_name or self._username or ""))
             final_vals = await self._read_form_values()
             if not self._credentials_filled(final_vals):
                 self._log(
