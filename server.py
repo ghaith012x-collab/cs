@@ -1386,8 +1386,17 @@ class DiscordAutomation:
                 return
             if "getcaptcha" not in url and "checkcaptcha" not in url:
                 return
-            body = getattr(request, "post_data", None)
-            if not body:
+            body = None
+            try:
+                body = getattr(request, "post_data_buffer", None)
+            except Exception:
+                body = None
+            if body is None:
+                try:
+                    body = getattr(request, "post_data", None)
+                except Exception:
+                    body = None
+            if body is None:
                 return
             rqdata = extract_rqdata_from_body(body)
             if rqdata:
@@ -2471,11 +2480,46 @@ class DiscordAutomation:
         """
         return await self._frame_js_ready(iframe, """() => {
             if (document.readyState !== 'complete') return false;
-            const body = document.getElementById('hcaptcha-body');
-            if (body && body.offsetHeight >= 40) return true;
-            const t = (document.body && document.body.innerText) || '';
-            return t.trim().length >= 5;
+            // The image challenge paints a grid of selectable tiles; require
+            // several visible images so a checkbox/loader shell is never
+            // mistaken for a rendered challenge.
+            const imgs = Array.from(document.querySelectorAll('img'));
+            let tiles = 0;
+            for (const img of imgs) {
+                const r = img.getBoundingClientRect();
+                if (r && r.width >= 40 && r.height >= 40) tiles += 1;
+            }
+            if (tiles >= 4) return true;
+            const prompt = document.querySelector('.prompt-text, .prompt, [class*="prompt"], [class*="challenge-description"]');
+            const promptText = ((prompt && prompt.innerText) || (document.body && document.body.innerText) || '').trim();
+            return promptText.length >= 8 && tiles >= 1;
         }""")
+
+    async def _wait_for_image_challenge(self, timeout: float = 30.0):
+        """Wait until the hCaptcha challenge frame really paints its image grid.
+
+        Returns the challenge iframe locator once rendered, else None. The
+        sitekey is readable from the widget frame long before the challenge
+        spawns, but solving that early mints a token before hCaptcha's
+        getcaptcha request has delivered the rqdata the token must be bound to.
+        """
+        deadline = time.time() + timeout
+        chall = self._page.locator(
+            'iframe[title*="hCaptcha challenge"], '
+            'iframe[src*="hcaptcha-challenge"]')
+        while time.time() < deadline:
+            try:
+                n = await chall.count()
+                for i in range(n):
+                    c = chall.nth(i)
+                    box = await c.bounding_box()
+                    if (box and box.get("height", 0) >= 80
+                            and await self._challenge_rendered(c)):
+                        return c
+            except Exception:
+                pass
+            await asyncio.sleep(0.5)
+        return None
 
     async def _widget_rendered(self, iframe) -> bool:
         """True when the hCaptcha widget iframe is genuinely ready to click.
@@ -3264,6 +3308,24 @@ class DiscordAutomation:
             # "Token received" is NOT "solved": a solver only counts as OK
             # once Discord actually accepts the token and the page moves past
             # the captcha. Logging keeps those two events separate.
+            # ── Wait for the FULL image challenge before touching solvers ──
+            # A stable sitekey is readable from the widget iframe BEFORE the
+            # challenge spawns. Solving that early mints a token before
+            # hCaptcha's getcaptcha request has produced the rqdata the token
+            # must be bound to (the "invalid-response" rejection). Hold the
+            # solve until the challenge frame genuinely paints its image grid,
+            # then read sitekey + rqdata together below.
+            if await self._past_captcha():
+                self._log("[Captcha] Page already past captcha")
+                return True
+            self._log("[Captcha] Waiting for the image challenge to fully render...")
+            if not await self._wait_for_image_challenge(timeout=30):
+                self._log("[Captcha] Image challenge never rendered (no rqdata to bind) - rotating",
+                          level="warn")
+                await self._dump_captcha_dom("image challenge timeout")
+                return False
+            self._log("[Captcha] [READY] Image challenge rendered - reading sitekey + rqdata")
+
             self._log("[Captcha] Trying NoneCap solve (primary)...")
             for solve_attempt in range(3):
                 if solve_attempt:

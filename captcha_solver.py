@@ -422,15 +422,39 @@ async def extract_hcaptcha_rqdata(page) -> str:
     return ""
 
 
-def extract_rqdata_from_body(body: str) -> str:
+def extract_rqdata_from_body(body) -> str:
     """Pull the enterprise rqdata out of an hCaptcha network request body.
 
     hCaptcha's JS POSTs the enterprise payload (which carries ``rqdata``) to
     ``/getcaptcha/<sitekey>`` when the checkbox is clicked. The body is either
     JSON (``{"rqdata": "..."}``, possibly nested under ``enterprisePayload``)
-    or URL-encoded form data. Returns "" when no rqdata is present.
+    or URL-encoded form data. Some engines hand back the raw POST body as
+    bytes (and it can be non-UTF-8), so bytes are decoded defensively before
+    parsing. Returns "" when no rqdata is present.
     """
-    body = (body or "").strip()
+    if body is None:
+        return ""
+
+    # Non-UTF-8 byte bodies: salvage the ASCII rqdata segment directly, since
+    # the rqdata blob itself is always ASCII (JWT / base64).
+    if isinstance(body, (bytes, bytearray)):
+        raw = bytes(body)
+        bm = re.search(
+            br'rqdata["\']?\s*[:=]\s*["\']?([A-Za-z0-9+/=._-]{8,})',
+            raw, re.IGNORECASE)
+        if bm:
+            try:
+                return bm.group(1).decode("ascii", "ignore")
+            except Exception:
+                pass
+        try:
+            body = raw.decode("utf-8", "ignore")
+        except Exception:
+            body = raw.decode("latin-1", "ignore")
+
+    if not isinstance(body, str):
+        return ""
+    body = body.strip()
     if not body:
         return ""
 
@@ -469,11 +493,14 @@ def extract_rqdata_from_body(body: str) -> str:
         pass
 
     # 3) Loose regex fallback for partial or obfuscated bodies.
-    m = re.search(
-        r'["\']?rqdata["\']?\s*[:=]\s*["\']([^"\']{8,})["\']',
-        body, re.IGNORECASE)
-    if m and m.group(1).strip():
-        return m.group(1).strip()
+    try:
+        m = re.search(
+            r'["\']?rqdata["\']?\s*[:=]\s*["\']([^"\']{8,})["\']',
+            body, re.IGNORECASE)
+        if m and m.group(1).strip():
+            return m.group(1).strip()
+    except Exception:
+        pass
     return ""
 
 
