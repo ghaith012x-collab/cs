@@ -5125,6 +5125,16 @@ async def solve_hcaptcha_accessibility(page, iframe,
         ollama_model = os.environ.get("OLLAMA_MODEL") or os.environ.get("OLLAMA_VISION_MODEL") or "qwen3:1.7b"
     ollama_url = ollama_url.rstrip("/")
     log(f"[Accessibility] Ollama endpoint: {ollama_url}  model: {ollama_model}")
+    # Groq (GROQ_API = API key) is the hosted BACKUP for unknown questions:
+    # if the local AI times out or doesn't know the answer, Groq answers
+    # fast (a 70B model on their free tier) instead of burning the captcha.
+    groq_key = (os.environ.get("GROQ_API") or os.environ.get("GROQ_API_KEY") or "").strip()
+    if groq_key:
+        log(f"[Accessibility] Groq backup armed: "
+            f"{(os.environ.get('GROQ_MODEL') or 'llama-3.3-70b-versatile').strip()}"
+            f" (answers questions the local AI cannot)")
+    else:
+        log("[Accessibility] No GROQ_API set - unknown questions fall back to the local AI only")
     import asyncio
     import base64
 
@@ -5567,8 +5577,9 @@ async def solve_hcaptcha_accessibility(page, iframe,
     async def _llm_answer_question(question: str, timeout: float = 12.0) -> str:
         """Layer 3: ask ANY LLM for the answer to an unknown question.
         Tries in order (each with up to 2 retries):
-        1. Ollama (OLLAMA_URL env)
-        2. OpenAI-compatible endpoint (LLM_API_URL + LLM_API_KEY + LLM_MODEL env)
+        1. OpenAI-compatible endpoint (LLM_API_URL + LLM_API_KEY + LLM_MODEL env)
+        2. Ollama (OLLAMA_URL env)
+        3. Groq (GROQ_API key env) - hosted backup when the local AI is unsure
         Returns the cleaned answer or empty string."""
         import asyncio
 
@@ -5579,11 +5590,13 @@ async def solve_hcaptcha_accessibility(page, iframe,
         api_url = os.environ.get("LLM_API_URL") or os.environ.get("OPENAI_BASE_URL") or ""
         api_key = os.environ.get("LLM_API_KEY") or os.environ.get("OPENAI_API_KEY") or ""
         model = os.environ.get("LLM_MODEL") or "gpt-4o-mini"
+        groq_key = os.environ.get("GROQ_API") or os.environ.get("GROQ_API_KEY") or ""
+        groq_model = (os.environ.get("GROQ_MODEL") or "llama-3.3-70b-versatile").strip()
 
         # Log once if NOTHING is configured — user needs to know Layer 3 is inert
-        if not ollama_url and not api_url:
+        if not ollama_url and not api_url and not groq_key:
             log("[Accessibility] [WARN] Unknown question and NO LLM configured — "
-                "set OLLAMA_URL or LLM_API_URL/LLM_API_KEY/LLM_MODEL to solve any question",
+                "set OLLAMA_URL, LLM_API_URL/LLM_API_KEY/LLM_MODEL or GROQ_API to solve any question",
                 level="warn")
             return ""
 
@@ -5640,6 +5653,51 @@ async def solve_hcaptcha_accessibility(page, iframe,
                 cleaned = _clean_llm_answer(ans)
                 if cleaned:
                     return cleaned
+
+            # ── Option 3: Groq (hosted backup when the local AI is unsure) ──
+            # OpenAI-compatible endpoint; GROQ_API is the API key. Tried only
+            # after the local AI fails so the free-tier quota is never wasted
+            # on questions the local KB/LLM already answers.
+            if groq_key:
+                try:
+                    import aiohttp
+                    endpoint = "https://api.groq.com/openai/v1/chat/completions"
+                    headers = {
+                        "Content-Type": "application/json",
+                        "Authorization": "Bearer " + groq_key,
+                    }
+                    payload = {
+                        "model": groq_model,
+                        "messages": [
+                            {"role": "system", "content": (
+                                "You are solving a CAPTCHA accessibility question. "
+                                "Answer with exactly ONE word, number, or short phrase "
+                                "in the SAME LANGUAGE as the question. "
+                                "No punctuation, no explanation, no quotes, lowercase."
+                            )},
+                            {"role": "user", "content": _build_llm_prompt(question)},
+                        ],
+                        "temperature": 0,
+                        "max_tokens": 20,
+                        "stop": ["\n"],
+                    }
+                    async with aiohttp.ClientSession(
+                        timeout=aiohttp.ClientTimeout(total=timeout)
+                    ) as session:
+                        async with session.post(endpoint, json=payload,
+                                                headers=headers) as resp:
+                            if resp.status != 200:
+                                log(f"[Accessibility] Groq API error {resp.status}",
+                                    level="warn")
+                            else:
+                                data = await resp.json()
+                                raw = data["choices"][0]["message"]["content"]
+                                cleaned = _clean_llm_answer(raw)
+                                if cleaned:
+                                    log(f"[Accessibility] Groq answered: {cleaned}")
+                                    return cleaned
+                except Exception as e:
+                    log(f"[Accessibility] Groq API error: {e}", level="warn")
 
         return ""
 
@@ -8216,7 +8274,7 @@ async def solve_hcaptcha_accessibility(page, iframe,
         """Get the answer with 3 layers:
         Layer 1: regex patterns (513)   — exact phrasings
         Layer 2: semantic topic table   — any phrasing containing topics
-        Layer 3: LLM fallback           — ANY unknown question → Ollama / OpenAI-compatible"""
+        Layer 3: LLM fallback           — ANY unknown question → Ollama / hosted / Groq"""
         text = await _read_question_text()
         log(f"[Accessibility] Q{q} text: '{text[:200]}'")
         raw = text
