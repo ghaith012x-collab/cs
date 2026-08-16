@@ -15,7 +15,7 @@ from server import DiscordAutomation
 OK_HTML = """<html><body>
 <form id='f'>
   <input name='email' type='email' value='ok@example.com'>
-  <button type='button' onclick="var f=document.getElementById('f');if(f)f.remove();var i=document.createElement('iframe');i.src='https://newassets.hcaptcha.com/captcha/v1/abc/hcaptcha-challenge.html';document.body.appendChild(i)">Create Account</button>
+  <button type='button' onclick="var f=document.getElementById('f');if(f)f.remove();var i=document.createElement('iframe');i.title='hCaptcha challenge';i.srcdoc='<html><body><div id=&quot;hcaptcha-body&quot; style=&quot;height:120px&quot;>Halt! Bist du ein Mensch?</div></body></html>';document.body.appendChild(i)">Create Account</button>
 </form></body></html>"""
 
 BLOCKED_HTML = """<html><body>
@@ -45,9 +45,33 @@ CHALLENGE_WITH_FORM_HTML = """<html><body>
 </form></body></html>"""
 
 # Challenge iframe + form GONE (real landed submit: click removes the form).
+# Static pre-rendered challenge iframe OUTSIDE the form (Discord mounts the
+# challenge as a sibling, not inside the <form>); the click removes the form.
 CHALLENGE_NO_FORM_HTML = """<html><body>
-<input name='email' type='email' value='ok@example.com'>
-<button type='button' onclick="var f=document.querySelector('form');if(f)f.remove();var i=document.createElement('iframe');i.src='https://newassets.hcaptcha.com/captcha/v1/abc/hcaptcha-challenge.html';document.body.appendChild(i)">Create Account</button>
+<iframe title='hCaptcha challenge' srcdoc='<html><body><div id=&quot;hcaptcha-body&quot; style=&quot;height:120px&quot;>Halt! Bist du ein Mensch?</div></body></html>'></iframe>
+<form id='f'>
+  <input name='email' type='email' value='ok@example.com'>
+  <button type='button' onclick="var f=document.getElementById('f');if(f)f.remove()">Create Account</button>
+</form>
+</body></html>"""
+
+# The REAL 2026-08-16 field case: the form STAYS in the DOM (Discord layers
+# the challenge over it) and the challenge iframe is genuinely RENDERED
+# (painted hCaptcha content: header + 3-dots menu button). This must be
+# detected as a landed submit — the strict form-gone rule kept the bot
+# clicking Create Account 3x while the challenge was already up.
+RENDERED_CHALLENGE_WITH_FORM_HTML = """<html><body>
+<form id='f'>
+  <input name='email' type='email' value='ok@example.com'>
+  <iframe id='chall' title='hCaptcha challenge' src='https://newassets.hcaptcha.com/captcha/v1/abc/hcaptcha-challenge.html'></iframe>
+  <button type='button'>Create Account</button>
+</form>
+<script>
+  var doc = document.getElementById('chall').contentDocument;
+  doc.open();
+  doc.write('<html><body style="font-family:sans-serif"><div id="hcaptcha-body" style="height:120px"><div class="header">Halt! Bist du ein Mensch?</div><button id="menu-info" aria-label="About hCaptcha &amp; Accessibility Options">...</button><p>W&auml;hle ein Bild aus</p></div></body></html>');
+  doc.close();
+</script>
 </body></html>"""
 
 
@@ -81,7 +105,7 @@ async def main():
     await page.goto(data_url(OK_HTML))
     await asyncio.sleep(0.5)
     before, after = await check_landed(bot, "A")
-    assert "captcha" in after, "real submit should be detected as landed"
+    assert after, "real submit should be detected as landed (form gone)"
 
     # ── Case B: inert form (the 'isn't clicking' case) ──
     print("case B: inert form")
@@ -100,15 +124,14 @@ async def main():
     assert before == "", "pre-existing widget must not be 'landed' before the click"
     assert after == "", "pre-existing widget alone must not report a landed submit"
 
-    # ── Case D: CHALLENGE iframe + form still on screen ──
-    # The exact 2026-08-16 field bug: the challenge frame is mounted with
-    # the register form before any click. It must NOT be treated as landed.
-    print("case D: challenge iframe with form still up")
+    # ── Case D: EMPTY challenge iframe + form still on screen ──
+    # A preloaded shell (no painted content) must NOT be treated as landed.
+    print("case D: empty challenge shell with form still up")
     await page.goto(data_url(CHALLENGE_WITH_FORM_HTML))
     await asyncio.sleep(0.5)
     before, after = await check_landed(bot, "D")
-    assert before == "", "challenge with form still up must not be 'landed' before the click"
-    assert after == "", "challenge with form still up must not report a landed submit"
+    assert before == "", "empty challenge shell must not be 'landed' before the click"
+    assert after == "", "empty challenge shell must not report a landed submit"
 
     # ── Case E: challenge present, form REMOVED = real landed submit ──
     print("case E: challenge iframe, form gone")
@@ -116,6 +139,15 @@ async def main():
     await asyncio.sleep(0.5)
     before, after = await check_landed(bot, "E")
     assert "captcha" in after, "challenge + form gone should be a landed submit"
+
+    # ── Case F: RENDERED challenge + form STILL in DOM ──
+    # The real field case: Discord keeps the form and overlays the painted
+    # challenge. Must be detected as landed.
+    print("case F: rendered challenge with form still up")
+    await page.goto(data_url(RENDERED_CHALLENGE_WITH_FORM_HTML))
+    await asyncio.sleep(0.5)
+    before, after = await check_landed(bot, "F")
+    assert "captcha" in after, "rendered challenge must report a landed submit even with the form up"
 
     print("SUBMIT TEST PASSED")
     await b.close()

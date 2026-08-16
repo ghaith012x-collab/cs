@@ -5879,45 +5879,101 @@ async def solve_hcaptcha_accessibility(page, iframe,
                     continue
                 score = 0
                 # STRONG keywords (the actual question uses these):
-                # jar/coins math
-                if re.search(r'\bjar\b|\bcoins?\b|\bhow many\b|\baltogether\b|\bin all\b', line, re.IGNORECASE):
+                # jar/coins math (EN + DE + FR + ES + IT + PT)
+                if re.search(r'\bjar\b|\bcoins?\b|\bhow many\b|\baltogether\b|\bin all\b'
+                             r'|wie viele|münzen|münze|glas|wie viel|insgesamt'
+                             r'|combien|pièces?|pièce|bocal|en tout|au total'
+                             r'|cuántas|cuántos|monedas|frasco|en total'
+                             r'|quante|monete|barattolo|in tutto', line, re.IGNORECASE):
                     score += 4
-                if re.search(r'\badd\b|\bput\b|\btotal\b|\bhas\b|\bstart with\b', line, re.IGNORECASE):
+                if re.search(r'\badd\b|\bput\b|\btotal\b|\bhas\b|\bstart with\b'
+                             r'|hinzu|hinzufügen|legst|gibst|gibt es|enthält|füg'
+                             r'|ajoute|ajouter|mets|mettre|total'
+                             r'|añade|agrega|poner|tiene|total'
+                             r'|aggiungi|mettere|ha|totale', line, re.IGNORECASE):
                     score += 2
                 # word puzzles
-                if re.search(r'\bremove\b|\bdelet\w*\b|\bdrop\b|\bstrip\b', line, re.IGNORECASE):
+                if re.search(r'\bremove\b|\bdelet\w*\b|\bdrop\b|\bstrip\b'
+                             r'|entfern|entferne|entfernt|streich|lösch|losch'
+                             r'|supprim|retire|retirer|enlève|enlever'
+                             r'|elimina|quita|borra'
+                             r'|rimuovi|elimina|cancella', line, re.IGNORECASE):
                     score += 4
-                if re.search(r'\bfirst\b', line, re.IGNORECASE):
+                if re.search(r'\bfirst\b|erste|ersten|erster|première|premier|primera|primer|prima|primo', line, re.IGNORECASE):
                     score += 3
-                if re.search(r'\blast\b', line, re.IGNORECASE):
+                if re.search(r'\blast\b|letzte|letzten|letzter|dernière|dernier|última|último|ultima|ultimo', line, re.IGNORECASE):
                     score += 3
-                if re.search(r'\bletter\w*\b|\bcharacter\w*\b', line, re.IGNORECASE):
+                if re.search(r'\bletter\w*\b|\bcharacter\w*\b'
+                             r'|buchstabe|buchstaben|zeichen'
+                             r'|lettre|lettres|caractère|caractères'
+                             r'|letra|letras|carácter|caracteres'
+                             r'|lettera|lettere|carattere|caratteri', line, re.IGNORECASE):
                     score += 3
-                if re.search(r'\breverse\b|\bbackward\w*\b', line, re.IGNORECASE):
+                if re.search(r'\breverse\b|\bbackward\w*\b'
+                             r'|rückwärts|umgekehrt|rueckwaerts'
+                             r'|inverser|à l.envers|inverse'
+                             r'|invertir|al revés|invertida'
+                             r'|inverti|al contrario', line, re.IGNORECASE):
                     score += 3
-                if re.search(r'\bword\b', line, re.IGNORECASE):
+                if re.search(r'\bword\b|wort|wörter|mot|mots|palabra|palabras|parola|parole', line, re.IGNORECASE):
                     score += 2
                 # Animal challenge: "pick the word that is an animal"
-                if re.search(r'\banimal\b|\bcreature\b|\bbeast\b|\bliving\b.*\bthing\b|\bwhich\b.*\banimal\b', line, re.IGNORECASE):
+                if re.search(r'\banimal\b|\bcreature\b|\bbeast\b|\bliving\b.*\bthing\b|\bwhich\b.*\banimal\b'
+                             r'|tier|tierisch|welches.*tier|tieren'
+                             r'|animal|animaux'
+                             r'|animal|animales'
+                             r'|animale|animali', line, re.IGNORECASE):
                     score += 5
 
                 # Country challenge: "choose the country" / "pick the country"
-                if re.search(r'\bcountry\b|\bcountries\b|\bnation\b|\bnations\b', line, re.IGNORECASE):
+                if re.search(r'\bcountry\b|\bcountries\b|\bnation\b|\bnations\b'
+                             r'|land|länder|ländern|welches land|welches.*land'
+                             r'|pays|quel pays'
+                             r'|país|países|qué país|cual país'
+                             r'|paese|paesi|quale paese', line, re.IGNORECASE):
                     score += 5
                 # Knowledge questions (rooms, colors, counting, calendar...)
-                if re.search(r'\broom\b|\bsink\b|\bkitchen\b|\bbedroom\b|\bbathroom\b', line, re.IGNORECASE):
+                if re.search(r'\broom\b|\bsink\b|\bkitchen\b|\bbedroom\b|\bbathroom\b'
+                             r'|zimmer|küche|kueche|bad|schlafzimmer|spüle'
+                             r'|pièce|cuisine|salle de bain|chambre|évier'
+                             r'|habitación|cocina|baño|dormitorio|fregadero'
+                             r'|stanza|cucina|bagno|camera|lavandino', line, re.IGNORECASE):
                     score += 4
-                if re.search(r'what (?:color|colour|room)|which (?:room|color)|color of|colour of', line, re.IGNORECASE):
+                if re.search(r'what (?:color|colour|room)|which (?:room|color)|color of|colour of'
+                             r'|welche farbe|welche (?:zimmer|farbe)|farbe von|welches zimmer'
+                             r'|quelle couleur|quelle pièce|couleur de'
+                             r'|qué color|de qué color|qué habitación|color de'
+                             r'|che colore|di che colore|che stanza|colore di', line, re.IGNORECASE):
                     score += 4
-                if re.search(r'\blegs\b|\bwheels\b|\bhow many\b|\bhow much\b', line, re.IGNORECASE):
+                if re.search(r'\blegs\b|\bwheels\b|\bhow many\b|\bhow much\b'
+                             r'|beine|räder|raeder|wie viele|wie viel'
+                             r'|jambes|roues|combien'
+                             r'|patas|ruedas|cuántas|cuántos'
+                             r'|gambe|ruote|quante|quanti', line, re.IGNORECASE):
                     score += 3
-                if re.search(r'\bmonth\b|\bseason\b|\bday\b|\bweek\b|\byear\b', line, re.IGNORECASE):
+                if re.search(r'\bmonth\b|\bseason\b|\bday\b|\bweek\b|\byear\b'
+                             r'|monat|jahr|woche|tag|jahreszeit'
+                             r'|mois|saison|jour|semaine|année'
+                             r'|mes|estación|día|semana|año'
+                             r'|mese|stagione|giorno|settimana|anno', line, re.IGNORECASE):
                     score += 2
-                if re.search(r'\bsink\b|\bdishes\b|\bmoos?\b|\bquacks?\b|\bmeows?\b|\bbarks?\b|\bneighs?\b', line, re.IGNORECASE):
+                if re.search(r'\bsink\b|\bdishes\b|\bmoos?\b|\bquacks?\b|\bmeows?\b|\bbarks?\b|\bneighs?\b'
+                             r'|spüle|geschirr|muht|quakt|miaut|bellt|wiehert'
+                             r'|évier|vaisselle|meugle|coin-coin|miaule|aboie|hennit'
+                             r'|fregadero|platos|muge|grazna|maúlla|ladra|relincha'
+                             r'|lavandino|piatti|muggisce|starnazza|miagola|abbaia|nitrisce', line, re.IGNORECASE):
                     score += 3
-                if re.search(r'\bcapital\b|\bfruit\b|\bvegetable\b|\binsect\b|\bwhich of these\b', line, re.IGNORECASE):
+                if re.search(r'\bcapital\b|\bfruit\b|\bvegetable\b|\binsect\b|\bwhich of these\b'
+                             r'|hauptstadt|frucht|obst|gemüse|insekt|welches von diesen'
+                             r'|capitale|fruit|légume|insecte|lequel de ces'
+                             r'|capital|fruta|verdura|vegetal|insecto|cuál de estos'
+                             r'|capitale|frutta|verdura|insetto|quale di questi', line, re.IGNORECASE):
                     score += 3
-                if re.search(r'\bused to\b|\buse .* to\b|\bwhat do you\b', line, re.IGNORECASE):
+                if re.search(r'\bused to\b|\buse .* to\b|\bwhat do you\b'
+                             r'|womit|wofür|verwendet man|benutzt man|was machst du'
+                             r'|sert à|utilisé pour|à quoi sert'
+                             r'|sirve para|para qué se usa|qué usas'
+                             r'|serve a|a cosa serve|cosa usi', line, re.IGNORECASE):
                     score += 3
                 # numbers reinforce a real math question
                 if re.search(r'\b\d+\b', line):
@@ -6071,19 +6127,23 @@ async def solve_hcaptcha_accessibility(page, iframe,
         # demanded 'first letter' adjacency and \bremove\b (which misses
         # 'removing'), so this exact question fell through to the LLM and
         # timed out for 88s. Now solved locally in milliseconds.
-        _wverb = r'(?:remov(?:e|es|ed|ing)?|delet(?:e|es|ed|ing)?|drop(?:ped|ping)?|strip(?:ped|ping)?|take(?:n|ing)?|eliminat(?:e|es|ed|ing)?|erase(?:d|s)?)'
+        _wverb = r'(?:remov(?:e|es|ed|ing)?|delet(?:e|es|ed|ing)?|drop(?:ped|ping)?|strip(?:ped|ping)?|take(?:n|ing)?|eliminat(?:e|es|ed|ing)?|erase(?:d|s)?|entfern(?:e|st|t)?|streich(?:e|st|t)?|lösch(?:e|st|t)?|löschen|supprim(?:e|es|ez|er)?|retir(?:e|es|ez|er)?|enlèv(?:e|es|ez|er)?|quit(?:a|as|ar)?|borr(?:a|as|ar)?|rimuov(?:i|ere)?|elimin(?:a|are)?|cancell(?:a|are)?)'
+        # German/French/Spanish "first/last letter" words
+        _first = r'(?:first|1st|erste[ns]?|premi[eè]re?|primera?|primo?)'
+        _last = r'(?:last|2nd|letzte[ns]?|derni[eè]re?|última?|ultima?)'
+        _letter = r'(?:letter|character|char|buchstabe[ns]?|zeichen|lettre[s]?|caract[eè]re[s]?|letra[s]?|car[aá]cter(?:es)?|lettera|lettere|carattere|caratteri)s?'
         word_pat = re.compile(
-            r'(?:' + _wverb + r'\s+(?:out\s+)?(?:the\s+)?'
-            r'(?:first|1st)(?:\s*(?:and|&)\s*(?:the\s+)?(?:last|2nd))?\s+'
-            r'(?:letter|character|char)s?'
-            r'|(?:first|1st)(?:\s*(?:and|&)\s*(?:the\s+)?(?:last|2nd))?\s+'
-            r'(?:letter|character|char)s?.*' + _wverb + r')',
+            r'(?:' + _wverb + r'\s+(?:out\s+)?(?:the\s+|das\s+|den\s+|die\s+|le\s+|la\s+|il\s+|lo\s+)?'
+            r'(' + _first + r')(?:\s*(?:and|&|und|et|y|e)\s*(?:the\s+|das\s+|den\s+|die\s+|le\s+|la\s+|il\s+|lo\s+)?(' + _last + r'))?\s+'
+            + _letter +
+            r'|(' + _first + r')(?:\s*(?:and|&|und|et|y|e)\s*(?:the\s+|das\s+|den\s+|die\s+|le\s+|la\s+|il\s+|lo\s+)?(' + _last + r'))?\s+'
+            + _letter + r'.*' + _wverb + r')',
             re.IGNORECASE
         )
         if word_pat.search(orig) or (re.search(_wverb, t)
-                                     and re.search(r'\b(?:first|1st)\b', t)
-                                     and re.search(r'\b(?:last|2nd)\b', t)
-                                     and re.search(r'\b(?:letter|character|char)s?\b', t)):
+                                     and (re.search(_first, t) or re.search(r'\b(?:first|1st)\b', t))
+                                     and (re.search(_last, t) or re.search(r'\b(?:last|2nd)\b', t))
+                                     and re.search(_letter + r'\b', t)):
             # Strategy A: quoted / "of the word X" / "word is X" / ALL-CAPS
             # (most reliable — hCaptcha always names the word explicitly)
             word = _find_target_word(orig)

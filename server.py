@@ -4407,6 +4407,17 @@ class DiscordAutomation:
             self._log_exception("Form filling error", e)
             return False
 
+    async def _challenge_iframe(self):
+        """First hCaptcha CHALLENGE iframe element, or None."""
+        try:
+            chall = self._page.locator(
+                'iframe[title*="hCaptcha challenge"], iframe[src*="hcaptcha-challenge"]')
+            if await chall.count() > 0:
+                return chall.first
+        except Exception:
+            pass
+        return None
+
     async def _submit_landed(self, timeout: float = 4.0) -> str:
         """Proof the register form actually submitted. Returns a reason
         string ("" = still sitting on the unsubmitted form).
@@ -4438,16 +4449,17 @@ class DiscordAutomation:
                 # of falsely reporting a landed submit.
                 await asyncio.sleep(0.4)
                 continue
-            # A hCaptcha CHALLENGE frame only proves the submit when the
-            # register form has actually unmounted. Discord preloads the
-            # captcha iframes inside the modal while the form is still
-            # sitting there unsent, so "challenge present + form still
-            # visible" is NOT a landed submit — accepting it skipped the
-            # Create Account phase and made the bot click an empty
-            # pre-init widget frame (children:0, anyCheckbox:false) in a
-            # Frame-was-detached loop.
-            if st.get("challenge") and not st.get("form"):
-                return "captcha_challenge"
+            # The hCaptcha CHALLENGE frame proves the submit when it is
+            # genuinely RENDERED. Discord keeps the register form in the
+            # DOM and layers the rendered challenge over it, so requiring
+            # the form to unmount made the bot report "never submitted"
+            # while the challenge was already showing. A preloaded shell
+            # iframe (empty children, no painted content — the earlier
+            # false-positive case) is NOT rendered and still doesn't count.
+            if st.get("challenge"):
+                _chall_el = await self._challenge_iframe()
+                if _chall_el is not None and await self._challenge_rendered(_chall_el):
+                    return "captcha_challenge_rendered"
             url = str(st.get("url") or "")
             if any(k in url for k in ("discord.com/app", "discord.com/channels", "/verify")):
                 return "url:" + url[:60]
