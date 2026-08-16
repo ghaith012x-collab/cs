@@ -3495,6 +3495,15 @@ class DiscordAutomation:
             txt = ""
         if _dob_text_matches(txt, option_text):
             return True
+        # The data-dob-target marker can land on a stale/container element
+        # after a React re-render (misreads like '1982\nYear,\n1982'); the
+        # combobox aria-label read is the reliable ground truth.
+        try:
+            cur = await self._dob_current_value(label)
+            if _dob_text_matches(cur, option_text):
+                return True
+        except Exception:
+            pass
         try:
             located = await self._page.evaluate(
                 _DOB_LOCATE_JS, [label, _DOB_LABEL_ALIASES, option_text, _MONTH_ALIASES])
@@ -3651,10 +3660,18 @@ class DiscordAutomation:
             return {}
 
     def _credentials_filled(self, vals: dict) -> bool:
-        """The three credential fields actually hold the expected values."""
-        return (vals.get("email") == self._email
-                and vals.get("username") == self._username
-                and vals.get("password") == self._password)
+        """Email + password must hold EXACTLY the expected values; the
+        username just has to be a non-empty, non-email value. Discord
+        legitimately REPLACES a taken generated username with its own
+        suggestion (digits appended in the field), so requiring an exact
+        match made the final gate abort right before Create Account on a
+        fully valid form - the "did dob but not create account" failure."""
+        email_ok = vals.get("email") == self._email
+        pass_ok = vals.get("password") == self._password
+        user = (vals.get("username") or "").strip()
+        # A username still holding the email value is a leak, not a fill.
+        user_ok = bool(user) and user != self._email
+        return email_ok and pass_ok and user_ok
 
     def _build_cred_fields(self, display_name: str) -> list:
         """(fname, name-first selector, value) for the four credential fields.
@@ -3794,6 +3811,13 @@ class DiscordAutomation:
             cur = await self._read_field_value(sel)
             if cur == val:
                 continue
+            # Username is Discord-owned once filled: Discord replaces a
+            # taken generated name with its own suggestion (digits
+            # appended), so only heal a WIPED username (empty) or one
+            # that leaked the email value - never clobber Discord's
+            # valid suggestion back into the taken name.
+            if fname == "username" and cur and cur != self._email:
+                continue
             self._log(f"[Form] Heal '{fname}': value wiped/leaked — re-writing", level="warn")
             await self._write_field_value(sel, val)
 
@@ -3815,6 +3839,10 @@ class DiscordAutomation:
                     continue
                 cur = await self._read_field_value(sel)
                 if cur == val:
+                    continue
+                # Same rule as the heal pass: a non-empty username that
+                # is not a leaked email is Discord's own suggestion.
+                if fname == "username" and cur and cur != self._email:
                     continue
                 ok = False
                 self._log(f"[Form] Stabilize: '{fname}' wiped — re-writing", level="warn")
@@ -4043,6 +4071,17 @@ class DiscordAutomation:
                 await self.capture_screenshot()
                 return False
 
+            # Discord may have replaced the generated username with its
+            # own suggestion (name taken) - record what the form actually
+            # holds so the saved account + log lines show the real
+            # @username.
+            try:
+                real_user = (final_vals.get("username") or "").strip()
+                if real_user:
+                    self._username = real_user
+            except Exception:
+                pass
+
             # ── Create Account Button — try multiple strategies ────────
             # Humanization: pause to review the filled form before submitting.
             await asyncio.sleep(random.uniform(0.9, 1.9))
@@ -4248,15 +4287,158 @@ class DiscordAutomation:
                 await self.capture_screenshot()
                 return False
 
-            await asyncio.sleep(2)
-            await self.capture_screenshot()
+            # ── PROVE the submit actually landed ──
+            # A click can be "sent" (JS btn.click()) while the form never
+            # submits: browser-native validation blocks invalid required
+            # fields, Discord's React can keep the button inert, or an
+            # overlay swallows the event. The old code declared success and
+            # moved straight to the hCaptcha wait - a captcha that never
+            # loads because the form never went anywhere (the 45s stall).
+            # Verify the transition (hCaptcha/challenge iframe, URL move,
+            # form unmount); if nothing moved, retry with a REAL engine-
+            # humanized mouse click at the button's center and dump the form
+            # state (values + inline validation errors) so the failure is
+            # self-explanatory instead of a silent stall.
+            await asyncio.sleep(1.2)
+            reason = await self._submit_landed(timeout=4.0)
+            if reason:
+                self._log(f"[OK] Create Account submit verified ({reason})")
+                await self.capture_screenshot()
+                return True
 
-            return True
+            self._log("[Form] Create Account click sent but form did not submit - retrying with real mouse click", level="warn")
+            await self._log_form_state("after Create Account click (not landed)")
+            for _real_retry in range(3):
+                if await self._rate_limited():
+                    self._nav_error = "rate limited (429) by Discord"
+                    self._log("[Form] RATE LIMITED after submit - rotating circuit", level="warn")
+                    await self.capture_screenshot()
+                    return False
+                self._log(f"[Form] Create Account real-click attempt {_real_retry + 1}/3", level="warn")
+                if not await self._real_click_create_button():
+                    break
+                await asyncio.sleep(1.5)
+                reason = await self._submit_landed(timeout=3.0)
+                if reason:
+                    self._log(f"[OK] Create Account submit verified after real click ({reason})")
+                    await self.capture_screenshot()
+                    return True
+
+            self._nav_error = "Create Account click sent but the form never submitted (see POST-CLICK dump)"
+            self._log("[FAIL] Create Account never submitted - form dump above", level="error")
+            await self.capture_screenshot()
+            return False
 
 
         except Exception as e:
             self._log_exception("Form filling error", e)
             return False
+
+    async def _submit_landed(self, timeout: float = 4.0) -> str:
+        """Proof the register form actually submitted. Returns a reason
+        string ("" = still sitting on the unsubmitted form).
+
+        Signals: the hCaptcha/challenge iframe appeared (Discord shows it
+        inside the register modal after a successful submit), the URL moved
+        to /app, /channels or a verify page, or the register form unmounted
+        while the URL left /register."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                raw = await self._page.evaluate("""() => {
+                    const f = document.querySelector('form');
+                    return JSON.stringify({
+                        url: location.href || '',
+                        form: !!f,
+                        captcha: !!document.querySelector('iframe[src*="hcaptcha" i], iframe[title*="challenge" i], iframe[src*="challenges.cloudflare.com"], [class*="captcha" i] iframe'),
+                    });
+                }""")
+                st = json.loads(raw) if raw else {}
+            except Exception:
+                st = {}
+            if not st:
+                # Read failed (page mid-navigation / eval hiccup) - that
+                # is NOT proof the form submitted. Keep polling instead
+                # of falsely reporting a landed submit.
+                await asyncio.sleep(0.4)
+                continue
+            if st.get("captcha"):
+                return "captcha_iframe"
+            url = str(st.get("url") or "")
+            if any(k in url for k in ("discord.com/app", "discord.com/channels", "/verify")):
+                return "url:" + url[:60]
+            if not st.get("form") and "register" not in url:
+                return "form_gone:" + url[:60]
+            await asyncio.sleep(0.4)
+        return ""
+
+    async def _real_click_create_button(self) -> bool:
+        """REAL engine-humanized mouse click at the Create Account button's
+        center (trusted input via page.mouse.click - the same coords-first
+        pattern that fixed the DOB dropdowns). A JS btn.click() can be
+        swallowed by native validation / overlays; a physical click triggers
+        Discord's own handler and surfaces any inline validation error.
+        Returns True when a click was sent."""
+        try:
+            pos = await self._page.evaluate("""() => {
+                __LOGIN_LINK_GUARD__
+                const _norm = (s) => (s || '').toLowerCase().replace(/\\s+/g, ' ').trim();
+                const btns = document.querySelectorAll('button, [role="button"], [type="submit"]');
+                for (const btn of btns) {
+                    if (btn.offsetParent === null) continue;
+                    if (btn.disabled || btn.getAttribute('aria-disabled') === 'true') continue;
+                    if (__isLoginLink(btn)) continue;
+                    const t = _norm(btn.textContent) + ' ' + _norm(btn.value);
+                    if (!RegExp(__SUBMIT_TEXT_RE__).test(t)) continue;
+                    btn.scrollIntoView({ block: 'center' });
+                    const r = btn.getBoundingClientRect();
+                    if (!r || r.width < 4 || r.height < 4) continue;
+                    return { x: r.left + r.width / 2, y: r.top + r.height / 2, text: t.slice(0, 24) };
+                }
+                return null;
+            }""".replace('__LOGIN_LINK_GUARD__', _LOGIN_LINK_GUARD)
+                .replace('__SUBMIT_TEXT_RE__', json.dumps(_SUBMIT_TEXT_RE)))
+            if not pos or not pos.get("x"):
+                self._log("[Form] No enabled Create Account button found for real click", level="warn")
+                return False
+            await self._page.mouse.click(float(pos["x"]), float(pos["y"]))
+            self._log(f"[Form] Real mouse click on Create Account ({pos.get('text')})")
+            return True
+        except Exception as e:
+            self._log_exception("[Form] Real Create Account click failed", e)
+            return False
+
+    async def _log_form_state(self, tag: str) -> None:
+        """Dump the register form's live state (values, inline validation
+        errors, DOB reads, checkbox count, submit button states) so a
+        non-submitting form is diagnosable instead of a silent stall."""
+        try:
+            dump = await self._page.evaluate("""() => {
+                const errs = [];
+                for (const e of document.querySelectorAll('[class*="error" i], [class*="warning" i], [role="alert"], [data-reactid*="error" i]')) {
+                    if (e.offsetParent === null) continue;
+                    const t = (e.textContent || '').trim().replace(/\\s+/g, ' ');
+                    if (t && t.length < 160) errs.push(t);
+                }
+                const inputs = Array.from(document.querySelectorAll('input'))
+                    .filter(e => e.offsetParent !== null)
+                    .map(e => ({ name: e.name || '', type: e.type || '', val: (e.value || '').slice(0, 50) }));
+                const dob = {};
+                for (const el of document.querySelectorAll('[data-dob-target]')) {
+                    const t = (el.textContent || '').trim().replace(/\\s+/g, ' ').slice(0, 40);
+                    if (t && t.length <= 40) dob[el.getAttribute('data-dob-target')] = t;
+                }
+                const boxes = document.querySelectorAll('input[type="checkbox"]:checked, [role="checkbox"][aria-checked="true"], [role="checkbox"][data-state="checked"]').length;
+                const btns = Array.from(document.querySelectorAll('button'))
+                    .filter(e => e.offsetParent !== null)
+                    .slice(0, 10)
+                    .map(e => ({ t: (e.textContent || '').trim().replace(/\\s+/g, ' ').slice(0, 24),
+                                dis: e.disabled || e.getAttribute('aria-disabled') === 'true' }));
+                return JSON.stringify({ errors: errs.slice(0, 6), inputs, dob, checkboxes: boxes, buttons: btns });
+            }""")
+            self._log(f"[Form] POST-CLICK {tag}: {dump}", level="warn")
+        except Exception as e:
+            self._log_exception("[Form] POST-CLICK dump failed", e)
 
     async def _tos_checked_count(self) -> int:
         """How many real checkbox controls are currently checked."""
