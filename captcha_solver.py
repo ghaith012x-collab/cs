@@ -5746,10 +5746,15 @@ async def solve_hcaptcha_accessibility(page, iframe,
         # ── Step C: Wait for the challenge to render, then return ──
         # Poll for the challenge INPUT instead of a blind 10s wait: the
         # question is solvable as soon as its input is interactive, which
-        # is usually 2-4s, not 10. Hard cap 10s for slow loads.
-        log("[Accessibility] Accessibility option clicked — polling for challenge input (max 10s)")
+        # is usually 2-4s, not 10. Hard cap 12s for slow loads. Also
+        # require the LOADING screen ("Wait! Are you human?" + spinner) to
+        # have cleared — answering while the loader is still up is fake
+        # solving (bogus answer → rejected → "Please try again" loop).
+        log("[Accessibility] Accessibility option clicked — polling for challenge input (max 12s)")
         poll_js = (
             "() => {"
+            "const bodyTxt = (document.body && document.body.innerText || '').toLowerCase();"
+            "if (/wait!?\s+are\s+you\s+human|please\s+wait|loading/.test(bodyTxt)) return 'loading';"
             "const inputs = document.querySelectorAll('input, textarea');"
             "for (const inp of inputs) {"
             "if (inp.type !== 'hidden' && inp.offsetParent !== null) return 'input:' + inp.tagName;"
@@ -5757,16 +5762,19 @@ async def solve_hcaptcha_accessibility(page, iframe,
             "return null;"
             "}"
         )
-        for _ci in range(12):  # 12 x 0.5s = 6s max
+        for _ci in range(24):  # 24 x 0.5s = 12s max
             try:
                 _r = await _challenge_js(poll_js)
                 if _r and 'input:' in str(_r):
                     log("[Accessibility] Challenge input interactive — proceeding")
                     return True
+                if _r == 'loading':
+                    await asyncio.sleep(0.5)
+                    continue
             except Exception:
                 pass
             await asyncio.sleep(0.5)
-        log("[Accessibility] Challenge wait complete (10s max) — proceeding to screenshot + AI solve")
+        log("[Accessibility] Challenge wait complete (12s max) — proceeding to screenshot + AI solve")
         return True
 
     def _find_options_line(best_source: str, all_texts, best_line: str) -> str:
@@ -5872,11 +5880,19 @@ async def solve_hcaptcha_accessibility(page, iframe,
         best_score = 0
         best_source = None
 
+        # Loading/UI-state lines must never be scored as questions
+        # (hCaptcha's "Wait! Are you human?" loader, spinner captions).
+        _LOADING_RE = re.compile(
+            r'wait!?\s+are\s+you\s+human|please\s+wait|loading\.{0,3}|'
+            r'checking\s+your\s+browser|verifying\s+you|'
+            r'challenge\s+loading|starting\s+challenge', re.IGNORECASE)
         for source, text in all_texts:
             lines = text.split(chr(10))
             for line in lines:
                 line = line.strip()
                 if len(line) < 8 or len(line) > 500:
+                    continue
+                if _LOADING_RE.search(line):
                     continue
                 score = 0
                 # STRONG keywords (the actual question uses these):
@@ -8458,6 +8474,28 @@ async def solve_hcaptcha_accessibility(page, iframe,
                     except Exception:
                         _body_txt = ""
                     _low_txt = (_body_txt or "").lower()
+                    # ── LOADING-STATE GUARD ──
+                    # hCaptcha paints the challenge shell ("Wait! Are you
+                    # human?" + spinner) BEFORE the real question renders.
+                    # Answering that text is fake solving: the loader stays
+                    # on screen while the bot answers nonsense, gets
+                    # rejected, and burns Q1..Q6 on "Please try again".
+                    # Detect the loading screen (title + spinner) and wait
+                    # for it to disappear instead of answering.
+                    if re.search(r'wait!?\s+are\s+you\s+human|please\s+wait|loading|'
+                                 r'verifying|challenge\s+is\s+loading|starting',
+                                 _low_txt) and "question" not in _low_txt:
+                        log("[Accessibility] Challenge still loading — waiting for the real question", level="debug")
+                        for _li in range(10):
+                            await asyncio.sleep(0.5)
+                            try:
+                                _bt2 = await hcaptcha.locator("body").inner_text()
+                            except Exception:
+                                _bt2 = ""
+                            if not re.search(r'wait!?\s+are\s+you\s+human|please\s+wait|loading',
+                                             (_bt2 or "").lower()):
+                                break
+                        continue
                     if "please try again" in _low_txt:
                         _clean_txt = re.sub(
                             r"please\s+try\s+again.*", "", _low_txt,

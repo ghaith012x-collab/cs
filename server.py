@@ -3327,6 +3327,31 @@ class DiscordAutomation:
             else:
                 self._log("[Captcha] [FAIL] Accessibility challenge did not solve",
                           level="error")
+                # Diagnostic: dump what the challenge frame actually showed
+                # so the exact failure is visible in ALL LOGS (loading
+                # screen? error state? real question?).
+                try:
+                    _dump = await self._page.evaluate("""() => {
+                        const out = [];
+                        for (const f of document.querySelectorAll(
+                            'iframe[title*="hCaptcha challenge"], iframe[src*="hcaptcha-challenge"]')) {
+                            const r = f.getBoundingClientRect();
+                            out.push({w: Math.round(r.width), h: Math.round(r.height),
+                                      src: (f.getAttribute('src') || '').slice(0, 70)});
+                        }
+                        return JSON.stringify(out);
+                    }""")
+                    self._log(f"[Captcha] Challenge frames at failure: {_dump}", level="warn")
+                except Exception:
+                    pass
+                try:
+                    frame = await self._hcaptcha_frame_for(iframe)
+                    if frame is not None:
+                        body = await frame.evaluate(
+                            "() => (document.body ? document.body.innerText : '')")
+                        self._log(f"[Captcha] Challenge frame text at failure: {str(body)[:220]!r}", level="warn")
+                except Exception as e:
+                    self._log(f"[Captcha] Challenge frame read failed: {e}", level="warn")
                 await asyncio.sleep(2)
                 return False
 
