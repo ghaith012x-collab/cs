@@ -83,16 +83,26 @@ _TOS_TARGET_JS = r"""() => {
         if (el.tagName === 'INPUT' && el.type === 'checkbox') return true;
         if (el.getAttribute('role') === 'checkbox') return true;
         if (el.getAttribute('data-state')) return true;
+        if (el.getAttribute('aria-checked') !== null) return true;
         const cls = (el.className || '').toString().toLowerCase();
-        if (cls.includes('checkbox')) {
+        // Accept styled divs whose class signals the consent checkbox
+        // (checkbox / agree / terms / tos / consent / accept). Discord's
+        // class names are hashed (checkboxWrapper_f73e0c etc.), so any
+        // of these signals + a small leaf-ish box is good enough.
+        if (cls.includes('checkbox') || cls.includes('check-box')
+                || cls.includes('agree') || cls.includes('terms')
+                || cls.includes('tos') || cls.includes('consent')
+                || cls.includes('accept')) {
             const r = el.getBoundingClientRect();
-            return r.width >= 8 && r.height >= 8 && el.children.length <= 2;
+            return r.width >= 8 && r.height >= 8 && el.children.length <= 3;
         }
         return false;
     };
     const els = [];
     for (const el of document.querySelectorAll(
-        'input[type="checkbox"], [role="checkbox"], [data-state], [class*="checkbox" i]')) {
+        'input[type="checkbox"], [role="checkbox"], [data-state], [aria-checked], ' +
+        '[class*="checkbox" i], [class*="check-box" i], [class*="agree" i], ' +
+        '[class*="terms" i], [class*="tos" i], [class*="consent" i], [class*="accept" i]')) {
         if (isRealBox(el)) els.push(el);
     }
     const candidates = [];
@@ -144,7 +154,7 @@ _TOS_TARGET_JS = r"""() => {
         const entry = {
             x: r2.left + r2.width / 2,
             y: r2.top + r2.height / 2,
-            tos: /terms|service|agreement|conditions|villkor|voorwaarden|condiciones|akzeptiere|accedo|aceito|godk|aksoord|conform|akkoord|gelezen|nous avons lu|acepto los t|принимаю|已阅读|同意/.test(lowL),
+            tos: /terms|service|agreement|conditions|villkor|voorwaarden|condiciones|akzeptiere|accedo|aceito|godk|aksoord|conform|akkoord|gelezen|nous avons lu|acepto los t|принимаю|已阅读|同意|nutzungsbedingungen|datenschutzerklärung|datenschutzerklaerung|gelesen|datenschutz/.test(lowL),
             label: lowL,
             el: target
         };
@@ -199,6 +209,69 @@ _TOS_CLICK_JS = r"""() => {
         }
     }
     return 'dispatched';
+}"""
+
+
+_TOS_FALLBACK_JS = r"""() => {
+    // Position-based fallback: Discord ALWAYS renders the required ToS row
+    // directly above the Create Account button. When the standard checkbox
+    // selectors find nothing (some layouts render the box as a styled div
+    // with no role/data-state), find the submit button and click the
+    // box-like element sitting in the row right above it.
+    const norm = (s) => (s == null ? '' : String(s)).replace(/\s+/g, ' ').trim();
+    const low = (s) => norm(s).toLowerCase();
+    const isBox = (el) => {
+        if (!el || el.nodeType !== 1) return false;
+        const r = el.getBoundingClientRect();
+        if (!r || r.width < 8 || r.height < 8) return false;
+        const cls = (el.className || '').toString().toLowerCase();
+        const tag = el.tagName.toLowerCase();
+        if (tag === 'input' && el.type === 'checkbox') return true;
+        if (el.getAttribute('role') === 'checkbox') return true;
+        if (el.getAttribute('data-state')) return true;
+        if (el.getAttribute('aria-checked') !== null) return true;
+        if (cls.includes('checkbox') || cls.includes('checkBox')) return true;
+        if (cls.includes('circle') && cls.includes('button')) return true;
+        // A square-ish leaf container (Discord's box wrapper)
+        if (r.width <= 40 && r.height <= 40 && el.children.length <= 3) {
+            const cs = getComputedStyle(el);
+            if (cs.borderRadius && cs.cursor === 'pointer') return true;
+        }
+        return false;
+    };
+    const btns = Array.from(document.querySelectorAll('button, [role="button"]'));
+    const submit = btns.filter(b => b.offsetParent !== null)
+        .sort((a, b) => b.getBoundingClientRect().top - a.getBoundingClientRect().top)[0];
+    if (!submit) return null;
+    const srect = submit.getBoundingClientRect();
+    const candidates = [];
+    // Scan the whole form for unchecked box-like elements ABOVE the button
+    // (within 1.4x the button's height), closest to it first.
+    for (const el of document.querySelectorAll('*')) {
+        if (!isBox(el)) continue;
+        if (el.checked || el.getAttribute('aria-checked') === 'true'
+            || el.getAttribute('data-state') === 'checked') continue;
+        const r = el.getBoundingClientRect();
+        if (r.top >= srect.top || r.bottom <= srect.top - 260) continue;
+        candidates.push(el);
+    }
+    if (!candidates.length) return null;
+    candidates.sort((a, b) => b.getBoundingClientRect().top - a.getBoundingClientRect().top);
+    const box = candidates[0];
+    // The click target: the box itself if sized, else the nearest sized
+    // ancestor (the box's visible representation).
+    let target = box;
+    let r = box.getBoundingClientRect();
+    if (r.width < 5 || r.height < 5) {
+        for (let p = box.parentElement; p && p !== document.body; p = p.parentElement) {
+            const pr = p.getBoundingClientRect();
+            if (pr.width >= 8 && pr.height >= 8) { target = p; r = pr; break; }
+        }
+    }
+    if (!target || target.offsetParent === null) return null;
+    try { target.setAttribute('data-tos-target', '1'); } catch (e) {}
+    const txt = low(norm(box.closest('div') ? (box.parentElement ? box.parentElement.innerText : '') : ''));
+    return { x: r.left + r.width / 2, y: r.top + r.height / 2, tag: (target.tagName || '').toLowerCase(), label: txt.slice(0, 90) };
 }"""
 
 
@@ -4499,7 +4572,97 @@ class DiscordAutomation:
             except Exception:
                 target = None
             if not target:
-                break
+                # No checkbox matched the standard selectors. Discord
+                # renders the ToS box differently in some layouts (styled
+                # div without role/data-state, button element, etc.) — dump
+                # the real DOM so the next failure is diagnosable instead of
+                # a silent skip.
+                try:
+                    dump = await self._page.evaluate("""() => {
+                        const seen = new Set();
+                        const out = [];
+                        const textOf = (el) => ((el && el.innerText) || '')
+                            .replace(/\s+/g, ' ').trim().slice(0, 90);
+                        const info = (el) => {
+                            const r = el.getBoundingClientRect();
+                            return {
+                                tag: el.tagName.toLowerCase(),
+                                cls: (el.className || '').toString().slice(0, 50),
+                                role: el.getAttribute('role') || '',
+                                ds: el.getAttribute('data-state') || '',
+                                ac: el.getAttribute('aria-checked') || '',
+                                checked: !!el.checked,
+                                w: Math.round(r.width), h: Math.round(r.height),
+                                vis: r.width > 0 && r.height > 0,
+                                txt: textOf(el),
+                                parent: textOf(el.parentElement),
+                            };
+                        };
+                        // Every element that could BE or CONTAIN the ToS box
+                        for (const el of document.querySelectorAll(
+                            'input[type="checkbox"], [role="checkbox"], [data-state], [aria-checked], ' +
+                            '[class*="checkbox" i], [class*="checkBox" i], [class*="tos" i], ' +
+                            '[class*="terms" i], [class*="agree" i], label, button')) {
+                            if (seen.has(el)) continue;
+                            seen.add(el);
+                            const r = el.getBoundingClientRect();
+                            const t = textOf(el).toLowerCase();
+                            if (r.width < 4 || r.height < 4) continue;
+                            if (!/checkbox|terms|tos|agree|nutzung|datenschutz|gelesen|akzeptier|service|conditions|label|button/i.test(
+                                    (el.className || '') + ' ' + (el.getAttribute('role') || '') + ' ' + t)) continue;
+                            out.push(info(el));
+                        }
+                        // Also: the 3 visible elements directly ABOVE the
+                        // submit button (ToS row sits right above it).
+                        const btns = Array.from(document.querySelectorAll('button'));
+                        const submit = btns.filter(b => b.offsetParent !== null)
+                            .sort((a, b) => b.getBoundingClientRect().top - a.getBoundingClientRect().top)[0];
+                        if (submit) {
+                            const row = submit.parentElement;
+                            if (row) {
+                                let prev = row.previousElementSibling || row.previousSibling;
+                                for (let i = 0; prev && i < 3; i++) {
+                                    if (prev.nodeType === 1 && !seen.has(prev)) {
+                                        seen.add(prev);
+                                        out.push(info(prev));
+                                    }
+                                    prev = prev.previousElementSibling || prev.previousSibling;
+                                }
+                            }
+                        }
+                        return JSON.stringify(out);
+                    }""")
+                    self._log(f"[Form] ToS NO TARGET — checkbox DOM dump: {dump}", level="warn")
+                except Exception as _e:
+                    self._log_exception("[Form] ToS DOM dump failed", _e)
+                # ── Position-based fallback ──
+                # No standard checkbox matched, but Discord always renders
+                # the ToS row directly above the Create Account button.
+                # Click the box-like element in that row.
+                try:
+                    fb = await self._page.evaluate(_TOS_FALLBACK_JS)
+                except Exception:
+                    fb = None
+                if not fb:
+                    break
+                try:
+                    await self._page.mouse.click(fb["x"], fb["y"])
+                    clicked += 1
+                    self._log(
+                        f"[Form] ToS clicked via position fallback (tag={fb.get('tag')}, "
+                        f"label={fb.get('label') or '?'})")
+                except Exception:
+                    pass
+                await asyncio.sleep(0.25)
+                if await self._tos_checked_count() > 0 or await self._tos_continue_enabled():
+                    break
+                try:
+                    r = await self._page.evaluate(_TOS_CLICK_JS)
+                    if r:
+                        self._log(f"[Form] ToS JS-dispatch fallback: {r}")
+                except Exception:
+                    pass
+                await asyncio.sleep(0.25)
             # 1) trusted mouse click at the box's center
             try:
                 await self._page.mouse.click(target["x"], target["y"])
