@@ -4338,10 +4338,13 @@ class DiscordAutomation:
         """Proof the register form actually submitted. Returns a reason
         string ("" = still sitting on the unsubmitted form).
 
-        Signals: the hCaptcha/challenge iframe appeared (Discord shows it
+        Signals: the hCaptcha CHALLENGE frame appeared (Discord shows it
         inside the register modal after a successful submit), the URL moved
-        to /app, /channels or a verify page, or the register form unmounted
-        while the URL left /register."""
+        to /app, /channels or a verify page, or the register form unmounted.
+        The plain widget iframe (newassets.hcaptcha.com) is mounted WITH the
+        form before any click and proves nothing - treating it as proof made
+        the bot declare success and click the pre-existing widget while the
+        form was still unsent."""
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             try:
@@ -4350,7 +4353,7 @@ class DiscordAutomation:
                     return JSON.stringify({
                         url: location.href || '',
                         form: !!f,
-                        captcha: !!document.querySelector('iframe[src*="hcaptcha" i], iframe[title*="challenge" i], iframe[src*="challenges.cloudflare.com"], [class*="captcha" i] iframe'),
+                        challenge: !!document.querySelector('iframe[src*="hcaptcha-challenge"], iframe[title*="hCaptcha challenge" i]'),
                     });
                 }""")
                 st = json.loads(raw) if raw else {}
@@ -4362,12 +4365,12 @@ class DiscordAutomation:
                 # of falsely reporting a landed submit.
                 await asyncio.sleep(0.4)
                 continue
-            if st.get("captcha"):
-                return "captcha_iframe"
+            if st.get("challenge"):
+                return "captcha_challenge"
             url = str(st.get("url") or "")
             if any(k in url for k in ("discord.com/app", "discord.com/channels", "/verify")):
                 return "url:" + url[:60]
-            if not st.get("form") and "register" not in url:
+            if not st.get("form"):
                 return "form_gone:" + url[:60]
             await asyncio.sleep(0.4)
         return ""
