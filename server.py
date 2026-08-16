@@ -15,6 +15,7 @@ from captcha_solver import (
     NopechaClient,
     extract_hcaptcha_sitekey,
     extract_hcaptcha_rqdata,
+    extract_rqdata_from_body,
     read_hcaptcha_token,
     set_hcaptcha_token_on_page,
     proxy_url_from_bot_proxy,
@@ -1127,6 +1128,9 @@ class DiscordAutomation:
         self._token = ""
         self._solver = NoneCapClient(log=self._log)
         self._nopecha = NopechaClient(log=self._log)
+        # Latest hCaptcha enterprise rqdata captured from the live getcaptcha
+        # request (fresh per challenge, reset at the start of each attempt).
+        self._rqdata = ""
         # duckmail.sbs client — created once per bot, reused across attempts.
         # (Lost in the cybertemp→duckmail switch, which silently killed every
         # inbox creation with a NoneType crash — see git log efb6f99.)
@@ -1348,12 +1352,51 @@ class DiscordAutomation:
             "}"
         )
         self._page = await self._context.new_page()
+        self._attach_rqdata_capture()
 
         # CDP-level webdriver removal — runs BEFORE init scripts, catches early checks
         await apply_cdp_stealth(self._context, self._page)
 
         # Report the real egress IP of this session (bounded, never blocks).
         asyncio.create_task(self._log_proxy_exit_ip())
+
+    def _attach_rqdata_capture(self) -> None:
+        """Listen for hCaptcha's getcaptcha POST and stash its enterprise rqdata.
+
+        Discord runs hCaptcha in enterprise mode: every token is bound to the
+        per-challenge rqdata the page passes to the widget. That value is NOT
+        reliably present in the static DOM (the widget renders from a minified
+        bundle), but hCaptcha's own JS echoes it in the getcaptcha request body
+        when the checkbox is clicked. Attaching here — at page creation, before
+        any navigation — means we catch it whether it fires on widget init or
+        on our checkbox click.
+        """
+        if self._page is None:
+            return
+        try:
+            self._page.on("request", self._on_page_request)
+        except Exception as e:
+            self._log(f"[Captcha] Could not attach rqdata request capture: {e}",
+                      level="warn")
+
+    def _on_page_request(self, request) -> None:
+        try:
+            url = (request.url or "").lower()
+            if "hcaptcha" not in url:
+                return
+            if "getcaptcha" not in url and "checkcaptcha" not in url:
+                return
+            body = getattr(request, "post_data", None)
+            if not body:
+                return
+            rqdata = extract_rqdata_from_body(body)
+            if rqdata:
+                self._rqdata = rqdata
+                self._log(
+                    f"[Captcha] Captured enterprise rqdata ({len(rqdata)} chars) "
+                    f"from {request.url[-60:]}")
+        except Exception as e:
+            self._log(f"[Captcha] rqdata capture error: {e}", level="debug")
 
     async def switch_proxy(self, new_proxy=None) -> bool:
         """Swap to a new proxy AND a fresh fingerprint. Returns True on success.
@@ -1499,6 +1542,7 @@ class DiscordAutomation:
                 "}"
             )
             self._page = await self._context.new_page()
+            self._attach_rqdata_capture()
             await apply_cdp_stealth(self._context, self._page)
             self._log("[Nav] Rebuilt browser context WITH fresh TOR proxy")
             return True
@@ -2010,6 +2054,9 @@ class DiscordAutomation:
         self.phone_verify_detected = False
         self._nav_ok = False
         self._mail_failed = False
+        # rqdata is single-use and per-challenge: never carry a stale blob
+        # from a previous page load into this attempt's solve.
+        self._rqdata = ""
 
         # app.py closes + nulls self._mail between attempts (prevents aiohttp
         # connector leaks) while REUSING this bot object for the next attempt —
@@ -3232,7 +3279,7 @@ class DiscordAutomation:
                     self._log("[Captcha] No exact sitekey yet — cannot call NoneCap",
                               level="warn")
                     continue
-                rqdata = await extract_hcaptcha_rqdata(self._page)
+                rqdata = getattr(self, "_rqdata", "") or await extract_hcaptcha_rqdata(self._page)
                 proxy_url = proxy_url_from_bot_proxy(self.proxy)
                 if not proxy_url:
                     # Discord's enterprise hCaptcha is IP-bound: the solve IP
@@ -3289,7 +3336,7 @@ class DiscordAutomation:
                     self._log("[Captcha] No exact sitekey yet — cannot call Nopecha",
                               level="warn")
                     continue
-                rqdata = await extract_hcaptcha_rqdata(self._page)
+                rqdata = getattr(self, "_rqdata", "") or await extract_hcaptcha_rqdata(self._page)
                 proxy_obj = proxy_dict_from_bot_proxy(self.proxy)
                 if not proxy_obj:
                     self._log(
