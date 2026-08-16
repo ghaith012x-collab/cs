@@ -1366,6 +1366,19 @@ class DiscordAutomation:
         await self._context.add_init_script(
             build_init_script(self._fingerprint, self._ua)
         )
+        # ENGLISH IS FORCED (operator request): spoof navigator.language /
+        # languages so hCaptcha + Discord render English even when the
+        # proxy region or site would otherwise localize them.
+        await self._context.add_init_script(
+            "() => {"
+            "try {"
+            "Object.defineProperty(navigator, 'language', {get: () => 'en-US'});"
+            "Object.defineProperty(navigator, 'languages', {get: () => ['en-US', 'en']});"
+            "Object.defineProperty(navigator, 'userLanguage', {get: () => 'en-US'});"
+            "Object.defineProperty(navigator, 'browserLanguage', {get: () => 'en-US'});"
+            "} catch (e) {}"
+            "}"
+        )
         self._page = await self._context.new_page()
 
         # CDP-level webdriver removal — runs BEFORE init scripts, catches early checks
@@ -1503,6 +1516,19 @@ class DiscordAutomation:
             )
             await self._context.add_init_script(
                 build_init_script(self._fingerprint, self._ua)
+            )
+            # ENGLISH IS FORCED (operator request): spoof navigator.language /
+            # languages so hCaptcha + Discord render English even when the
+            # proxy region or site would otherwise localize them.
+            await self._context.add_init_script(
+                "() => {"
+                "try {"
+                "Object.defineProperty(navigator, 'language', {get: () => 'en-US'});"
+                "Object.defineProperty(navigator, 'languages', {get: () => ['en-US', 'en']});"
+                "Object.defineProperty(navigator, 'userLanguage', {get: () => 'en-US'});"
+                "Object.defineProperty(navigator, 'browserLanguage', {get: () => 'en-US'});"
+                "} catch (e) {}"
+                "}"
             )
             self._page = await self._context.new_page()
             await apply_cdp_stealth(self._context, self._page)

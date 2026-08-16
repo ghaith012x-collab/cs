@@ -5578,10 +5578,11 @@ async def solve_hcaptcha_accessibility(page, iframe,
             # so textContent works but children.length > 0 would wrongly skip them.
             try:
                 clicked = await _challenge_js("""() => {
-                    // ALL locales: the menu item is localized (French "Défi
-                    // d'accessibilité", German "Herausforderung zur
-                    // Barrierefreiheit", Spanish "Reto de accesibilidad"...).
-                    const ACC = /accessib|barrierefrei|défi|reto|sfida|desaf|toegankelijk|dostępn|přístupn|прыступ|доступн|utmaning|udfordring|haaste|a11y/i;
+                    // ENGLISH IS FORCED (operator request): prefer the
+                    // English "Accessibility Challenge" label first. The
+                    // multi-locale regex remains only as a fallback for
+                    // sessions where Discord still serves a localized menu.
+                    const ACC = /accessibility challenge|accessibility|défi d.accessibilité|barrierefrei|défi|reto|sfida|desaf|toegankelijk|dostępn|přístupn|прыступ|доступн|utmaning|udfordring|haaste|a11y/i;
                     const META = /about|why|report|close|über|warum|melden|schließen|à propos|pourquoi|signaler|fermer|acerca|por qué|informar|cerrar|perché|segnala|chiudi|over|waarom|rapporteer|sluit|varför|stäng|hvorfor|luk|zamknij|o nas|zgłoś|закрыть|о нас|сообщить|hakkında|kapat|về|đóng|닫기|정보|閉じる|关闭|关于/i;
                     const all = document.querySelectorAll('*');
                     const candidates = [];

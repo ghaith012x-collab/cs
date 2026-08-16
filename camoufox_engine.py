@@ -154,23 +154,24 @@ class _CamoufoxBrowser:
 
     async def new_context(self, **opts):
         clean = {k: opts[k] for k in _CONTEXT_WHITELIST if opts.get(k) is not None}
-        # LANGUAGE IS ENGINE-OWNED: the geo-matched fingerprint mints the
-        # real language/locale/Accept-Language for the proxy region, and
-        # the bot's form filler is fully locale-agnostic now, so we do NOT
-        # force English. Forcing en-US on a non-US proxy was itself a leak
-        # signal AND Discord still served the localized form from the exit
-        # IP, so the form just broke. The operator can still pin one
-        # language explicitly with CAMOUFOX_LOCALE (e.g. "en-US" or a
-        # proxy-region language) — then Accept-Language is derived from it.
-        locale = os.environ.get("CAMOUFOX_LOCALE") or ""
-        if locale:
-            clean["locale"] = locale
-            headers = dict(opts.get("extra_http_headers") or {})
-            if locale.lower().startswith("en"):
-                headers.setdefault("Accept-Language", "en-US,en;q=0.9")
-            else:
-                headers.setdefault("Accept-Language", locale + ",en;q=0.8")
-            clean["extra_http_headers"] = headers
+        # ENGLISH IS FORCED — operator request. The geo-matched fingerprint
+        # would otherwise mint the proxy region's language (the bot kept
+        # getting French/German captchas and Discord forms), which broke the
+        # captcha solver AND the DOB dropdowns. Every session now presents
+        # as en-US: locale, Accept-Language and the navigator.language
+        # spoof (server.py init script) all say English, so hCaptcha and
+        # Discord both render English. CAMOUFOX_LOCALE still overrides when
+        # an operator explicitly pins a different language.
+        locale = (os.environ.get("CAMOUFOX_LOCALE") or "en-US").strip()
+        clean["locale"] = locale
+        headers = dict(opts.get("extra_http_headers") or {})
+        headers.setdefault("Accept-Language", locale if locale.lower().startswith("en")
+                           else locale + ",en;q=0.8")
+        # Accept-Language must NEVER offer a non-English language first,
+        # or hCaptcha will serve the localized challenge. Always put
+        # en-US first even for pinned non-English locales.
+        headers["Accept-Language"] = "en-US,en;q=0.9"
+        clean["extra_http_headers"] = headers
         return await AsyncNewContext(self._browser, **clean)
 
     async def close(self):
