@@ -4345,12 +4345,12 @@ class DiscordAutomation:
             await asyncio.sleep(random.uniform(0.9, 1.9))
             self._log("Clicking Create Account...")
 
-            # ── Click until the submit lands (max 3 clicks, ~3s apart) ──
+            # ── Click until the submit lands (max 5 clicks, ~3s apart) ──
             # Spec: one click per pass, verified after ~3s; if it didn't
             # land, click again on the SAME page. The page is NEVER
             # reloaded while registering - only the caller rotates for a
             # dead IP / invalid email.
-            for click_pass in range(1, 4):
+            for click_pass in range(1, 6):
                 if self._stopped.is_set():
                     self._nav_error = "stopped by user"
                     return False
@@ -4361,7 +4361,7 @@ class DiscordAutomation:
                     return False
 
                 if click_pass > 1:
-                    self._log(f"[Form] Create Account retry {click_pass}/3 - clicking again in ~3s (no page refresh)...")
+                    self._log(f"[Form] Create Account retry {click_pass}/5 - clicking again in ~3s (no page refresh)...")
                     # Re-check the REQUIRED ToS checkbox on retry (React may
                     # have reset it) - real mouse click, never the optional
                     # marketing box or a styled container div.
@@ -4383,7 +4383,7 @@ class DiscordAutomation:
                 #    button was found (e.g. still validating the username).
                 if await self._real_click_create_button():
                     clicked_this_pass = True
-                    self._log(f"[Form] Real mouse click sent (pass {click_pass}/3)")
+                    self._log(f"[Form] Real mouse click sent (pass {click_pass}/5)")
 
                 # 2) JS strategies: button text / type=submit / requestSubmit
                 if not clicked_this_pass:
@@ -4462,9 +4462,9 @@ class DiscordAutomation:
                             .replace('__SUBMIT_TEXT_RE__', json.dumps(_SUBMIT_TEXT_RE)))
                         if result and result != 'failed':
                             clicked_this_pass = True
-                            self._log(f"[OK] Account button clicked (pass {click_pass}/3): {result}")
+                            self._log(f"[OK] Account button clicked (pass {click_pass}/5): {result}")
                     except Exception as e:
-                        self._log(f"Create Account JS attempt (pass {click_pass}/3) error: {e}", level="warn")
+                        self._log(f"Create Account JS attempt (pass {click_pass}/5) error: {e}", level="warn")
 
                 # 3) Playwright trusted click fallback
                 if not clicked_this_pass:
@@ -4515,7 +4515,7 @@ class DiscordAutomation:
                                             continue
                                         await btn.scroll_into_view_if_needed()
                                         await btn.click()
-                                        self._log(f"[OK] Playwright click: {sel} (pass {click_pass}/3)")
+                                        self._log(f"[OK] Playwright click: {sel} (pass {click_pass}/5)")
                                         clicked_this_pass = True
                                         break
                             except Exception:
@@ -4549,13 +4549,13 @@ class DiscordAutomation:
                     if safe_enter:
                         try:
                             await self._page.locator('input[name="password"]').press('Enter')
-                            self._log(f"Pressed Enter on password field (pass {click_pass}/3)")
+                            self._log(f"Pressed Enter on password field (pass {click_pass}/5)")
                             clicked_this_pass = True
                         except Exception as e:
                             self._log_exception("[Form] Enter key fallback failed", e)
 
                 if not clicked_this_pass:
-                    self._log(f"[Form] No enabled Create Account button found (pass {click_pass}/3)", level="warn")
+                    self._log(f"[Form] No enabled Create Account button found (pass {click_pass}/5)", level="warn")
 
                 # Wait ~3s, then PROVE the submit landed before moving on.
                 # No page refresh - if it didn't land, the next pass clicks
@@ -4563,17 +4563,17 @@ class DiscordAutomation:
                 await asyncio.sleep(3.0)
                 reason = await self._submit_landed(timeout=2.5)
                 if reason:
-                    self._log(f"[OK] Create Account submit verified after click {click_pass}/3 ({reason})")
+                    self._log(f"[OK] Create Account submit verified after click {click_pass}/5 ({reason})")
                     await self.capture_screenshot()
                     return True
-                if click_pass < 3:
+                if click_pass < 5:
                     self._log("[Form] Submit not landed yet - clicking again in ~3s (no page refresh)", level="warn")
 
-            # ── All 3 clicks failed - dump the form so the failure is
+            # ── All 5 clicks failed - dump the form so the failure is
             # self-explanatory instead of a silent stall. ──
             await self._log_form_state("after Create Account clicks (not landed)")
-            self._nav_error = "Create Account clicked 3x but the form never submitted (see dump)"
-            self._log("[FAIL] Create Account never submitted after 3 clicks", level="error")
+            self._nav_error = "Create Account clicked 5x but the form never submitted (see dump)"
+            self._log("[FAIL] Create Account never submitted after 5 clicks", level="error")
             await self.capture_screenshot()
             return False
 
