@@ -46,11 +46,22 @@ from typing import Optional
 ENGINE = "camoufox"
 
 # Camoufox (Firefox) refuses to launch as root when $HOME is owned by another
-# user. The platform runs us as root with HOME=/home/<user>; point Firefox at
-# a root-owned HOME and keep the Camoufox cache (browser build + GeoIP DBs)
-# under it. Setdefault so an operator can still override.
+# user. The platform runs us as root but can inject HOME=/home/<user> (owned
+# by that user) into the environment — setdefault() silently kept that broken
+# HOME and every launch died with "Running Camoufox as root in a regular
+# user's session is not supported". Force a root-owned HOME whenever the
+# current one is missing or not owned by root, and keep the Camoufox cache
+# (browser build + GeoIP DBs) under it. An operator-set root-owned HOME
+# (e.g. /root) is left untouched.
 if os.name == "posix" and hasattr(os, "getuid") and os.getuid() == 0:
-    os.environ.setdefault("HOME", "/root")
+    _cur_home = os.environ.get("HOME") or ""
+    try:
+        _home_owned_by_root = bool(_cur_home and os.path.isdir(_cur_home)
+                                   and os.stat(_cur_home).st_uid == 0)
+    except Exception:
+        _home_owned_by_root = False
+    if not _home_owned_by_root:
+        os.environ["HOME"] = "/root"
     os.environ.setdefault("XDG_CACHE_HOME", "/root/.cache")
 
 try:

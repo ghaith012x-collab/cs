@@ -1003,46 +1003,15 @@ RENDER_WAIT_BUDGET_S = 75.0
 
 
 # ═══════════════════════════════════════════════════════════════
-# Human Behavior Simulation & Fingerprint Randomization
+# Human Behavior Simulation
 # ═══════════════════════════════════════════════════════════════
 
-async def human_type(page, selector: str, text: str):
-    """Type with variable speed, occasional pauses, and rare backspaces.
-    Human-like typing with Gaussian-distributed delays."""
-    try:
-        await page.click(selector)
-    except Exception:
-        pass
-    for i, char in enumerate(text):
-        # Base 40-110ms per char with Gaussian distribution (fast but varied)
-        delay = max(18, random.gauss(75, 28)) / 1000.0
-        if random.random() < 0.04:  # 4% chance of pause
-            delay += random.gauss(600, 200) / 1000.0
-        if random.random() < 0.02 and i > 0:  # 2% chance of backspace
-            await page.keyboard.press("Backspace")
-            await asyncio.sleep(random.gauss(150, 50) / 1000.0)
-        await page.keyboard.type(char, delay=int(delay * 1000))
-        await asyncio.sleep(delay)
-
-async def human_mouse_move(page, x: int, y: int):
-    """Bezier curve mouse movement instead of instant teleport.
-    Creates a natural, curved mouse path between current position and target."""
-    try:
-        current = await page.evaluate("() => ({x: window.mouseX || 0, y: window.mouseY || 0})")
-    except Exception:
-        current = {'x': x - 100, 'y': y - 50}
-    if not current or current.get('x') == 0:
-        current = {'x': x - 100, 'y': y - 50}
-    steps = random.randint(8, 20)
-    for t in range(1, steps + 1):
-        progress = t / steps
-        # Quadratic bezier with random control point
-        cp_x = (current['x'] + x) / 2 + random.randint(-30, 30)
-        cp_y = (current['y'] + y) / 2 + random.randint(-20, 20)
-        bx = (1-progress)**2 * current['x'] + 2*(1-progress)*progress * cp_x + progress**2 * x
-        by = (1-progress)**2 * current['y'] + 2*(1-progress)*progress * cp_y + progress**2 * y
-        await page.mouse.move(bx, by)
-        await asyncio.sleep(random.gauss(0.008, 0.003))
+# Mouse humanization is ENGINE-OWNED: Camoufox launches with humanize=True,
+# so every trusted mouse move / click already travels a human-like bezier
+# trajectory (max ~1.5s) natively — no custom bezier shim and NO artificial
+# per-step sleep delays. The old truedriver-era human_mouse_move() (manual
+# quadratic bezier + sleeps) is gone; every click in this file is a real
+# page.mouse click that the engine humanizes for free.
 
 class DiscordAutomation:
     def __init__(self, headless: bool = False, email: str = "",
@@ -3296,7 +3265,7 @@ class DiscordAutomation:
         controls that carry no role/class markers), opens it with a trusted
         Playwright click, matches the option locale-aware (months resolve to
         their numeric index, so "January" picks the Dutch "Januari"), and
-        selects it with a trusted click (index click, then a coordinates
+        selects it with a trusted click (coordinates click, then an index
         fallback for options with no usual markers). Falls back to the JS
         setter for native <select> / legacy builds.
         """
@@ -3345,11 +3314,11 @@ class DiscordAutomation:
             # click action' for the full 30s default even though the element
             # resolved visible+stable — the exact stall from the field logs.
             # Rule: SHORT click timeouts + verify the menu actually opened +
-            # layered fallbacks (trusted click -> coordinate click -> JS
-            # dispatch -> keyboard) so no single step can ever eat 30s.
+            # layered fallbacks (coordinate click -> trusted locator click
+            # -> JS dispatch -> keyboard) so no single step can ever eat 30s.
             deadline = time.monotonic() + 25.0
             opened = False
-            for open_method in ("click", "coords", "dispatch", "keyboard"):
+            for open_method in ("coords", "click", "dispatch", "keyboard"):
                 if opened or time.monotonic() > deadline:
                     break
                 # Re-locate every attempt: React may have replaced the
@@ -3376,10 +3345,11 @@ class DiscordAutomation:
                     except Exception as e:
                         self._log(f"[DOB] open click {label}: {str(e)[:150]}", level="warn")
                 elif open_method == "coords":
-                    # Bypass actionability entirely — trusted input at the
-                    # control's center; lands even under a transparent
-                    # overlay or while React re-renders the form.
+                    # Trusted input at the control's center — engine-
+                    # humanized by Camoufox (bezier, no added delay), no
+                    # actionability re-checks to stall on.
                     try:
+                        await ctrl.scroll_into_view_if_needed(timeout=3000)
                         box = await ctrl.bounding_box()
                         if not box or not box.get("width"):
                             continue
@@ -3429,7 +3399,7 @@ class DiscordAutomation:
 
             # ── Pick the option ──
             picked = False
-            for sel_method in ("index", "coords", "dispatch", "keyboard"):
+            for sel_method in ("coords", "index", "dispatch", "keyboard"):
                 if picked or time.monotonic() > deadline:
                     break
                 idx = -1
@@ -3744,6 +3714,14 @@ class DiscordAutomation:
             loc = self._page.locator(sel)
             if (await loc.count()) == 0 or not (await loc.first.is_visible()):
                 return False
+            # Camoufox fill() APPENDS to a non-empty field instead of
+            # replacing (probed on the engine: re-filling a filled input
+            # yields old+new concatenated - the "email shows the address
+            # twice/mangled" corruption). Clear FIRST, then write, then
+            # verify; the JS-setter fallback below is the guaranteed-
+            # replace path for anything that still slips.
+            await loc.first.fill("")
+            await asyncio.sleep(0.05)
             await loc.first.fill(val)
             await asyncio.sleep(0.25)
             try:
@@ -3754,9 +3732,12 @@ class DiscordAutomation:
         except Exception:
             pass
         # 2) Native-setter JS — focus-independent replace + tracker sync.
+        # Uses the FULL selector list (same as the fill path above) so it
+        # resolves the same element: the old split(',')[0] silently did
+        # nothing when Discord's input lacked that first selector's name.
         try:
             await self._page.evaluate(
-                _REACT_SET_VALUE_JS, [sel.split(",")[0].strip(), val])
+                _REACT_SET_VALUE_JS, [sel, val])
             await asyncio.sleep(0.25)
             try:
                 return (await self._page.locator(sel).first.input_value()) == val
