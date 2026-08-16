@@ -12,11 +12,13 @@ from browser_engine import async_playwright, ENGINE
 
 from captcha_solver import (
     NoneCapClient,
+    NopechaClient,
     extract_hcaptcha_sitekey,
     extract_hcaptcha_rqdata,
     read_hcaptcha_token,
     set_hcaptcha_token_on_page,
     proxy_url_from_bot_proxy,
+    proxy_dict_from_bot_proxy,
 )
 from duckmail import TempMail
 
@@ -1124,6 +1126,7 @@ class DiscordAutomation:
         self._password = ""
         self._token = ""
         self._solver = NoneCapClient(log=self._log)
+        self._nopecha = NopechaClient(log=self._log)
         # duckmail.sbs client — created once per bot, reused across attempts.
         # (Lost in the cybertemp→duckmail switch, which silently killed every
         # inbox creation with a NoneType crash — see git log efb6f99.)
@@ -2837,12 +2840,14 @@ class DiscordAutomation:
 
     async def _extract_sitekey_with_retry(self, timeout: float = 15.0,
                                           poll: float = 1.0) -> str:
-        """Extract the hCaptcha sitekey, polling until it is valid.
+        """Extract the EXACT hCaptcha sitekey, polling until it is stable.
 
         The captcha iframe mounts before its src carries the sitekey, so
         extracting too early returns a partial/garbage value. Poll every
-        `poll` seconds for up to `timeout` seconds and only accept a
-        well-formed UUID sitekey (extraction is validated upstream).
+        `poll` seconds for up to `timeout` seconds, require a well-formed
+        UUID, and confirm the SAME value reads back twice 300ms apart before
+        returning. A value that flips between reads is a half-mounted widget
+        and is never sent to a solver.
         """
         deadline = time.time() + timeout
         attempts = 0
@@ -2850,15 +2855,20 @@ class DiscordAutomation:
             attempts += 1
             sitekey = await extract_hcaptcha_sitekey(self._page)
             if sitekey:
-                self._log(f"[Captcha] Sitekey ready (attempt {attempts}): {sitekey[:16]}...")
-                return sitekey
+                await asyncio.sleep(0.3)
+                confirm = await extract_hcaptcha_sitekey(self._page)
+                if confirm == sitekey:
+                    self._log(f"[Captcha] Sitekey exact + stable (attempt {attempts}): {sitekey[:16]}...")
+                    return sitekey
+                self._log(f"[Captcha] Sitekey changed between reads (attempt {attempts}) - "
+                          f"widget still settling, retrying", level="warn")
             remaining = deadline - time.time()
             if remaining <= 0:
                 break
             self._log(f"[Captcha] Sitekey not ready yet (attempt {attempts}) - "
                       f"retrying in {int(min(poll, remaining))}s", level="warn")
             await asyncio.sleep(min(poll, remaining))
-        self._log("[Captcha] Sitekey never appeared after retries", level="error")
+        self._log("[Captcha] Exact stable sitekey never appeared after retries", level="error")
         return ""
 
     async def _click_form_submit(self) -> bool:
@@ -2912,6 +2922,28 @@ class DiscordAutomation:
         except Exception as e:
             self._log(f"[Captcha] submit click error: {e}", level="warn")
         return False
+
+    async def _submit_and_verify_token(self, token: str, provider: str) -> str:
+        """Inject a solver token and confirm Discord actually accepted it.
+
+        A token coming back from an API is NOT "solved". Returns one of
+        "accepted" (page moved past the captcha), "rejected" (submitted but
+        Discord did not accept it), or "not_injected" (the textarea could not
+        be written). Only "accepted" is ever logged as [OK].
+        """
+        if not await set_hcaptcha_token_on_page(self._page, token):
+            self._log(f"[Captcha] Could not inject {provider} token into the page",
+                      level="warn")
+            return "not_injected"
+        await self._click_form_submit()
+        for _ in range(6):
+            await asyncio.sleep(1.0)
+            if await self._past_captcha():
+                self._log(f"[Captcha] [OK] {provider} token ACCEPTED by Discord — past captcha")
+                return "accepted"
+        self._log(f"[Captcha] {provider} token REJECTED by Discord (still not past captcha)",
+                  level="warn")
+        return "rejected"
 
     async def _solve_hcaptcha_if_present(self) -> bool:
         """Detect and solve the hCaptcha challenge.
@@ -3181,12 +3213,11 @@ class DiscordAutomation:
                     self._log(f"[Captcha] Captcha check error: {e}", level="warn")
                 return False
 
-            # ── NONECAP API — the only solver ──
-            # Wait until the widget/challenge has genuinely painted, then
-            # read the EXACT live sitekey (plus enterprise rqdata) and pass
-            # it to NoneCap. Solve from the browser's own sticky proxy so
-            # the returned token matches the egress IP that submits it.
-            self._log("[Captcha] Trying NoneCap solve...")
+            # ── CAPTCHA SOLVERS: NoneCap (paid) → Nopecha (free backup) ──
+            # "Token received" is NOT "solved": a solver only counts as OK
+            # once Discord actually accepts the token and the page moves past
+            # the captcha. Logging keeps those two events separate.
+            self._log("[Captcha] Trying NoneCap solve (primary)...")
             for solve_attempt in range(3):
                 if solve_attempt:
                     await asyncio.sleep(3)
@@ -3196,19 +3227,6 @@ class DiscordAutomation:
                 if await self._past_captcha():
                     self._log("[Captcha] Page already past captcha")
                     return True
-                # Re-resolve the live iframe + confirm it is really rendered
-                # before reading the sitekey (never solve a half-mounted
-                # widget: the sitekey must be exact).
-                cur_iframe = iframe
-                try:
-                    chall = self._page.locator(
-                        'iframe[title*="hCaptcha challenge"], '
-                        'iframe[src*="hcaptcha-challenge"]')
-                    if await chall.count() > 0:
-                        if await self._challenge_rendered(chall.first):
-                            cur_iframe = chall.first
-                except Exception:
-                    pass
                 sitekey = await self._extract_sitekey_with_retry(timeout=12)
                 if not sitekey:
                     self._log("[Captcha] No exact sitekey yet — cannot call NoneCap",
@@ -3216,36 +3234,85 @@ class DiscordAutomation:
                     continue
                 rqdata = await extract_hcaptcha_rqdata(self._page)
                 proxy_url = proxy_url_from_bot_proxy(self.proxy)
+                if not proxy_url:
+                    # Discord's enterprise hCaptcha is IP-bound: the solve IP
+                    # must equal the submit IP. On TOR/direct there is no
+                    # sticky egress we can hand the solver, so the token would
+                    # always come back rejected - rotate instead of burning
+                    # paid solves.
+                    self._log(
+                        "[Captcha] No sticky residential proxy - cannot match "
+                        "NoneCap solve IP to submit IP (TOR/direct), rotating",
+                        level="warn")
+                    return False
                 if rqdata:
                     self._log(f"[Captcha] Enterprise rqdata present ({len(rqdata)} chars)")
+                else:
+                    self._log(
+                        "[Captcha] No enterprise rqdata found - token may be "
+                        "refused as invalid-response", level="warn")
                 result = await self._solver.solve(
                     sitekey=sitekey,
                     pageurl=self._page.url or "https://discord.com/register",
                     rqdata=rqdata,
                     proxy=proxy_url or None,
                 )
-                if result:
-                    token = result["token"]
-                    solve_id = result["solve_id"]
-                    self._log(f"[Captcha] [OK] NoneCap returned a token ({len(token)} chars)")
-                    if not await set_hcaptcha_token_on_page(self._page, token):
-                        self._log("[Captcha] Could not inject NoneCap token into the page",
-                                  level="warn")
-                        await self._solver.report(solve_id, "unused")
-                        continue
-                    await self._click_form_submit()
-                    # Report only after the downstream verdict is clear:
-                    # past-captcha = accepted, otherwise rejected.
-                    for _ in range(6):
-                        await asyncio.sleep(1.0)
-                        if await self._past_captcha():
-                            await self._solver.report(solve_id, "accepted")
-                            self._log("[Captcha] [OK] NoneCap solve accepted — past captcha")
-                            return True
-                    await self._solver.report(solve_id, "rejected")
-                    self._log("[Captcha] Token rejected by Discord — retrying", level="warn")
+                if not result:
+                    continue  # no token — safe to retry NoneCap
+                token = result["token"]
+                solve_id = result["solve_id"]
+                self._log(f"[NoneCap] Token received ({len(token)} chars) — verifying with Discord")
+                verdict = await self._submit_and_verify_token(token, "NoneCap")
+                if verdict == "accepted":
+                    await self._solver.report(solve_id, "accepted")
+                    return True
+                if verdict == "not_injected":
+                    await self._solver.report(solve_id, "unused")
                     continue
-            self._log("[Captcha] [FAIL] NoneCap did not produce an accepted token",
+                await self._solver.report(solve_id, "rejected")
+                self._log("[Captcha] NoneCap token REJECTED by Discord — falling back to Nopecha",
+                          level="warn")
+                break  # never re-burn paid credits on the same rejected pattern
+
+            self._log("[Captcha] Trying Nopecha solve (free backup)...")
+            for backup_attempt in range(3):
+                if backup_attempt:
+                    await asyncio.sleep(3)
+                    self._log(
+                        f"[Captcha] Retrying Nopecha (attempt {backup_attempt + 1}/3)...",
+                        level="warn")
+                if await self._past_captcha():
+                    self._log("[Captcha] Page already past captcha")
+                    return True
+                sitekey = await self._extract_sitekey_with_retry(timeout=12)
+                if not sitekey:
+                    self._log("[Captcha] No exact sitekey yet — cannot call Nopecha",
+                              level="warn")
+                    continue
+                rqdata = await extract_hcaptcha_rqdata(self._page)
+                proxy_obj = proxy_dict_from_bot_proxy(self.proxy)
+                if not proxy_obj:
+                    self._log(
+                        "[Captcha] No sticky residential proxy for Nopecha - "
+                        "free-tier solve IP may not match submit IP", level="warn")
+                if rqdata:
+                    self._log(f"[Captcha] Enterprise rqdata present ({len(rqdata)} chars)")
+                result = await self._nopecha.solve(
+                    sitekey=sitekey,
+                    pageurl=self._page.url or "https://discord.com/register",
+                    rqdata=rqdata,
+                    proxy=proxy_obj,
+                )
+                if not result:
+                    continue
+                token = result["token"]
+                self._log(f"[Nopecha] Token received ({len(token)} chars) — verifying with Discord")
+                verdict = await self._submit_and_verify_token(token, "Nopecha")
+                if verdict == "accepted":
+                    return True
+                self._log("[Captcha] Nopecha token REJECTED by Discord", level="warn")
+                break
+            self._log("[Captcha] [FAIL] No solver produced a Discord-accepted token",
                       level="error")
             await asyncio.sleep(2)
             return False
