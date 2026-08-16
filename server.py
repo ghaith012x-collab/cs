@@ -4086,15 +4086,26 @@ class DiscordAutomation:
             # Humanization: pause to review the filled form before submitting.
             await asyncio.sleep(random.uniform(0.9, 1.9))
             self._log("Clicking Create Account...")
-            create_clicked = False
 
-            for click_attempt in range(4):
-                if create_clicked:
-                    break
-                if click_attempt > 0:
-                    self._log(f"Retrying Create Account click (attempt {click_attempt+1}/4)...")
+            # ── Click until the submit lands (max 3 clicks, ~3s apart) ──
+            # Spec: one click per pass, verified after ~3s; if it didn't
+            # land, click again on the SAME page. The page is NEVER
+            # reloaded while registering - only the caller rotates for a
+            # dead IP / invalid email.
+            for click_pass in range(1, 4):
+                if self._stopped.is_set():
+                    self._nav_error = "stopped by user"
+                    return False
+                if await self._rate_limited():
+                    self._nav_error = "rate limited (429) by Discord"
+                    self._log("[Form] RATE LIMITED during Create Account - rotating circuit", level="warn")
+                    await self.capture_screenshot()
+                    return False
+
+                if click_pass > 1:
+                    self._log(f"[Form] Create Account retry {click_pass}/3 - clicking again in ~3s (no page refresh)...")
                     # Re-check the REQUIRED ToS checkbox on retry (React may
-                    # have reset it) — real mouse click, never the optional
+                    # have reset it) - real mouse click, never the optional
                     # marketing box or a styled container div.
                     try:
                         target = await self._page.evaluate(_TOS_TARGET_JS)
@@ -4105,88 +4116,100 @@ class DiscordAutomation:
                         self._log_exception("[Form] ToS re-check on retry failed", e)
                     await asyncio.sleep(1.0)  # Let React process
 
-                try:
-                    result = await self._page.evaluate("""() => {
-                        __LOGIN_LINK_GUARD__
-                        const _norm = (s) => (s || '').toLowerCase().replace(/\s+/g, ' ').trim();
-                        // Strategy 1: Find button by text content (most reliable)
-                        const btns = document.querySelectorAll('button, [role="button"], [type="submit"]');
-                        for (const btn of btns) {
-                            if (btn.offsetParent === null) continue;
-                            // Check if disabled
-                            if (btn.disabled || btn.getAttribute('aria-disabled') === 'true') continue;
-                            // Never the "Already have an account?" / back-to-login
-                            // link — Discord labels it with non-breaking spaces /
-                            // split spans, so normalize whitespace and also check
-                            // aria-label / title / value before trusting any text.
-                            if (__isLoginLink(btn)) continue;
-                            const t = _norm(btn.textContent);
-                            const v = _norm(btn.value);
-                            // ALL locales: Discord labels the submit button in
-                            // the page's language (German "Konto erstellen",
-                            // French "Créer un compte", Russian "Создать
-                            // аккаунт", Korean "가입"...), so match the common
-                            // spellings, not just English.
-                            if (RegExp(__SUBMIT_TEXT_RE__).test(t + ' ' + v)) {
-                                btn.scrollIntoView({block: 'center'});
-                                btn.click();
-                                return 'btn_' + t.slice(0, 20);
-                            }
-                        }
+                clicked_this_pass = False
 
-                        // Strategy 2: real submit button — but NEVER a
-                        // navigation button like "Already have an account?"
-                        // (it's a type=submit button that navigates to /login
-                        // and silently kills the run). Require an actual
-                        // type="submit" inside a form + no login text.
-                        for (const btn of btns) {
-                            if (btn.offsetParent === null) continue;
-                            if (btn.disabled || btn.getAttribute('aria-disabled') === 'true') continue;
-                            if (__isLoginLink(btn)) continue;
-                            if (btn.getAttribute('type') !== 'submit') continue;
-                            const t = _norm(btn.textContent);
-                            if (!btn.closest('form')) continue;
-                            if (t.length > 2) {  // has meaningful text
-                                btn.scrollIntoView({block: 'center'});
-                                btn.click();
-                                return 'btntype_' + t.slice(0, 20);
-                            }
-                        }
+                # 1) PRIMARY: real engine-humanized mouse click at the
+                #    button's center - works where synthetic clicks are
+                #    swallowed (the same coords pattern that fixed the DOB
+                #    dropdowns). Fallbacks below only run if no ENABLED
+                #    button was found (e.g. still validating the username).
+                if await self._real_click_create_button():
+                    clicked_this_pass = True
+                    self._log(f"[Form] Real mouse click sent (pass {click_pass}/3)")
 
-                        // Strategy 3: Form submit — but NEVER let the default
-                        // submit button be the "Already have an account?" login
-                        // link: requestSubmit() with no argument activates the
-                        // form's default submit button, which IS the login link
-                        // whenever the real Continue button is disabled. Pick a
-                        // real, enabled, non-login submit button explicitly.
-                        const forms = document.querySelectorAll('form');
-                        for (const form of forms) {
-                            if (form.offsetParent === null) continue;
-                            for (const sb of form.querySelectorAll('button[type="submit"], [type="submit"]')) {
-                                if (sb.disabled || sb.getAttribute('aria-disabled') === 'true') continue;
-                                if (sb.offsetParent === null) continue;
-                                if (__isLoginLink(sb)) continue;
-                                if (form.requestSubmit) {
-                                    form.requestSubmit(sb);
-                                    return 'form_requestSubmit';
+                # 2) JS strategies: button text / type=submit / requestSubmit
+                if not clicked_this_pass:
+                    try:
+                        result = await self._page.evaluate("""() => {
+                            __LOGIN_LINK_GUARD__
+                            const _norm = (s) => (s || '').toLowerCase().replace(/\s+/g, ' ').trim();
+                            // Strategy 1: Find button by text content (most reliable)
+                            const btns = document.querySelectorAll('button, [role="button"], [type="submit"]');
+                            for (const btn of btns) {
+                                if (btn.offsetParent === null) continue;
+                                // Check if disabled
+                                if (btn.disabled || btn.getAttribute('aria-disabled') === 'true') continue;
+                                // Never the "Already have an account?" / back-to-login
+                                // link - Discord labels it with non-breaking spaces /
+                                // split spans, so normalize whitespace and also check
+                                // aria-label / title / value before trusting any text.
+                                if (__isLoginLink(btn)) continue;
+                                const t = _norm(btn.textContent);
+                                const v = _norm(btn.value);
+                                // ALL locales: Discord labels the submit button in
+                                // the page's language (German "Konto erstellen",
+                                // French "Créer un compte", Russian "Создать
+                                // аккаунт", Korean "가입"...), so match the common
+                                // spellings, not just English.
+                                if (RegExp(__SUBMIT_TEXT_RE__).test(t + ' ' + v)) {
+                                    btn.scrollIntoView({block: 'center'});
+                                    btn.click();
+                                    return 'btn_' + t.slice(0, 20);
                                 }
-                                sb.click();
-                                return 'form_submit_click';
                             }
-                        }
 
-                        return 'failed';
-                    }""".replace('__LOGIN_LINK_GUARD__', _LOGIN_LINK_GUARD)
-                        .replace('__SUBMIT_TEXT_RE__', json.dumps(_SUBMIT_TEXT_RE)))
-                    if result and result != 'failed':
-                        create_clicked = True
-                        self._log(f"[OK] Account button clicked: {result}")
-                        break
-                except Exception as e:
-                    self._log(f"Create Account JS attempt {click_attempt+1} error: {e}", level="warn")
+                            // Strategy 2: real submit button - but NEVER a
+                            // navigation button like "Already have an account?"
+                            // (it's a type=submit button that navigates to /login
+                            // and silently kills the run). Require an actual
+                            // type="submit" inside a form + no login text.
+                            for (const btn of btns) {
+                                if (btn.offsetParent === null) continue;
+                                if (btn.disabled || btn.getAttribute('aria-disabled') === 'true') continue;
+                                if (__isLoginLink(btn)) continue;
+                                if (btn.getAttribute('type') !== 'submit') continue;
+                                const t = _norm(btn.textContent);
+                                if (!btn.closest('form')) continue;
+                                if (t.length > 2) {  // has meaningful text
+                                    btn.scrollIntoView({block: 'center'});
+                                    btn.click();
+                                    return 'btntype_' + t.slice(0, 20);
+                                }
+                            }
 
-                # Playwright fallback: click the button directly
-                if not create_clicked:
+                            // Strategy 3: Form submit - but NEVER let the default
+                            // submit button be the "Already have an account?" login
+                            // link: requestSubmit() with no argument activates the
+                            // form's default submit button, which IS the login link
+                            // whenever the real Continue button is disabled. Pick a
+                            // real, enabled, non-login submit button explicitly.
+                            const forms = document.querySelectorAll('form');
+                            for (const form of forms) {
+                                if (form.offsetParent === null) continue;
+                                for (const sb of form.querySelectorAll('button[type="submit"], [type="submit"]')) {
+                                    if (sb.disabled || sb.getAttribute('aria-disabled') === 'true') continue;
+                                    if (sb.offsetParent === null) continue;
+                                    if (__isLoginLink(sb)) continue;
+                                    if (form.requestSubmit) {
+                                        form.requestSubmit(sb);
+                                        return 'form_requestSubmit';
+                                    }
+                                    sb.click();
+                                    return 'form_submit_click';
+                                }
+                            }
+
+                            return 'failed';
+                        }""".replace('__LOGIN_LINK_GUARD__', _LOGIN_LINK_GUARD)
+                            .replace('__SUBMIT_TEXT_RE__', json.dumps(_SUBMIT_TEXT_RE)))
+                        if result and result != 'failed':
+                            clicked_this_pass = True
+                            self._log(f"[OK] Account button clicked (pass {click_pass}/3): {result}")
+                    except Exception as e:
+                        self._log(f"Create Account JS attempt (pass {click_pass}/3) error: {e}", level="warn")
+
+                # 3) Playwright trusted click fallback
+                if not clicked_this_pass:
                     try:
                         btn_selectors = [
                             'button:has-text("Create Account")',
@@ -4215,7 +4238,7 @@ class DiscordAutomation:
                                     is_disabled = await btn.is_disabled()
                                     if not is_disabled:
                                         # Never the "Already have an account?" /
-                                        # back-to-login link — it navigates to
+                                        # back-to-login link - it navigates to
                                         # /login and silently kills the run.
                                         try:
                                             _txt = (await btn.inner_text() or "").lower()
@@ -4225,30 +4248,30 @@ class DiscordAutomation:
                                             _aria = (await btn.get_attribute("aria-label") or "").lower()
                                         except Exception:
                                             _aria = ""
-                                        # Normalize whitespace — Discord labels the
+                                        # Normalize whitespace - Discord labels the
                                         # login link with non-breaking spaces, so a
                                         # plain substring match misses it.
                                         _txt_norm = " ".join((_txt + " " + _aria).split())
                                         if any(k in _txt_norm for k in ("already have an account", "log in", "login", "sign in", "back to", "forgot")):
-                                            self._log(f"[Form] Skipping fallback {sel} ({_txt_norm[:24]}) — login link", level="warn")
+                                            self._log(f"[Form] Skipping fallback {sel} ({_txt_norm[:24]}) - login link", level="warn")
                                             continue
                                         await btn.scroll_into_view_if_needed()
                                         await btn.click()
-                                        self._log(f"[OK] Playwright click: {sel}")
-                                        create_clicked = True
+                                        self._log(f"[OK] Playwright click: {sel} (pass {click_pass}/3)")
+                                        clicked_this_pass = True
                                         break
                             except Exception:
                                 continue
                     except Exception as pw_e:
                         self._log(f"Playwright button click error: {pw_e}", level="warn")
 
-                # Last resort: Enter key on password field — but ONLY when
-                # the form's default submit button is not the "Already have
-                # an account?" login link (Enter triggers implicit submission
-                # via the default submit button; when the real Continue is
-                # disabled, that default IS the login link and would send the
-                # run to /login).
-                if not create_clicked:
+                # 4) Last resort: Enter key on password field - but ONLY when
+                #    the form's default submit button is not the "Already have
+                #    an account?" login link (Enter triggers implicit
+                #    submission via the default submit button; when the real
+                #    Continue is disabled, that default IS the login link and
+                #    would send the run to /login).
+                if not clicked_this_pass:
                     try:
                         safe_enter = bool(await self._page.evaluate("""() => {
                             __LOGIN_LINK_GUARD__
@@ -4268,67 +4291,33 @@ class DiscordAutomation:
                     if safe_enter:
                         try:
                             await self._page.locator('input[name="password"]').press('Enter')
-                            self._log("Pressed Enter on password field")
-                            create_clicked = True
+                            self._log(f"Pressed Enter on password field (pass {click_pass}/3)")
+                            clicked_this_pass = True
                         except Exception as e:
                             self._log_exception("[Form] Enter key fallback failed", e)
 
-            if create_clicked:
-                self._log("[OK] Create Account submitted - waiting for response...")
-            else:
-                self._log("[FAIL] Could not click Create Account after all attempts!", level="error")
-                await self.capture_screenshot()
-                return False
+                if not clicked_this_pass:
+                    self._log(f"[Form] No enabled Create Account button found (pass {click_pass}/3)", level="warn")
 
-            # Rotate the moment Discord answers with a rate-limit message.
-            if await self._rate_limited():
-                self._nav_error = "rate limited (429) by Discord"
-                self._log("[Form] RATE LIMITED after submit — rotating circuit", level="warn")
-                await self.capture_screenshot()
-                return False
-
-            # ── PROVE the submit actually landed ──
-            # A click can be "sent" (JS btn.click()) while the form never
-            # submits: browser-native validation blocks invalid required
-            # fields, Discord's React can keep the button inert, or an
-            # overlay swallows the event. The old code declared success and
-            # moved straight to the hCaptcha wait - a captcha that never
-            # loads because the form never went anywhere (the 45s stall).
-            # Verify the transition (hCaptcha/challenge iframe, URL move,
-            # form unmount); if nothing moved, retry with a REAL engine-
-            # humanized mouse click at the button's center and dump the form
-            # state (values + inline validation errors) so the failure is
-            # self-explanatory instead of a silent stall.
-            await asyncio.sleep(1.2)
-            reason = await self._submit_landed(timeout=4.0)
-            if reason:
-                self._log(f"[OK] Create Account submit verified ({reason})")
-                await self.capture_screenshot()
-                return True
-
-            self._log("[Form] Create Account click sent but form did not submit - retrying with real mouse click", level="warn")
-            await self._log_form_state("after Create Account click (not landed)")
-            for _real_retry in range(3):
-                if await self._rate_limited():
-                    self._nav_error = "rate limited (429) by Discord"
-                    self._log("[Form] RATE LIMITED after submit - rotating circuit", level="warn")
-                    await self.capture_screenshot()
-                    return False
-                self._log(f"[Form] Create Account real-click attempt {_real_retry + 1}/3", level="warn")
-                if not await self._real_click_create_button():
-                    break
-                await asyncio.sleep(1.5)
-                reason = await self._submit_landed(timeout=3.0)
+                # Wait ~3s, then PROVE the submit landed before moving on.
+                # No page refresh - if it didn't land, the next pass clicks
+                # again on the SAME session.
+                await asyncio.sleep(3.0)
+                reason = await self._submit_landed(timeout=2.5)
                 if reason:
-                    self._log(f"[OK] Create Account submit verified after real click ({reason})")
+                    self._log(f"[OK] Create Account submit verified after click {click_pass}/3 ({reason})")
                     await self.capture_screenshot()
                     return True
+                if click_pass < 3:
+                    self._log("[Form] Submit not landed yet - clicking again in ~3s (no page refresh)", level="warn")
 
-            self._nav_error = "Create Account click sent but the form never submitted (see POST-CLICK dump)"
-            self._log("[FAIL] Create Account never submitted - form dump above", level="error")
+            # ── All 3 clicks failed - dump the form so the failure is
+            # self-explanatory instead of a silent stall. ──
+            await self._log_form_state("after Create Account clicks (not landed)")
+            self._nav_error = "Create Account clicked 3x but the form never submitted (see dump)"
+            self._log("[FAIL] Create Account never submitted after 3 clicks", level="error")
             await self.capture_screenshot()
             return False
-
 
         except Exception as e:
             self._log_exception("Form filling error", e)
