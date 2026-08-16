@@ -639,35 +639,6 @@ async def _proxy_file_watcher(interval: float = 15.0) -> None:
             _log(f"[Proxy] file watcher error: {e}", level="warn")
 
 
-async def _ai_warmup() -> None:
-    """Pre-warm the Ollama text model so the first captcha answer is fast.
-
-    The bot uses accessibility-only captcha solving (no drag/grid models).
-    The Ollama model answers the text questions the accessibility challenge
-    presents (math, word puzzles, object identification)."""
-    _log("[AI] Accessibility-only solver — Ollama text model handles all captcha questions")
-    try:
-        import aiohttp
-        url = (os.environ.get("OLLAMA_URL") or "http://localhost:11434").rstrip("/")
-        model = (os.environ.get("OLLAMA_TEXT_MODEL") or os.environ.get("OLLAMA_MODEL")
-                 or "qwen3:1.7b")
-        _log(f"[AI] Warming Ollama text model {model}...")
-        # Bounded (12s): if Ollama is slow/down this never lingers — the
-        # first real captcha warms the model on demand anyway.
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=12)) as s:
-            async with s.post(f"{url}/api/chat", json={
-                "model": model,
-                "stream": False,
-                "keep_alive": "10m",
-                "think": False,
-                "options": {"num_predict": 1},
-                "messages": [{"role": "user", "content": "hi"}],
-            }) as r:
-                _log(f"[AI] Ollama text model {model} warm (status {r.status})")
-    except Exception as e:
-        _log(f"[AI] Ollama warm-up skipped: {e}", level="warn")
-
-
 async def _start_all_async(cfg: dict) -> None:
     global _running, _start_time
     if _running:
@@ -683,10 +654,6 @@ async def _start_all_async(cfg: dict) -> None:
         if parked is not None:
             _workers[wid]["bot"] = parked
             _log(f"[{wid}] Browser parked from previous run - will reuse it on Discord")
-
-    # Warm the AI in the background so the first captcha doesn't pay a
-    # cold start (model load + first LLM inference).
-    asyncio.create_task(_ai_warmup())
 
     # ── Proxy pool: load free + residential sessions (retry a few times) ──
     n_sessions = 0
@@ -1376,61 +1343,6 @@ def handle_config():
                     "available_domains": avail})
 
 
-# ── AI Chat (Ollama) ───────────────────────────────────────
-
-@app.route('/ai/chat', methods=['POST'])
-def handle_ai_chat():
-    data = request.get_json(silent=True) or {}
-    prompt = (data.get('prompt') or '').strip()
-    if not prompt:
-        return jsonify({"ok": False, "error": "empty prompt"})
-    result = _ai_chat_sync(prompt)
-    return jsonify(result)
-
-
-@app.route('/ai/status')
-def handle_ai_status():
-    return jsonify(_ai_status_sync())
-
-
-def _ai_chat_sync(prompt: str) -> dict:
-    url = (os.environ.get("OLLAMA_URL") or "http://localhost:11434").rstrip("/")
-    model = (os.environ.get("OLLAMA_TEXT_MODEL") or os.environ.get("OLLAMA_MODEL")
-             or "qwen3:1.7b")
-    try:
-        r = _requests.post(
-            f"{url}/api/chat",
-            json={
-                "model": model,
-                "stream": False,
-                "keep_alive": "5m",
-                "messages": [{"role": "user", "content": prompt}],
-            },
-            timeout=90,
-        )
-        if r.status_code == 200:
-            data = r.json()
-            return {"ok": True,
-                    "response": data.get("message", {}).get("content", ""),
-                    "model": model}
-        return {"ok": False, "error": f"Ollama returned HTTP {r.status_code}"}
-    except Exception as e:
-        return {"ok": False, "error": str(e)}
-
-
-def _ai_status_sync() -> dict:
-    url = (os.environ.get("OLLAMA_URL") or "http://localhost:11434").rstrip("/")
-    try:
-        r = _requests.get(f"{url}/api/tags", timeout=5)
-        if r.status_code == 200:
-            data = r.json()
-            models = [m.get("name", "") for m in (data.get("models") or [])]
-            return {"available": True, "models": models}
-    except Exception:
-        pass
-    return {"available": False, "models": []}
-
-
 # ── Background event loop ─────────────────────────────────
 
 def _run_event_loop(loop: asyncio.AbstractEventLoop) -> None:
@@ -1606,21 +1518,6 @@ input:focus{border-color:var(--dim)}
   padding:10px 18px;border-radius:99px;opacity:0;pointer-events:none;transition:opacity .25s}
 .toast.on{opacity:1}
 .footer{color:#3a3a40;font-size:10px;text-align:center;margin-top:20px;font-family:'JetBrains Mono',monospace;letter-spacing:1px}
-.ai-chat{background:#050506;border:1px solid var(--line);border-radius:10px;padding:12px;
-  min-height:200px;max-height:400px;overflow-y:auto;margin-bottom:12px;
-  display:flex;flex-direction:column;gap:10px}
-.ai-msg{padding:10px 13px;border-radius:12px;font-size:12px;line-height:1.55;
-  max-width:88%;word-break:break-word}
-.ai-user{align-self:flex-end;background:var(--panel2);border:1px solid var(--line2);color:var(--txt)}
-.ai-bot{align-self:flex-start;background:#0f1a2e;border:1px solid #1a3050;color:#c4d7f0}
-.ai-system{align-self:center;background:transparent;color:var(--dim2);font-size:11px;
-  text-align:center;max-width:100%;border:none}
-.ai-input-row{display:flex;gap:8px}
-.ai-input-row input{flex:1;font-family:'JetBrains Mono',monospace;font-size:13px;
-  background:var(--panel2);border:1px solid var(--line);border-radius:9px;
-  color:var(--txt);padding:10px 12px;outline:none}
-.ai-input-row input:focus{border-color:var(--dim)}
-.ai-typing{color:var(--dim2);font-size:11px;align-self:flex-start;font-style:italic}
 .px-cols{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}
 @media(max-width:900px){.px-cols{grid-template-columns:1fr}}
 .px-col{min-width:0}
@@ -1654,7 +1551,6 @@ input:focus{border-color:var(--dim)}
   <button id="nvProxy" onclick="showTab('Proxy')">PROXIES</button>
   <button id="nvTerm" onclick="showTab('Term')">TERMINAL</button>
   <button id="nvMan" onclick="showTab('Manage')">MANAGE</button>
-  <button id="nvAI" onclick="showTab('AI')">AI</button>
 </nav>
 
 <div id="tabMain" class="tab on">
@@ -1734,19 +1630,6 @@ input:focus{border-color:var(--dim)}
   <div id="accList"><div class="empty">No accounts yet - run the generator first.</div></div>
 </div>
 
-<div id="tabAI" class="tab">
-  <div class="card">
-    <h3>AI Assistant</h3>
-    <div class="ai-chat" id="aiChat">
-      <div class="ai-msg ai-system">Ask me anything — powered by Ollama (qwen3).</div>
-    </div>
-    <div class="ai-input-row">
-      <input type="text" id="aiPrompt" placeholder="Type your question..." onkeydown="if(event.key==='Enter')aiSend()">
-      <button class="primary" onclick="aiSend()">SEND</button>
-    </div>
-    <div class="hint" style="margin-top:8px" id="aiStatus">Checking Ollama...</div>
-  </div>
-</div>
 
 <div class="overlay" id="viewOverlay" onclick="if(event.target===this)closeView()">
   <div class="modal">
@@ -1792,14 +1675,13 @@ function toast(m){var t=$('toast');t.textContent=m;t.classList.add('on');clearTi
 function api(p,o){return fetch(p,o);}
 
 function showTab(n){
-  var tabs=['Main','Proxy','Term','Manage','AI'];
+  var tabs=['Main','Proxy','Term','Manage'];
   for(var i=0;i<tabs.length;i++){
     $('tab'+tabs[i]).classList.toggle('on',tabs[i]===n);
     $('nv'+tabs[i]).classList.toggle('on',tabs[i]===n);
   }
   if(n==='Manage') refreshTokens();
   if(n==='Term') refreshLogs();
-  if(n==='AI') aiCheckStatus();
   if(n==='Proxy') refreshProxies();
 }
 function refreshProxies(){
@@ -2098,39 +1980,6 @@ function saveDomains(){
     .then(function(r){return r.json();}).then(function(x){
       toast(x.ok?('Domains saved - '+((x.config&&x.config.mail_domains)||[]).join(', ')):'save failed');
     }).catch(function(e){toast('Save error: '+e.message);});
-}
-
-function aiSend(){
-  var inp=$('aiPrompt'), prompt=inp.value.trim();
-  if(!prompt) return;
-  var chat=$('aiChat');
-  chat.innerHTML+='<div class="ai-msg ai-user">'+esc(prompt)+'</div>';
-  chat.innerHTML+='<div class="ai-typing" id="aiTyping">thinking...</div>';
-  chat.scrollTop=chat.scrollHeight;
-  inp.value='';
-  inp.disabled=true;
-  api('/ai/chat',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({prompt:prompt})})
-    .then(function(r){return r.json();})
-    .then(function(x){
-      var typ=$('aiTyping');if(typ)typ.remove();
-      inp.disabled=false;inp.focus();
-      if(x.ok) chat.innerHTML+='<div class="ai-msg ai-bot">'+esc(x.response)+'</div>';
-      else chat.innerHTML+='<div class="ai-msg ai-system">Error: '+esc(x.error||'unknown')+'</div>';
-      chat.scrollTop=chat.scrollHeight;
-    }).catch(function(e){
-      var typ=$('aiTyping');if(typ)typ.remove();
-      inp.disabled=false;
-      chat.innerHTML+='<div class="ai-msg ai-system">Error: '+esc(e.message)+'</div>';
-      chat.scrollTop=chat.scrollHeight;
-    });
-}
-function aiCheckStatus(){
-  api('/ai/status').then(function(r){return r.json();}).then(function(x){
-    $('aiStatus').textContent = x.available
-      ? ('Ollama ready — models: '+(x.models||[]).join(', '))
-      : 'Ollama not available (start with: ollama serve)';
-  }).catch(function(){$('aiStatus').textContent='Ollama status unknown';});
 }
 
 loadConfig();

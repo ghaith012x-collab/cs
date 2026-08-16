@@ -15,8 +15,8 @@ RUN apt-get update && apt-get install -y \
 
 # Install Python dependencies
 COPY requirements.txt ./
-# --retries/--timeout: builds pulling torch + unsloth over the wire can hit
-# transient network blips; retry instead of killing the whole build.
+# --retries/--timeout: builds pulling deps over the wire can hit transient
+# network blips; retry instead of killing the whole build.
 RUN pip install --no-cache-dir --retries 10 --timeout 120 -r requirements.txt
 
 # Fetch the Camoufox browser binary once at build time so the image is
@@ -28,7 +28,6 @@ RUN python -m camoufox fetch || echo "[Camoufox] fetch skipped - will fetch at f
 COPY *.py ./
 COPY *.txt ./
 COPY config.json ./
-COPY models/ models/
 COPY torrc /etc/tor/torrc
 COPY start.sh ./
 RUN chmod +x start.sh

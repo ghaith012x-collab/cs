@@ -11,14 +11,12 @@ from typing import Optional
 from browser_engine import async_playwright, ENGINE
 
 from captcha_solver import (
-    NoCaptchaAI,
+    NoneCapClient,
     extract_hcaptcha_sitekey,
     extract_hcaptcha_rqdata,
-    extract_funcaptcha_task,
     read_hcaptcha_token,
     set_hcaptcha_token_on_page,
-    solve_funcaptcha_pixels,
-    solve_hcaptcha_accessibility,
+    proxy_url_from_bot_proxy,
 )
 from duckmail import TempMail
 
@@ -1003,20 +1001,14 @@ _ESSENTIAL_PREFIXES = (
     "[Captcha] Clicking hCaptcha checkbox", # about to click the widget checkbox
     "[Captcha] [READY]",                    # hCaptcha rendered
     "[Captcha] [OK]",
-    "[Accessibility] Clicked 3-dots",
-    "[Accessibility] Accessibility option clicked",
-    "[Accessibility] NEW captcha detected",  # chained captcha re-trigger
-    "[Accessibility] [OK]",                 # solved / no new challenge
-    "[Accessibility] Q",                    # question answers — refined below
+    "[NoneCap]",
+    "[NoneCap] [OK]",
 )
 
 
 def _log_essential(message: str) -> bool:
     """True when the message is one of the essential signup events."""
     if not any(message.startswith(p) for p in _ESSENTIAL_PREFIXES):
-        return False
-    # A Q-line that isn't an actual answer (e.g. "Q1 skipped via JS click")
-    if message.startswith("[Accessibility] Q") and " solved:" not in message:
         return False
     return True
 
@@ -1131,7 +1123,7 @@ class DiscordAutomation:
         self._username = ""
         self._password = ""
         self._token = ""
-        self._solver = NoCaptchaAI(log=self._log)
+        self._solver = NoneCapClient(log=self._log)
         # duckmail.sbs client — created once per bot, reused across attempts.
         # (Lost in the cybertemp→duckmail switch, which silently killed every
         # inbox creation with a NoneType crash — see git log efb6f99.)
@@ -1271,56 +1263,8 @@ class DiscordAutomation:
             label = "proxy session" if self.proxy else "TOR circuit"
             self._log(f"[Proxy] Exit IP ({label}): {ip}")
 
-    async def _discover_vision_model(self) -> None:
-        """Auto-arm the qwen3-vl image solver when OLLAMA_VISION_MODEL is
-        unset: query the Ollama server for a vision-capable model and set
-        the env var the captcha solver reads. Drag/silhouette/image-pick
-        challenges then get solved with exact pixel coordinates instead of
-        being skipped. Preference: qwen3-vl → qwen2.5vl → qwen2-vl →
-        moondream → llava → minicpm-v → bakllava."""
-        if (os.environ.get("OLLAMA_VISION_MODEL") or "").strip():
-            return
-        url = (os.environ.get("OLLAMA_URL") or os.environ.get("OLLAMA_BASE")
-               or "http://localhost:11434").rstrip("/")
-        try:
-            import aiohttp
-
-            async def _discover() -> str:
-                async with aiohttp.ClientSession(
-                    timeout=aiohttp.ClientTimeout(total=4)
-                ) as s:
-                    async with s.get(url + "/api/tags") as r:
-                        if r.status != 200:
-                            return ""
-                        d = await r.json()
-                names = [m.get("name", "") for m in d.get("models", [])]
-                if not names:
-                    return ""
-                for pref in ("qwen3-vl", "qwen2.5vl", "qwen2-vl",
-                             "moondream", "llava", "minicpm-v", "bakllava"):
-                    for n in sorted(names, key=lambda x: -len(x)):
-                        if n.split(":")[0] == pref or n.startswith(pref + ":"):
-                            return n
-                for n in sorted(names, key=lambda x: -len(x)):
-                    if re.search(r"vl|vision|moondream|llava", n.lower()):
-                        return n
-                return ""
-
-            model = await asyncio.wait_for(_discover(), timeout=5)
-        except Exception:
-            model = ""
-        if model:
-            os.environ["OLLAMA_VISION_MODEL"] = model
-            self._log(f"[Vision] Image solver auto-armed: {model} (drag challenges solved with exact coordinates)")
-        else:
-            self._log("[Vision] No vision model found on Ollama server — drag/image challenges will fall back to Skip (set OLLAMA_VISION_MODEL)")
-
     async def initialize(self) -> None:
         self._playwright = await async_playwright().start()
-
-        # Auto-arm the qwen3-vl image solver BEFORE the first captcha so
-        # drag challenges are solved on the very first attempt.
-        await self._discover_vision_model()
 
         # Best-human-stealth launch args: Camoufox owns launch prefs and the
         # fingerprint entirely, so there is nothing to add.
@@ -2761,8 +2705,8 @@ class DiscordAutomation:
                 await asyncio.sleep(0.4)
 
             # Strategy 0: frame_locator click — the engine's reliable
-            # cross-origin mechanism (the same one the accessibility solver
-            # uses). Playwright resolves the frame lazily and clicks the
+            # cross-origin mechanism. Playwright resolves the frame lazily
+            # and clicks the
             # checkbox center with trusted input, computing all iframe
             # offsets internally. hCaptcha mounts a hidden twin sharing the
             # same src — non-actionable elements just time out and we move
@@ -2891,32 +2835,6 @@ class DiscordAutomation:
         except Exception as e:
             self._log(f"[DOM] iframe dump failed: {e}", level="debug")
 
-    async def _detect_challenge_mode(self, iframe_element) -> str:
-        """Identify the hCaptcha state: 'checkbox' or 'drag'.
-
-        A checkbox widget is solvable via the NoCaptchaAI token API. A drag
-        puzzle (piece to position) must be solved in-browser with the mouse.
-        When there is no checkbox, an active challenge is showing - classify
-        it as a drag puzzle so the in-browser solver gets a chance (it
-        self-verifies and fast-fails back to the API if nothing is found).
-        """
-        frame = await self._hcaptcha_frame_for(iframe_element)
-        if frame is None:
-            return "drag"
-        try:
-            await frame.wait_for_selector('#checkbox', state='visible', timeout=1500)
-            return "checkbox"
-        except Exception:
-            return "drag"
-
-    async def _try_solve_drag(self, iframe) -> Optional[bool]:
-        """Drag puzzles are no longer supported — the accessibility text
-        solver is the only solver. Return None so the caller keeps trying.
-        """
-        self._log("[Captcha] Drag solver removed — using accessibility solver only",
-                  level="warn")
-        return None
-
     async def _extract_sitekey_with_retry(self, timeout: float = 15.0,
                                           poll: float = 1.0) -> str:
         """Extract the hCaptcha sitekey, polling until it is valid.
@@ -3014,9 +2932,8 @@ class DiscordAutomation:
             # honest paths to ready:
             #   · a rendered challenge iframe (height >= 80) — a challenge is
             #     actively showing, solve it directly;
-            #   · the widget iframe with its document loaded — then hand it to
-            #     the accessibility solver, which PROVES interactivity by
-            #     opening the 3-dots menu before claiming anything.
+            #   · the widget iframe with its document loaded — then hand it
+            #     to NoneCap once the exact sitekey is readable.
             # IMPORTANT: we deliberately do NOT click the widget checkbox to
             # "test" readiness — clicking burns an hCaptcha attempt and puts
             # the challenge into a permanent "Please try again" state that
@@ -3174,7 +3091,7 @@ class DiscordAutomation:
                             # (0.25s) catches the painted challenge iframe.
                             continue
                         # Hand the first genuinely-rendered widget to the
-                        # accessibility solver.
+                        # NoneCap solver.
                         rendered_widget = None
                         for wi in range(wcount):
                             w = widgets.nth(wi)
@@ -3184,16 +3101,15 @@ class DiscordAutomation:
                         if rendered_widget is None and checkbox_passes >= 2:
                             # Both click passes ran without confirmation and
                             # the readiness probe still fails — hand the
-                            # widget off anyway: the accessibility solver
-                            # locates the frame itself via frame_locator and
-                            # does not need the checkbox clicked.
+                            # widget off anyway: NoneCap only needs the
+                            # rendered sitekey + page URL, not the frame.
                             self._log(
-                                "[Captcha] Readiness probe failed after 2 click passes — handing widget to accessibility solver anyway",
+                                "[Captcha] Readiness probe failed after 2 click passes — handing widget to NoneCap solver anyway",
                                 level="warn")
                             rendered_widget = widgets.nth(0)
                         if rendered_widget is not None:
                             iframe = rendered_widget
-                            self._log("[Captcha] [READY] hCaptcha widget rendered — opening accessibility challenge")
+                            self._log("[Captcha] [READY] hCaptcha widget rendered — ready for NoneCap solve")
                             break
                 except Exception:
                     pass
@@ -3265,116 +3181,74 @@ class DiscordAutomation:
                     self._log(f"[Captcha] Captcha check error: {e}", level="warn")
                 return False
 
-            # Which challenge is showing?
-            mode = await self._detect_challenge_mode(iframe)
-            self._log(f"[Captcha] Challenge mode: {mode}")
-
-            # ── ACCESSIBILITY CHALLENGE — THE ONLY SOLVER ──
-            # Opens the 3-dots menu and uses the Accessibility Challenge,
-            # which gives a text/audio question that's solvable locally
-            # (math, word puzzles) with Ollama vision as fallback. Drag
-            # challenges included: no page refresh — if it can't be solved
-            # the attempt fails fast and the worker rotates proxy +
-            # fingerprint + mail domain.
-            self._log("[Captcha] Trying accessibility challenge (only solver)...")
-            acc_result = await solve_hcaptcha_accessibility(self._page, iframe, log=self._log)
-            if not acc_result:
-                # The widget may have still been initializing on the first
-                # attempt — wait and retry a couple times before rotating.
-                for retry_i in range(2):
-                    await asyncio.sleep(4)
+            # ── NONECAP API — the only solver ──
+            # Wait until the widget/challenge has genuinely painted, then
+            # read the EXACT live sitekey (plus enterprise rqdata) and pass
+            # it to NoneCap. Solve from the browser's own sticky proxy so
+            # the returned token matches the egress IP that submits it.
+            self._log("[Captcha] Trying NoneCap solve...")
+            for solve_attempt in range(3):
+                if solve_attempt:
+                    await asyncio.sleep(3)
                     self._log(
-                        f"[Captcha] Challenge not solved — retrying accessibility (retry {retry_i + 1}/2)...",
+                        f"[Captcha] Retrying NoneCap (attempt {solve_attempt + 1}/3)...",
                         level="warn")
-                    acc_result = await solve_hcaptcha_accessibility(self._page, iframe, log=self._log)
-                    if acc_result:
-                        break
-            if acc_result:
-                self._log("[Captcha] [OK] Accessibility challenge solved!")
-                # ── Detect ANY new hCaptcha that appears after a completed one ──
-                # hCaptcha chains captchas: right after one finishes, a brand-new
-                # challenge can pop up. The WIDGET iframe (newassets.hcaptcha.com)
-                # stays in the DOM forever, so we ONLY look for the challenge
-                # iframe (title="hCaptcha challenge" / hcaptcha-challenge.html)
-                # to avoid re-solving the idle widget.
-                solved_srcs = set()
+                if await self._past_captcha():
+                    self._log("[Captcha] Page already past captcha")
+                    return True
+                # Re-resolve the live iframe + confirm it is really rendered
+                # before reading the sitekey (never solve a half-mounted
+                # widget: the sitekey must be exact).
+                cur_iframe = iframe
                 try:
-                    solved_srcs.add(await iframe.get_attribute("src") or "")
+                    chall = self._page.locator(
+                        'iframe[title*="hCaptcha challenge"], '
+                        'iframe[src*="hcaptcha-challenge"]')
+                    if await chall.count() > 0:
+                        if await self._challenge_rendered(chall.first):
+                            cur_iframe = chall.first
                 except Exception:
                     pass
-                idle_checks = 0
-                for check_i in range(4):
-                    await asyncio.sleep(1.0)
-                    if await self._past_captcha():
-                        self._log("[Captcha] Page past captcha — clicking Create Account")
-                        await self._click_form_submit()
-                        return True
-                    new_challenge = None
-                    try:
-                        new_challenge = await self._page.query_selector(
-                            'iframe[title="hCaptcha challenge"], '
-                            'iframe[src*="hcaptcha-challenge"]'
-                        )
-                    except Exception:
-                        new_challenge = None
-                    if new_challenge:
-                        idle_checks = 0
-                        try:
-                            new_src = await new_challenge.get_attribute("src") or ""
-                        except Exception:
-                            new_src = ""
-                        if new_src in solved_srcs:
-                            # Same challenge element still closing — not new.
-                            self._log(f"[Captcha] Same challenge still present ({check_i+1}/6)")
-                            continue
-                        solved_srcs.add(new_src)
-                        self._log("[Captcha] NEW captcha detected — clicking 3-dots + accessibility again")
-                        acc_result = await solve_hcaptcha_accessibility(
-                            self._page, new_challenge, log=self._log
-                        )
-                        if not acc_result:
-                            self._log("[Captcha] Chain captcha failed", level="error")
-                            return False
-                        continue  # solved — keep checking for the next one
-                    idle_checks += 1
-                    if idle_checks >= 2:
-                        self._log("[Captcha] No new challenge — captcha fully done!")
-                        break
-                    self._log(f"[Captcha] No challenge yet ({check_i+1}/6)...")
-                # Captcha chain finished — proceed to Create Account
-                await self._click_form_submit()
-                await asyncio.sleep(1.5)
-                return True
-            else:
-                self._log("[Captcha] [FAIL] Accessibility challenge did not solve",
-                          level="error")
-                # Diagnostic: dump what the challenge frame actually showed
-                # so the exact failure is visible in ALL LOGS (loading
-                # screen? error state? real question?).
-                try:
-                    _dump = await self._page.evaluate("""() => {
-                        const out = [];
-                        for (const f of document.querySelectorAll(
-                            'iframe[title*="hCaptcha challenge"], iframe[src*="hcaptcha-challenge"]')) {
-                            const r = f.getBoundingClientRect();
-                            out.push({w: Math.round(r.width), h: Math.round(r.height),
-                                      src: (f.getAttribute('src') || '').slice(0, 70)});
-                        }
-                        return JSON.stringify(out);
-                    }""")
-                    self._log(f"[Captcha] Challenge frames at failure: {_dump}", level="warn")
-                except Exception:
-                    pass
-                try:
-                    frame = await self._hcaptcha_frame_for(iframe)
-                    if frame is not None:
-                        body = await frame.evaluate(
-                            "() => (document.body ? document.body.innerText : '')")
-                        self._log(f"[Captcha] Challenge frame text at failure: {str(body)[:220]!r}", level="warn")
-                except Exception as e:
-                    self._log(f"[Captcha] Challenge frame read failed: {e}", level="warn")
-                await asyncio.sleep(2)
-                return False
+                sitekey = await self._extract_sitekey_with_retry(timeout=12)
+                if not sitekey:
+                    self._log("[Captcha] No exact sitekey yet — cannot call NoneCap",
+                              level="warn")
+                    continue
+                rqdata = await extract_hcaptcha_rqdata(self._page)
+                proxy_url = proxy_url_from_bot_proxy(self.proxy)
+                if rqdata:
+                    self._log(f"[Captcha] Enterprise rqdata present ({len(rqdata)} chars)")
+                result = await self._solver.solve(
+                    sitekey=sitekey,
+                    pageurl=self._page.url or "https://discord.com/register",
+                    rqdata=rqdata,
+                    proxy=proxy_url or None,
+                )
+                if result:
+                    token = result["token"]
+                    solve_id = result["solve_id"]
+                    self._log(f"[Captcha] [OK] NoneCap returned a token ({len(token)} chars)")
+                    if not await set_hcaptcha_token_on_page(self._page, token):
+                        self._log("[Captcha] Could not inject NoneCap token into the page",
+                                  level="warn")
+                        await self._solver.report(solve_id, "unused")
+                        continue
+                    await self._click_form_submit()
+                    # Report only after the downstream verdict is clear:
+                    # past-captcha = accepted, otherwise rejected.
+                    for _ in range(6):
+                        await asyncio.sleep(1.0)
+                        if await self._past_captcha():
+                            await self._solver.report(solve_id, "accepted")
+                            self._log("[Captcha] [OK] NoneCap solve accepted — past captcha")
+                            return True
+                    await self._solver.report(solve_id, "rejected")
+                    self._log("[Captcha] Token rejected by Discord — retrying", level="warn")
+                    continue
+            self._log("[Captcha] [FAIL] NoneCap did not produce an accepted token",
+                      level="error")
+            await asyncio.sleep(2)
+            return False
 
         except Exception as e:
             self._log(f"[Captcha] Flow error: {e}", level="error")
@@ -3383,22 +3257,9 @@ class DiscordAutomation:
             return False
 
     async def _solve_funcaptcha(self) -> bool:
-        """Solve FunCAPTCHA tile challenges with the offline pixel solver."""
-        try:
-            task = await extract_funcaptcha_task(self._page)
-            if task:
-                self._log(f"[FunCAPTCHA] Challenge: {task[:80]}")
-            solved = await solve_funcaptcha_pixels(self._page, log=self._log)
-            if solved:
-                await self._click_form_submit()
-                return True
-            self._log("[FunCAPTCHA] [FAIL] Could not solve challenge", level="error")
-            return False
-        except Exception as e:
-            self._log(f"[FunCAPTCHA] Error: {e}", level="error")
-            import traceback
-            traceback.print_exc()
-            return False
+        """FunCAPTCHA is no longer solved in-browser (NoneCap = hCaptcha only)."""
+        self._log("[FunCAPTCHA] No FunCAPTCHA solver configured — rotating", level="error")
+        return False
 
     async def _form_ready(self) -> dict:
         """Evaluate _FORM_READY_JS with the locale-aware DOB label table."""
