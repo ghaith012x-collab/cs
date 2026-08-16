@@ -3120,7 +3120,11 @@ class DiscordAutomation:
                         'iframe[src*="hcaptcha.com"][src*="frame=checkbox"]'
                     )
                     wcount = await widgets.count()
-                    if wcount > 0:
+                    # Once the challenge iframe is on the page (even still
+                    # loading), never touch the widget checkbox again: a
+                    # coordinate click would land on the challenge modal
+                    # (its X / backdrop) and dismiss it.
+                    if wcount > 0 and (await self._challenge_iframe()) is None:
                         if widget_since is None:
                             widget_since = time.time()
                             self._log(f"[Captcha] hCaptcha widget present ({wcount} iframes) — waiting for it to initialize...")
@@ -4350,6 +4354,11 @@ class DiscordAutomation:
             # land, click again on the SAME page. The page is NEVER
             # reloaded while registering - only the caller rotates for a
             # dead IP / invalid email.
+            # A challenge iframe present BEFORE our first click is a preloaded
+            # (empty) shell that proves nothing. One that APPEARS after a click
+            # is Discord opening the challenge modal - stop clicking the moment
+            # that happens so no click lands on the modal's X / backdrop.
+            pre_challenge = (await self._challenge_iframe()) is not None
             for click_pass in range(1, 6):
                 if self._stopped.is_set():
                     self._nav_error = "stopped by user"
@@ -4364,14 +4373,19 @@ class DiscordAutomation:
                     self._log(f"[Form] Create Account retry {click_pass}/5 - clicking again in ~3s (no page refresh)...")
                     # Re-check the REQUIRED ToS checkbox on retry (React may
                     # have reset it) - real mouse click, never the optional
-                    # marketing box or a styled container div.
-                    try:
-                        target = await self._page.evaluate(_TOS_TARGET_JS)
-                        if target:
-                            await self._page.mouse.click(target["x"], target["y"])
-                            self._log("[Form] Re-checked ToS checkbox on retry")
-                    except Exception as e:
-                        self._log_exception("[Form] ToS re-check on retry failed", e)
+                    # marketing box or a styled container div. Skip the
+                    # coordinate click if the challenge modal is already up:
+                    # the click would land outside the hCaptcha box.
+                    if (await self._challenge_iframe()) is not None:
+                        self._log("[Form] hCaptcha challenge present - skipping ToS re-click (never click outside the box)")
+                    else:
+                        try:
+                            target = await self._page.evaluate(_TOS_TARGET_JS)
+                            if target:
+                                await self._page.mouse.click(target["x"], target["y"])
+                                self._log("[Form] Re-checked ToS checkbox on retry")
+                        except Exception as e:
+                            self._log_exception("[Form] ToS re-check on retry failed", e)
                     await asyncio.sleep(1.0)  # Let React process
 
                 clicked_this_pass = False
@@ -4566,6 +4580,15 @@ class DiscordAutomation:
                     self._log(f"[OK] Create Account submit verified after click {click_pass}/5 ({reason})")
                     await self.capture_screenshot()
                     return True
+                # The challenge iframe APPEARED after our click: the submit
+                # landed and Discord is now loading the hCaptcha challenge.
+                # Stop clicking right now - another coordinate click would hit
+                # the modal (its close X or the backdrop) and dismiss the
+                # challenge before it finishes loading.
+                if not pre_challenge and (await self._challenge_iframe()) is not None:
+                    self._log("[Form] hCaptcha challenge appeared - submit landed, letting it render (no further clicks)")
+                    await self.capture_screenshot()
+                    return True
                 if click_pass < 5:
                     self._log("[Form] Submit not landed yet - clicking again in ~3s (no page refresh)", level="warn")
 
@@ -4650,6 +4673,13 @@ class DiscordAutomation:
         Discord's own handler and surfaces any inline validation error.
         Returns True when a click was sent."""
         try:
+            # Never fire a coordinate click while Discord's challenge modal is
+            # up: the button is BEHIND the modal, so the click lands on the
+            # overlay (its close X or the backdrop) and dismisses the
+            # challenge. Fall through to the safe JS click strategies instead.
+            if (await self._challenge_iframe()) is not None:
+                self._log("[Form] hCaptcha challenge present - skipping physical Create Account click", level="debug")
+                return False
             pos = await self._page.evaluate("""() => {
                 __LOGIN_LINK_GUARD__
                 const _norm = (s) => (s || '').toLowerCase().replace(/\\s+/g, ' ').trim();
