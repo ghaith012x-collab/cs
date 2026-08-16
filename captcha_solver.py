@@ -5578,11 +5578,12 @@ async def solve_hcaptcha_accessibility(page, iframe,
             # so textContent works but children.length > 0 would wrongly skip them.
             try:
                 clicked = await _challenge_js("""() => {
-                    // ENGLISH IS FORCED (operator request): prefer the
-                    // English "Accessibility Challenge" label first. The
-                    // multi-locale regex remains only as a fallback for
-                    // sessions where Discord still serves a localized menu.
-                    const ACC = /accessibility challenge|accessibility|défi d.accessibilité|barrierefrei|défi|reto|sfida|desaf|toegankelijk|dostępn|přístupn|прыступ|доступн|utmaning|udfordring|haaste|a11y/i;
+                    // ENGLISH IS FORCED (operator request): the menu item
+                    // "Accessibility Challenge" must be clicked — NOT the
+                    // cookie modal's own "Accessibility" text, which is
+                    // visible behind the open menu and used to win the loose
+                    // /accessibility/ match. Exact item text first, loose
+                    // match only on short leaf-ish elements.
                     const META = /about|why|report|close|über|warum|melden|schließen|à propos|pourquoi|signaler|fermer|acerca|por qué|informar|cerrar|perché|segnala|chiudi|over|waarom|rapporteer|sluit|varför|stäng|hvorfor|luk|zamknij|o nas|zgłoś|закрыть|о нас|сообщить|hakkında|kapat|về|đóng|닫기|정보|閉じる|关闭|关于/i;
                     const all = document.querySelectorAll('*');
                     const candidates = [];
@@ -5593,10 +5594,33 @@ async def solve_hcaptcha_accessibility(page, iframe,
                         if (META.test(t)) continue;
                         candidates.push(el);
                     }
-                    // 1) Any candidate that looks like the accessibility item
+                    // 1) EXACT "Accessibility Challenge" — short leaf items
+                    // only (12-45 chars, <=2 children). The cookie modal's
+                    // header ("Accessibility") and paragraphs ("Accessibility
+                    // cookie is not set...") never match this.
                     for (const el of candidates) {
                         const t = (el.textContent || '').trim();
-                        if (ACC.test(t)) {
+                        if (t.length < 12 || t.length > 45) continue;
+                        if (el.children.length > 2) continue;
+                        if (/accessibility challenge/i.test(t)
+                                || /défi d.accessibilité/i.test(t)
+                                || /herausforderung zur barrierefreiheit/i.test(t)
+                                || /reto de accesibilidad/i.test(t)
+                                || /sfida di accessibilità/i.test(t)
+                                || /desafio de acessibilidade/i.test(t)) {
+                            el.scrollIntoView({block: 'center'});
+                            el.click();
+                            return t;
+                        }
+                    }
+                    // 1b) Loose accessibility match on short leaf items only
+                    // (the modal paragraphs/headers are longer or have many
+                    // children — they cannot win here).
+                    const ACC_LOOSE = /accessib|barrierefrei|défi|reto|sfida|desaf|toegankelijk|dostępn|přístupn|прыступ|доступн|utmaning|udfordring|haaste|a11y/i;
+                    for (const el of candidates) {
+                        const t = (el.textContent || '').trim();
+                        if (t.length > 40 || el.children.length > 2) continue;
+                        if (ACC_LOOSE.test(t)) {
                             el.scrollIntoView({block: 'center'});
                             el.click();
                             return t;
