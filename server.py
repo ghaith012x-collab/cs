@@ -940,6 +940,27 @@ _DOB_OPTION_DISPATCH_JS = r"""([optionText, monthAliases]) => {
 # focus (Discord's register page keeps focus on the first input, the email
 # box) — that is exactly how the username ended up concatenated inside the
 # email field while the username input stayed empty.
+
+
+def _human_typing_delay(ch: str) -> float:
+    """Per-character typing delay (seconds) that mimics a real typist.
+
+    Uppercase / symbols take longer (shift reach, then release), digits
+    a touch slower than lowercase, and everything has jitter. Averages
+    ~70ms per lowercase char — a fast human typist, not a machine gun
+    and not a hunt-and-pecker.
+    """
+    if ch.isupper() or not ch.isascii():
+        return random.uniform(0.09, 0.22)
+    if ch.isdigit():
+        return random.uniform(0.06, 0.16)
+    if ch in "!@#$%&*_-.+":
+        return random.uniform(0.10, 0.24)
+    if ch.islower():
+        return random.uniform(0.045, 0.13)
+    return random.uniform(0.05, 0.15)
+
+
 _REACT_SET_VALUE_JS = r"""([sel, value]) => {
     const el = document.querySelector(sel);
     if (!el) return false;
@@ -3840,17 +3861,75 @@ class DiscordAutomation:
         except Exception:
             return ""
 
-    async def _write_field_value(self, sel: str, val: str) -> bool:
+    async def _type_humanly(self, sel: str, val: str) -> bool:
+        """Type one field like a real person instead of pasting it.
+
+        Real click focuses the input (Camoufox humanizes the cursor path),
+        then character-by-character keyboard input with variable rhythm,
+        one mid-field "thinking" pause, and an occasional typo corrected
+        with backspace. Returns True only when the field holds `val` —
+        anything weird falls back to the instant fill()/JS write path.
+        """
+        try:
+            loc = self._page.locator(sel)
+            if (await loc.count()) == 0 or not (await loc.first.is_visible()):
+                return False
+            # A human looks at the field and reaches for it first.
+            await asyncio.sleep(random.uniform(0.15, 0.5))
+            await loc.first.click(timeout=8000)
+            await asyncio.sleep(random.uniform(0.1, 0.3))
+            # Clear any pre-existing value on the focused input.
+            try:
+                await self._page.keyboard.press("Control+a")
+                await self._page.keyboard.press("Backspace")
+            except Exception:
+                pass
+            await asyncio.sleep(random.uniform(0.08, 0.2))
+
+            did_mid_pause = False
+            for i, ch in enumerate(val):
+                # One mid-field "thinking" pause per field (humans pause).
+                if (not did_mid_pause and len(val) >= 8
+                        and 0.15 < (i / len(val)) < 0.75
+                        and random.random() < 0.25):
+                    await asyncio.sleep(random.uniform(0.25, 0.75))
+                    did_mid_pause = True
+                # Occasional typo + backspace correction on longer fields.
+                if (len(val) >= 6 and ch.isalnum()
+                        and random.random() < 0.05):
+                    wrong = random.choice(
+                        "abcdefghijklmnopqrstuvwxyz0123456789")
+                    await self._page.keyboard.type(wrong)
+                    await asyncio.sleep(random.uniform(0.1, 0.3))
+                    await self._page.keyboard.press("Backspace")
+                    await asyncio.sleep(random.uniform(0.1, 0.3))
+                await self._page.keyboard.type(ch)
+                delay = _human_typing_delay(ch)
+                if random.random() < 0.16:
+                    delay += random.uniform(0.12, 0.45)
+                await asyncio.sleep(delay)
+            await asyncio.sleep(random.uniform(0.2, 0.6))
+            try:
+                return (await self._page.locator(sel).first.input_value()) == val
+            except Exception:
+                return False
+        except Exception:
+            return False
+
+    async def _write_field_value(self, sel: str, val: str,
+                                 human: bool = False) -> bool:
         """Element-targeted write of ONE field, verified. True when the field
         holds `val` afterwards.
 
-        Writes are 1) Playwright fill() — trusted input events React accepts,
-        then 2) the native-setter JS write (_REACT_SET_VALUE_JS) which
-        REPLACES the whole value and never depends on focus or the global
-        keyboard. The old click + Control+A + press_sequentially fallback is
-        GONE: it typed into whatever field held focus (Discord's register
-        page keeps focus on the first input, the email box), which is exactly
-        how the username ended up concatenated inside the email field.
+        Writes are 0) HUMANIZED typing (real keystrokes, human cadence —
+        used on the first attempt of the primary fill), then 1) Playwright
+        fill() — trusted input events React accepts, then 2) the native-
+        setter JS write (_REACT_SET_VALUE_JS) which REPLACES the whole value
+        and never depends on focus or the global keyboard. The old click +
+        Control+A + press_sequentially fallback is GONE: it typed into
+        whatever field held focus (Discord's register page keeps focus on
+        the first input, the email box), which is exactly how the username
+        ended up concatenated inside the email field.
         """
         if not val:
             return False
@@ -3861,6 +3940,13 @@ class DiscordAutomation:
                 "() => { const a = document.activeElement; if (a && a.blur) a.blur(); }")
         except Exception:
             pass
+        # 0) Humanized typing — only when asked (primary fill attempt).
+        if human:
+            try:
+                if await self._type_humanly(sel, val):
+                    return True
+            except Exception:
+                pass
         # 1) Playwright fill() — replaces the whole value, React-compatible.
         try:
             loc = self._page.locator(sel)
@@ -3922,7 +4008,7 @@ class DiscordAutomation:
             if not val:
                 continue
             for attempt in range(1, 4):
-                if await self._write_field_value(sel, val):
+                if await self._write_field_value(sel, val, human=(attempt == 1)):
                     self._log(f"[Form] Field '{fname}' verified: len={len(val)}")
                     break
                 cur = await self._read_field_value(sel)

@@ -102,9 +102,13 @@ async def _launch_browser(headless: bool = True, proxy: Optional[dict] = None):
             "Camoufox is not installed — run: pip install camoufox && "
             "python -m camoufox fetch"
         )
+    # humanize is the MAX cursor-travel duration (s). A fixed value makes
+    # every session move at the same speed — a giveaway. Randomize per
+    # launch (Camoufox default cap is ~1.5s; humans vary a lot more).
+    _humanize_max = round(random.uniform(0.8, 1.8), 2)
     opts = {
         "headless": bool(headless),
-        "humanize": True,
+        "humanize": _humanize_max,
         "firefox_user_prefs": {"layout.frame_rate": random.choice(_FRAME_RATES)},
     }
     if proxy:
