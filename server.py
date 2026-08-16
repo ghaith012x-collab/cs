@@ -96,6 +96,7 @@ _TOS_TARGET_JS = r"""() => {
         if (isRealBox(el)) els.push(el);
     }
     const candidates = [];
+    const allUnchecked = [];
     for (const cb of els) {
         if (cb.checked || cb.getAttribute('aria-checked') === 'true'
             || cb.getAttribute('data-state') === 'checked') continue;
@@ -111,12 +112,23 @@ _TOS_TARGET_JS = r"""() => {
             }
         }
         if (!target || target.offsetParent === null) continue;
-        // Label text: closest <label>, else the nearest ancestor row.
+        // Label text: closest <label>, else the DIRECT row (the box's own
+        // row — an ancestor shared with the marketing box would mislabel
+        // the ToS box), else the nearest labeled ancestor.
         let label = '';
         try {
             const lab = cb.closest('label');
             if (lab) label = lab.innerText || '';
         } catch (e) {}
+        if (!label) {
+            try {
+                const row = cb.parentElement;
+                if (row && row !== document.body) {
+                    const rt = norm(row.innerText || '');
+                    if (rt.length > 4 && rt.length <= 200) label = rt;
+                }
+            } catch (e) {}
+        }
         if (!label) {
             try {
                 let anc = cb.parentElement;
@@ -128,23 +140,68 @@ _TOS_TARGET_JS = r"""() => {
             } catch (e) {}
         }
         const lowL = low(label);
-        // Skip the optional marketing / email-updates box in ANY locale
-        // (Dutch 'e-mails ontvangen'/'aanbiedingen', Swedish 'mejl'/
-        // 'tips', ...). Only the ToS agreement enables the button.
-        if (/mejl|e-post|mail|email|marketing|updat|news|newsletter|promotion|exclusive|offers|subscribe|reklam|tips|erbjudande|aanbieding|optioneel/.test(lowL)) continue;
         const r2 = target.getBoundingClientRect();
-        candidates.push({
+        const entry = {
             x: r2.left + r2.width / 2,
             y: r2.top + r2.height / 2,
-            tos: /terms|service|agreement|conditions|villkor|voorwaarden|condiciones|akzeptiere|accedo|aceito|godk|aksoord|conform|akkoord|gelezen|nous avons lu|acepto los t|принимаю|已阅读|同意/.test(lowL)
-        });
+            tos: /terms|service|agreement|conditions|villkor|voorwaarden|condiciones|akzeptiere|accedo|aceito|godk|aksoord|conform|akkoord|gelezen|nous avons lu|acepto los t|принимаю|已阅读|同意/.test(lowL),
+            label: lowL,
+            el: target
+        };
+        allUnchecked.push(entry);
+        // Skip the optional marketing / email-updates box in ANY locale
+        // (Dutch 'e-mails ontvangen'/'aanbiedingen', Swedish 'mejl'/'tips',
+        // ...). Only the ToS agreement enables the button.
+        if (/mejl|e-post|mail|email|marketing|updat|news|newsletter|promotion|exclusive|offers|subscribe|reklam|tips|erbjudande|aanbieding|optioneel/.test(lowL)) continue;
+        candidates.push(entry);
+    }
+    // If every visible box looked like marketing (label detection failed),
+    // fall back to the last unchecked box that does NOT look like marketing,
+    // else the very last unchecked one — by layout the ToS box sits below
+    // the marketing box.
+    if (!candidates.length && allUnchecked.length) {
+        const nonMkt = allUnchecked.filter(c => !/mejl|e-post|mail|email|marketing|updat|news|newsletter|promotion|exclusive|offers|subscribe|reklam|tips|erbjudande|aanbieding|optioneel/.test(c.label));
+        const pick = nonMkt.length ? nonMkt[nonMkt.length - 1] : allUnchecked[allUnchecked.length - 1];
+        candidates.push(pick);
     }
     if (!candidates.length) return null;
-    // Prefer the box whose label signals ToS; otherwise the LAST unchecked
-    // visible box (the ToS box sits below the optional marketing box).
-    candidates.sort((a, b) => (b.tos ? 1 : 0) - (a.tos ? 1 : 0));
-    return candidates[0];
+    // Prefer the box whose label signals ToS; among the rest prefer the LAST
+    // unchecked visible box (the ToS box sits below the optional marketing
+    // box).
+    const tosOnes = candidates.filter(c => c.tos);
+    const rest = candidates.filter(c => !c.tos);
+    const ordered = tosOnes.concat(rest.reverse());
+    const best = ordered[0];
+    try { best.el.setAttribute('data-tos-target', '1'); } catch (e) {}
+    return { x: best.x, y: best.y, tos: best.tos ? 1 : 0, tag: (best.el && best.el.tagName || '').toLowerCase() };
 }"""
+
+# JS-dispatch fallback for the ToS box: dispatches pointer/mouse events ON
+# the box element itself, so it works even when a transparent overlay or a
+# moving page swallowed the trusted click. Native inputs are additionally
+# force-checked (prototype setter + input/change events).
+_TOS_CLICK_JS = r"""() => {
+    const el = document.querySelector('[data-tos-target]');
+    if (!el) return null;
+    try { el.scrollIntoView({ block: 'center' }); } catch (e) {}
+    for (const type of ['pointerdown', 'pointerup', 'mousedown', 'mouseup', 'click']) {
+        el.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window }));
+    }
+    if (el.tagName === 'INPUT') {
+        try {
+            const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'checked').set;
+            setter.call(el, true);
+            el.dispatchEvent(new Event('input', { bubbles: true }));
+            el.dispatchEvent(new Event('change', { bubbles: true }));
+            return 'input_forced';
+        } catch (e) {
+            return 'dispatched';
+        }
+    }
+    return 'dispatched';
+}"""
+
+
 
 
 # ── Discord rate-limit phrases — rotate the proxy the moment these show ──
@@ -755,6 +812,46 @@ _DOB_OPTION_POS_JS = r"""([optionText, monthAliases]) => {
         const v = el.getAttribute('data-value') || el.getAttribute('value') || t;
         if (matches(t, v)) {
             return { x: r.left + r.width / 2, y: r.top + r.height / 2, text: t.slice(0, 30) };
+        }
+    }
+    return null;
+}"""
+
+# JS-dispatch fallback for option selection: same matcher as
+# _DOB_OPTION_POS_JS but dispatches pointer/mouse events ON the option
+# element itself, so it works even when the menu is covered by a transparent
+# overlay (the events go to the target node, not the overlay).
+_DOB_OPTION_DISPATCH_JS = r"""([optionText, monthAliases]) => {
+    const norm = (s) => (s == null ? '' : String(s)).replace(/\s+/g, ' ').trim();
+    const low = (s) => norm(s).toLowerCase();
+    const MONTHS = ['january','february','march','april','may','june','july',
+        'august','september','october','november','december'];
+    const wantStr = low(optionText);
+    const wantNum = (MONTHS.indexOf(wantStr) + 1) || monthAliases[wantStr] || (parseInt(optionText, 10) || 0);
+    const matches = (t, v) => {
+        const a = low(t || ''); const b = low(v || '');
+        if (!a && !b) return false;
+        if (a === wantStr) return true;
+        if (wantNum && (monthAliases[a] === wantNum || MONTHS.indexOf(a) + 1 === wantNum)) return true;
+        if (!wantNum) return false;
+        const n = String(wantNum);
+        const p = n.length === 1 ? '0' + n : n;
+        return a === n || b === n || a === p || b === p;
+    };
+    const all = document.querySelectorAll('[role="option"], [role="menuitem"], li, div, span');
+    for (const el of all) {
+        if (!el.offsetParent) continue;
+        try { el.scrollIntoView({ block: 'nearest' }); } catch (e) {}
+        const r = el.getBoundingClientRect();
+        if (r.width < 5 || r.height < 5) continue;
+        const t = norm(el.textContent || el.getAttribute('aria-label') || '');
+        if (!t) continue;
+        const v = el.getAttribute('data-value') || el.getAttribute('value') || t;
+        if (matches(t, v)) {
+            for (const type of ['pointerdown', 'pointerup', 'mousedown', 'mouseup', 'click']) {
+                el.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window }));
+            }
+            return t.slice(0, 30);
         }
     }
     return null;
@@ -2801,7 +2898,7 @@ class DiscordAutomation:
                 }
                 return '';
             }""".replace('__LOGIN_LINK_GUARD__', _LOGIN_LINK_GUARD)
-                .replace('__SUBMIT_TEXT_RE__', _SUBMIT_TEXT_RE))
+                .replace('__SUBMIT_TEXT_RE__', json.dumps(_SUBMIT_TEXT_RE)))
             if result:
                 self._log(f"[Captcha] [OK] Submit clicked: {result}")
                 return True
@@ -3241,8 +3338,20 @@ class DiscordAutomation:
                     self._log(f"[DOB] native select failed for {label}: {e}", level="warn")
                 return await self._dob_js_fallback(label, option_text)
 
-            # ── Custom dropdown: trusted click to open, then click option ──
-            for attempt in range(1, 3):
+            # ── Custom dropdown: open the menu, then pick the option ──
+            # Discord re-renders the form while credentials are being written
+            # (React controlled inputs) and Camoufox's humanized cursor moves
+            # slowly, so a single Playwright click can hang on 'performing
+            # click action' for the full 30s default even though the element
+            # resolved visible+stable — the exact stall from the field logs.
+            # Rule: SHORT click timeouts + verify the menu actually opened +
+            # layered fallbacks (trusted click -> coordinate click -> JS
+            # dispatch -> keyboard) so no single step can ever eat 30s.
+            deadline = time.monotonic() + 25.0
+            opened = False
+            for open_method in ("click", "coords", "dispatch", "keyboard"):
+                if opened or time.monotonic() > deadline:
+                    break
                 # Re-locate every attempt: React may have replaced the
                 # control after the previous attempt.
                 try:
@@ -3254,66 +3363,148 @@ class DiscordAutomation:
                     self._log(f"[DOB] control for {label} vanished — JS fallback", level="warn")
                     return await self._dob_js_fallback(label, option_text)
                 ctrl = self._page.locator(f'[data-dob-target="{label}"]')
+                # Close any stray menu so it can't swallow the events below.
                 try:
-                    await ctrl.scroll_into_view_if_needed()
-                    await ctrl.click()
-                except Exception as e:
-                    self._log(f"[DOB] open click for {label} (attempt {attempt}) failed: {e}", level="warn")
-                    await asyncio.sleep(0.5)
-                    continue
-                # Options render async after the menu opens — poll for the
-                # matching option (index click first, coordinates fallback).
-                picked = False
+                    await self._page.keyboard.press("Escape")
+                except Exception:
+                    pass
+                await asyncio.sleep(0.15)
+                if open_method == "click":
+                    try:
+                        await ctrl.scroll_into_view_if_needed(timeout=3000)
+                        await ctrl.click(timeout=4500)
+                    except Exception as e:
+                        self._log(f"[DOB] open click {label}: {str(e)[:150]}", level="warn")
+                elif open_method == "coords":
+                    # Bypass actionability entirely — trusted input at the
+                    # control's center; lands even under a transparent
+                    # overlay or while React re-renders the form.
+                    try:
+                        box = await ctrl.bounding_box()
+                        if not box or not box.get("width"):
+                            continue
+                        await self._page.mouse.click(
+                            box["x"] + box["width"] / 2,
+                            box["y"] + box["height"] / 2)
+                    except Exception as e:
+                        self._log(f"[DOB] open coords {label}: {str(e)[:120]}", level="warn")
+                        continue
+                elif open_method == "dispatch":
+                    try:
+                        await ctrl.dispatch_event("pointerdown")
+                        await ctrl.dispatch_event("pointerup")
+                        await ctrl.dispatch_event("mousedown")
+                        await ctrl.dispatch_event("mouseup")
+                        await ctrl.dispatch_event("click")
+                    except Exception as e:
+                        self._log(f"[DOB] open dispatch {label}: {str(e)[:120]}", level="warn")
+                        continue
+                elif open_method == "keyboard":
+                    # Discord's combobox opens on ArrowDown when focused —
+                    # works even when mouse hit-testing is broken.
+                    try:
+                        await ctrl.focus()
+                        await self._page.keyboard.press("ArrowDown")
+                    except Exception as e:
+                        self._log(f"[DOB] open keyboard {label}: {str(e)[:120]}", level="warn")
+                        continue
+                # Did the menu actually open? Poll for any visible option /
+                # menu element — a timed-out click may still have opened it.
                 for _poll in range(8):
-                    await asyncio.sleep(0.3)
-                    idx = -1
+                    await asyncio.sleep(0.25)
+                    try:
+                        opened = bool(await self._page.evaluate(
+                            "() => Array.from(document.querySelectorAll("
+                            "'[role=\"option\"], [role=\"menuitem\"], "
+                            "[id*=\"option\" i], [class*=\"option\" i], "
+                            "[class*=\"menu\" i]'))"
+                            ".some(e => e.offsetParent !== null)"))
+                    except Exception:
+                        opened = False
+                    if opened:
+                        break
+            if not opened:
+                self._log(f"[DOB] menu for {label} never opened — JS fallback", level="warn")
+                return await self._dob_js_fallback(label, option_text)
+
+            # ── Pick the option ──
+            picked = False
+            for sel_method in ("index", "coords", "dispatch", "keyboard"):
+                if picked or time.monotonic() > deadline:
+                    break
+                idx = -1
+                pos = None
+                if sel_method in ("index", "keyboard"):
                     try:
                         idx = await self._page.evaluate(
                             _DOB_OPTION_INDEX_JS.replace("__OPT_SEL__", json.dumps(_DOB_OPTION_SEL)),
                             [option_text, _MONTH_ALIASES])
                     except Exception:
                         idx = -1
+                if sel_method in ("coords", "dispatch"):
+                    try:
+                        pos = await self._page.evaluate(
+                            _DOB_OPTION_POS_JS, [option_text, _MONTH_ALIASES])
+                    except Exception:
+                        pos = None
+                if sel_method == "index":
                     if isinstance(idx, int) and idx >= 0:
                         try:
                             # index is over VISIBLE options only (see
                             # _DOB_OPTION_INDEX_JS), so filter hidden
                             # matches before nth() or we'd click the
                             # wrong element.
-                            await self._page.locator(_DOB_OPTION_SEL).filter(visible=True).nth(idx).click()
+                            await self._page.locator(_DOB_OPTION_SEL).filter(visible=True).nth(idx).click(timeout=4500)
                             picked = True
-                            break
                         except Exception as e:
-                            self._log(f"[DOB] option click for {label} failed: {e}", level="warn")
-                    try:
-                        pos = await self._page.evaluate(
-                            _DOB_OPTION_POS_JS, [option_text, _MONTH_ALIASES])
-                    except Exception:
-                        pos = None
+                            self._log(f"[DOB] option index click {label}: {str(e)[:140]}", level="warn")
+                elif sel_method == "coords":
                     if pos and pos.get("x"):
-                        await self._page.mouse.click(float(pos["x"]), float(pos["y"]))
-                        self._log(f"[DOB] option for {label} clicked by coords ({pos.get('text')})")
-                        picked = True
-                        break
-                if not picked:
-                    # Close the menu before retrying (Escape), then reopen.
+                        try:
+                            await self._page.mouse.click(float(pos["x"]), float(pos["y"]))
+                            picked = True
+                            self._log(f"[DOB] option for {label} by coords ({pos.get('text')})")
+                        except Exception as e:
+                            self._log(f"[DOB] option coords click {label}: {str(e)[:120]}", level="warn")
+                elif sel_method == "dispatch":
                     try:
-                        await self._page.keyboard.press("Escape")
-                    except Exception:
-                        pass
-                    await asyncio.sleep(0.3)
+                        r = await self._page.evaluate(_DOB_OPTION_DISPATCH_JS, [option_text, _MONTH_ALIASES])
+                        if r:
+                            picked = True
+                            self._log(f"[DOB] option for {label} via JS dispatch ({r})")
+                    except Exception as e:
+                        self._log(f"[DOB] option dispatch {label}: {str(e)[:120]}", level="warn")
+                elif sel_method == "keyboard":
+                    if isinstance(idx, int) and idx >= 0 and idx <= 300:
+                        try:
+                            # The combobox still holds focus from the open;
+                            # Home normalizes the highlight to the first
+                            # visible option, then idx ArrowDowns land on
+                            # the wanted one and Enter selects it.
+                            await ctrl.focus()
+                            await self._page.keyboard.press("Home")
+                            for _k in range(max(idx, 0)):
+                                await self._page.keyboard.press("ArrowDown")
+                            await self._page.keyboard.press("Enter")
+                            picked = True
+                        except Exception as e:
+                            self._log(f"[DOB] option keyboard {label}: {str(e)[:120]}", level="warn")
+                if not picked:
                     continue
                 await asyncio.sleep(0.4)
                 if await self._dob_verify(label, option_text):
                     self._log(f"Selected {label}: {option_text} (trusted click)")
                     return True
-                # Selection didn't stick — close menu, reopen and retry.
+                # Selection didn't stick — close the menu and try the next
+                # method.
+                picked = False
                 try:
                     await self._page.keyboard.press("Escape")
                 except Exception:
                     pass
-                await asyncio.sleep(0.4)
+                await asyncio.sleep(0.3)
 
-            self._log(f"[DOB] trusted-click path failed for {label} — JS fallback", level="warn")
+            self._log(f"[DOB] selection methods failed for {label} — JS fallback", level="warn")
             return await self._dob_js_fallback(label, option_text)
 
         except Exception as e:
@@ -3966,7 +4157,7 @@ class DiscordAutomation:
 
                         return 'failed';
                     }""".replace('__LOGIN_LINK_GUARD__', _LOGIN_LINK_GUARD)
-                        .replace('__SUBMIT_TEXT_RE__', _SUBMIT_TEXT_RE))
+                        .replace('__SUBMIT_TEXT_RE__', json.dumps(_SUBMIT_TEXT_RE)))
                     if result and result != 'failed':
                         create_clicked = True
                         self._log(f"[OK] Account button clicked: {result}")
@@ -4086,50 +4277,19 @@ class DiscordAutomation:
             self._log_exception("Form filling error", e)
             return False
 
-    async def _click_tos_checkboxes(self) -> int:
-        """Real-mouse-click Discord's REQUIRED ToS checkbox and VERIFY React
-        registered it (the check must survive a re-render).
-
-        The JS fill forges cb.checked + aria attributes — React ignores
-        forged events and Discord's DOB re-render wipes them, leaving
-        "Continue" disabled (which is how a run ends up clicking "Already
-        have an account?"). Real Playwright mouse clicks at the checkbox's
-        center generate trusted input React actually processes.
-
-        Only the Terms-of-Service box is clicked: real controls only
-        (native input / role=checkbox / data-state), never styled container
-        divs that also match [class*="checkbox"], and never the optional
-        marketing/"email updates" box. Fast — one real click, ~80ms between
-        retries. Verifies with the definitive signal: boxes checked, OR
-        the Continue button enabled (a genuinely checked ToS is what
-        enables it).
-        """
-        clicked = 0
-        # Fast: only the required ToS box, real clicks, ~80ms between
-        # retries. Re-query each pass — an already-checked box is skipped,
-        # so a registered click is never toggled back off.
-        for _attempt in range(3):
-            try:
-                target = await self._page.evaluate(_TOS_TARGET_JS)
-            except Exception:
-                target = None
-            if not target:
-                break
-            try:
-                await self._page.mouse.click(target["x"], target["y"])
-                clicked += 1
-                await asyncio.sleep(0.08)
-            except Exception:
-                break
-        verified = 0
+    async def _tos_checked_count(self) -> int:
+        """How many real checkbox controls are currently checked."""
         try:
-            verified = int(await self._page.evaluate("""() => document.querySelectorAll(
+            return int(await self._page.evaluate("""() => document.querySelectorAll(
                 'input[type="checkbox"]:checked, [role="checkbox"][aria-checked="true"], [role="checkbox"][data-state="checked"]').length""") or 0)
         except Exception:
-            pass
-        continue_enabled = False
+            return 0
+
+    async def _tos_continue_enabled(self) -> bool:
+        """True when the submit button is enabled — a genuinely checked ToS
+        is what enables it (also true on builds with no checkbox at all)."""
         try:
-            continue_enabled = bool(await self._page.evaluate("""() => {
+            return bool(await self._page.evaluate("""() => {
                 for (const b of document.querySelectorAll('button')) {
                     const t = (b.textContent || '').toLowerCase().replace(/\s+/g, ' ').trim();
                     if (!RegExp(__SUBMIT_TEXT_RE__).test(t)) continue;
@@ -4137,9 +4297,55 @@ class DiscordAutomation:
                     return true;
                 }
                 return false;
-            }""".replace('__SUBMIT_TEXT_RE__', _SUBMIT_TEXT_RE)))
+            }""".replace('__SUBMIT_TEXT_RE__', json.dumps(_SUBMIT_TEXT_RE))))
         except Exception:
-            pass
+            return False
+
+    async def _click_tos_checkboxes(self) -> int:
+        """Click Discord's REQUIRED ToS checkbox and VERIFY React registered
+        it (the check must survive a re-render).
+
+        Every pass: locate the ToS box, click its center with a trusted mouse
+        click, then VERIFY (a real checkbox became checked, or the submit
+        button enabled) before doing anything else. If the click didn't
+        register, the click is dispatched on the element itself via JS
+        (bypasses any overlay that swallowed the mouse events) and native
+        inputs are force-checked. Only the Terms-of-Service box is clicked —
+        never the optional marketing/email-updates box (any locale) and never
+        styled container divs that also match [class*="checkbox"].
+        """
+        clicked = 0
+        for _attempt in range(4):
+            if self._stopped.is_set():
+                break
+            if await self._tos_checked_count() > 0 or await self._tos_continue_enabled():
+                break
+            try:
+                target = await self._page.evaluate(_TOS_TARGET_JS)
+            except Exception:
+                target = None
+            if not target:
+                break
+            # 1) trusted mouse click at the box's center
+            try:
+                await self._page.mouse.click(target["x"], target["y"])
+                clicked += 1
+            except Exception:
+                pass
+            await asyncio.sleep(0.25)
+            if await self._tos_checked_count() > 0 or await self._tos_continue_enabled():
+                break
+            # 2) JS dispatch on the element itself (a transparent overlay or
+            #    a moving page can swallow the trusted click)
+            try:
+                r = await self._page.evaluate(_TOS_CLICK_JS)
+                if r:
+                    self._log(f"[Form] ToS JS-dispatch fallback: {r}")
+            except Exception:
+                pass
+            await asyncio.sleep(0.25)
+        verified = await self._tos_checked_count()
+        continue_enabled = await self._tos_continue_enabled()
         self._log(f"[Form] ToS checkboxes: clicked {clicked}, verified {verified}, continue_enabled={continue_enabled}")
         if verified > 0 or continue_enabled:
             return max(verified, 1)
