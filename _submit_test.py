@@ -12,10 +12,14 @@ import asyncio
 from browser_engine import async_playwright
 from server import DiscordAutomation
 
+# Static pre-rendered challenge iframe (OUTSIDE the form, like Discord);
+# the click only removes the form. Inline iframe creation in the click
+# handler crashes the patched engine (EPIPE), so keep it static.
 OK_HTML = """<html><body>
+<iframe title='hCaptcha challenge' srcdoc='<html><body><div id=&quot;hcaptcha-body&quot; style=&quot;height:120px&quot;>Halt! Bist du ein Mensch?</div></body></html>'></iframe>
 <form id='f'>
   <input name='email' type='email' value='ok@example.com'>
-  <button type='button' onclick="var f=document.getElementById('f');if(f)f.remove();var i=document.createElement('iframe');i.title='hCaptcha challenge';i.srcdoc='<html><body><div id=&quot;hcaptcha-body&quot; style=&quot;height:120px&quot;>Halt! Bist du ein Mensch?</div></body></html>';document.body.appendChild(i)">Create Account</button>
+  <button type='button' onclick="var f=document.getElementById('f');if(f)f.remove()">Create Account</button>
 </form></body></html>"""
 
 BLOCKED_HTML = """<html><body>

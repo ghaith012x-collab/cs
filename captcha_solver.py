@@ -8244,6 +8244,94 @@ async def solve_hcaptcha_accessibility(page, iframe,
         return False
 
 
+    async def _accessibility_cookie_screen(hcaptcha) -> bool:
+        """The accessibility challenge opens a COOKIE-SETUP screen before
+        any question (French: "Le cookie d'accessibilité n'est pas défini.
+        Récupérer le cookie d'accessibilité."). The bot used to read that
+        screen as a question and answer it forever ("Q1 solved: 2" loops).
+
+        Detect the setup screen in any locale and click the recovery
+        link/button ("Récupérer le cookie d'accessibilité" / "Get the
+        accessibility cookie" / German/French/Spanish/Italian variants),
+        then wait for the real challenge to appear. Returns True once the
+        screen is cleared (or was never present)."""
+        try:
+            body_txt = await hcaptcha.locator("body").inner_text(timeout=4000)
+        except Exception:
+            body_txt = ""
+        low = (body_txt or "").lower()
+        # The setup screen always mentions the cookie / accessibility
+        # cookie, and the recovery link is a link/button with text.
+        if not re.search(r'accessibilit|cookie|barrierefreiheit|accesibilidad|accessibilità|toegankelijk|cookie', low):
+            return True  # not the setup screen — nothing to do
+        if not re.search(r'(?:récupér|récuper|recuper|get the|obtain|set|enable|aktivier|holen|abruf|activar|attiva|recupera)', low):
+            return True  # text mentions cookie but no recovery action — not the setup screen
+
+        log("[Accessibility] Accessibility COOKIE-SETUP screen detected — clicking the recovery link", level="warn")
+
+        # Click the recovery link/button via JS (any element whose text
+        # matches the localized recovery phrasing).
+        recovery_js = r"""() => {
+            const RE = /récupérer le cookie|récupérer|récuperer|get the accessibility cookie|set the accessibility cookie|obtain the accessibility cookie|enable the accessibility cookie|cookie d'accessibilité|aktiviere den barrierefreiheits-cookie|barrierefreiheits-cookie holen|recuperar la cookie|activar la cookie|recupera il cookie|attiva il cookie/i;
+            const els = document.querySelectorAll('a, button, [role="button"], [role="link"], span, div');
+            let best = null, bestLen = 0;
+            for (const el of els) {
+                if (el.offsetParent === null) continue;
+                const t = ((el.textContent || '') + ' ' + (el.getAttribute('aria-label') || '')).trim();
+                if (!t || t.length > 120 || t.length < 6) continue;
+                if (!RE.test(t)) continue;
+                if (t.length > bestLen) { best = el; bestLen = t.length; }
+            }
+            if (best) {
+                best.scrollIntoView({ block: 'center' });
+                best.click();
+                return 'clicked:' + best.textContent.trim().slice(0, 50);
+            }
+            return null;
+        }"""
+        try:
+            r = await _challenge_js(recovery_js)
+            if r:
+                log(f"[Accessibility] Cookie recovery clicked: {r}")
+            else:
+                log("[Accessibility] Cookie recovery element not found — trying 'Skip' fallback", level="warn")
+                try:
+                    skip_js = r"""() => {
+                        const btns = document.querySelectorAll('button, [role="button"], a');
+                        for (const b of btns) {
+                            const txt = ((b.textContent || '') + ' ' + (b.getAttribute('aria-label') || '')).toLowerCase().trim();
+                            if (/(passer|sauter|skip|überspringen|omitir|saltar|salta|salir|ignora|hoppe over)/.test(txt) && b.offsetParent !== null) {
+                                b.click();
+                                return 'clicked_skip';
+                            }
+                        }
+                        return null;
+                    }"""
+                    r2 = await _challenge_js(skip_js)
+                    if r2:
+                        log(f"[Accessibility] Skipped the setup screen ({r2})")
+                except Exception:
+                    pass
+        except Exception as e:
+            log(f"[Accessibility] Cookie recovery click error: {e}", level="warn")
+            return False
+
+        # Wait for the real challenge input / question to appear.
+        for _wi in range(12):
+            try:
+                _b = await hcaptcha.locator("body").inner_text(timeout=2000)
+                _lb = (_b or "").lower()
+                # The setup screen is gone once the recovery/cookie wording
+                # disappears AND a challenge input or question is present.
+                if ("cookie" not in _lb and "récupér" not in _lb) or re.search(r'accessibilité|accessibility', _lb):
+                    break
+            except Exception:
+                pass
+            await asyncio.sleep(0.5)
+        await asyncio.sleep(0.5)
+        return True
+
+
     # ── Main flow ─────────────────────────────────────────
 
     try:
@@ -8323,6 +8411,12 @@ async def solve_hcaptcha_accessibility(page, iframe,
                 await asyncio.sleep(0.8)
                 continue
 
+            # The accessibility challenge may open a COOKIE-SETUP screen
+            # (French "Le cookie d'accessibilité n'est pas défini...") that
+            # must be cleared before any real question appears. Answering it
+            # as a question produces the "Q1 solved: 2" loop.
+            await _accessibility_cookie_screen(hcaptcha)
+
             # ── Captcha-chain loop: keep solving until iframe disappears ──
             # hCaptcha can throw multiple challenges in a row after each
             # set of accessibility questions. Solve them all.
@@ -8341,6 +8435,7 @@ async def solve_hcaptcha_accessibility(page, iframe,
                             level="warn")
                         break
                     await asyncio.sleep(0.8)
+                    await _accessibility_cookie_screen(hcaptcha)
 
                 # ── Answer every question in this chain ──
                 # Track recent Q texts & answers to detect infinite loops
