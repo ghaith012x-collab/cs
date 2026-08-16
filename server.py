@@ -2475,24 +2475,67 @@ class DiscordAutomation:
 
         A challenge iframe is laid out at full size (>= 80px tall) the moment
         it is inserted, BEFORE its JS renders anything - so bounding-box checks
-        alone report 'rendered' for a blank box. Require the frame document to
-        be complete and to contain real challenge content before claiming ready.
+        alone report 'rendered' for a blank box. Require real challenge content
+        (painted image tiles, prompt/header text, or an answer/verify control)
+        before claiming ready - a loader shell has none of these markers.
         """
         return await self._frame_js_ready(iframe, """() => {
-            if (document.readyState !== 'complete') return false;
-            // The image challenge paints a grid of selectable tiles; require
-            // several visible images so a checkbox/loader shell is never
-            // mistaken for a rendered challenge.
-            const imgs = Array.from(document.querySelectorAll('img'));
+            // hCaptcha streams challenge assets; accept a parsed (interactive)
+            // or fully-loaded (complete) document as long as REAL challenge
+            // content is present. A bare loader shell never has the markers
+            // checked below.
+            if (document.readyState !== 'complete' &&
+                document.readyState !== 'interactive') return false;
+
+            const sized = (el, min) => {
+                if (!el) return false;
+                try {
+                    const r = el.getBoundingClientRect();
+                    return !!(r && r.width >= (min || 1) && r.height >= (min || 1));
+                } catch (e) { return false; }
+            };
+
+            // Image tiles: count real <img> nodes AND background-image divs
+            // (hCaptcha's .task-image grid uses CSS backgrounds, so a fully
+            // rendered challenge can contain NO <img> nodes at all).
             let tiles = 0;
-            for (const img of imgs) {
-                const r = img.getBoundingClientRect();
-                if (r && r.width >= 40 && r.height >= 40) tiles += 1;
+            for (const img of document.querySelectorAll('img')) {
+                if (sized(img, 12)) tiles += 1;
+            }
+            if (tiles < 4) {
+                for (const el of document.querySelectorAll(
+                        '.task-image, .challenge-image, [class*="task-image"], ' +
+                        '[class*="challenge-image"], [class*="image-grid"], ' +
+                        '[class*="image"]')) {
+                    let painted = false;
+                    try {
+                        const cs = getComputedStyle(el);
+                        painted = !!(cs && cs.backgroundImage &&
+                                     cs.backgroundImage !== 'none');
+                    } catch (e) {}
+                    if (painted || sized(el, 12)) tiles += 1;
+                }
             }
             if (tiles >= 4) return true;
-            const prompt = document.querySelector('.prompt-text, .prompt, [class*="prompt"], [class*="challenge-description"]');
-            const promptText = ((prompt && prompt.innerText) || (document.body && document.body.innerText) || '').trim();
-            return promptText.length >= 8 && tiles >= 1;
+
+            const prompt = document.querySelector(
+                '.prompt-text, .prompt, .header, [class*="prompt"], ' +
+                '[class*="challenge-description"], [class*="instruction"]');
+            const promptText = ((prompt && (prompt.innerText || prompt.textContent)) ||
+                (body.innerText || '')).trim();
+
+            // hCaptcha's painted challenge header always carries the
+            // About/Accessibility menu button; a loader shell never does.
+            const hasMenu = !!document.querySelector(
+                '#menu-info, .display-menu-btn, [aria-label*="About hCaptcha"]');
+            const hasAnswer = !!document.querySelector(
+                'input[type="text"], textarea, [class*="answer"]');
+            const hasVerify = !!document.querySelector(
+                'button[type="submit"], .button-submit, [class*="submit"], ' +
+                '[class*="verify"], .button-verify');
+
+            if (hasMenu) return true;
+            return promptText.length >= 8 && (tiles >= 1 || hasAnswer || hasVerify);
         }""")
 
     async def _wait_for_image_challenge(self, timeout: float = 30.0):
