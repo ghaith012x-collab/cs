@@ -33,6 +33,23 @@ WIDGET_HTML = """<html><body>
   <button type='button'>Create Account</button>
 </form></body></html>"""
 
+# CHALLENGE iframe present WITH the form still on screen (Discord preloads
+# the captcha iframes inside the modal) - the 2026-08-16 field bug: bot
+# declared the submit landed on this while the form never went away, then
+# spun on an empty pre-init widget frame.
+CHALLENGE_WITH_FORM_HTML = """<html><body>
+<form id='f'>
+  <input name='email' type='email' value='ok@example.com'>
+  <iframe src='https://newassets.hcaptcha.com/captcha/v1/abc/hcaptcha-challenge.html' title='hCaptcha challenge'></iframe>
+  <button type='button'>Create Account</button>
+</form></body></html>"""
+
+# Challenge iframe + form GONE (real landed submit: click removes the form).
+CHALLENGE_NO_FORM_HTML = """<html><body>
+<input name='email' type='email' value='ok@example.com'>
+<button type='button' onclick="var f=document.querySelector('form');if(f)f.remove();var i=document.createElement('iframe');i.src='https://newassets.hcaptcha.com/captcha/v1/abc/hcaptcha-challenge.html';document.body.appendChild(i)">Create Account</button>
+</body></html>"""
+
 
 def data_url(html: str) -> str:
     return ("data:text/html," + html.replace(" ", "%20").replace("<", "%3C")
@@ -51,6 +68,7 @@ async def check_landed(bot, label):
 
 
 async def main():
+    print("starting playwright...")
     pw = await async_playwright().start()
     b = await pw.chromium.launch(headless=True)
     ctx = await b.new_context()
@@ -59,12 +77,14 @@ async def main():
     bot._page = page
 
     # ── Case A: real submit lands (form gone + challenge frame) ──
+    print("case A: real submit lands")
     await page.goto(data_url(OK_HTML))
     await asyncio.sleep(0.5)
     before, after = await check_landed(bot, "A")
     assert "captcha" in after, "real submit should be detected as landed"
 
     # ── Case B: inert form (the 'isn't clicking' case) ──
+    print("case B: inert form")
     await page.goto(data_url(BLOCKED_HTML))
     await asyncio.sleep(0.5)
     before, after = await check_landed(bot, "B")
@@ -73,11 +93,29 @@ async def main():
     await bot._log_form_state("test (blocked)")
 
     # ── Case C: pre-existing widget iframe + unsent form ──
+    print("case C: pre-existing widget iframe")
     await page.goto(data_url(WIDGET_HTML))
     await asyncio.sleep(0.5)
     before, after = await check_landed(bot, "C")
     assert before == "", "pre-existing widget must not be 'landed' before the click"
     assert after == "", "pre-existing widget alone must not report a landed submit"
+
+    # ── Case D: CHALLENGE iframe + form still on screen ──
+    # The exact 2026-08-16 field bug: the challenge frame is mounted with
+    # the register form before any click. It must NOT be treated as landed.
+    print("case D: challenge iframe with form still up")
+    await page.goto(data_url(CHALLENGE_WITH_FORM_HTML))
+    await asyncio.sleep(0.5)
+    before, after = await check_landed(bot, "D")
+    assert before == "", "challenge with form still up must not be 'landed' before the click"
+    assert after == "", "challenge with form still up must not report a landed submit"
+
+    # ── Case E: challenge present, form REMOVED = real landed submit ──
+    print("case E: challenge iframe, form gone")
+    await page.goto(data_url(CHALLENGE_NO_FORM_HTML))
+    await asyncio.sleep(0.5)
+    before, after = await check_landed(bot, "E")
+    assert "captcha" in after, "challenge + form gone should be a landed submit"
 
     print("SUBMIT TEST PASSED")
     await b.close()

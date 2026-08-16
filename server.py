@@ -3032,11 +3032,22 @@ class DiscordAutomation:
                                 f"[Captcha] Checkbox click pass {checkbox_passes}/2 (unconditional — widget present)")
                             for wi in range(wcount):
                                 w = widgets.nth(wi)
+                                # ONLY click frames that actually contain a
+                                # checkbox node. The pre-init shell frame
+                                # (children:0, anyCheckbox:false) has nothing
+                                # to click — every strategy dies on "Frame
+                                # was detached" and we'd spin forever.
+                                if not await self._widget_has_checkbox(w):
+                                    continue
                                 if await self._click_hcaptcha_checkbox(w):
                                     checkbox_clicked = True
                                     checkbox_clicked_at = time.time()
                                     self._log("[Captcha] Checkbox clicked — waiting for challenge to spawn...")
                                     break
+                            if not checkbox_clicked:
+                                self._log(
+                                    "[Captcha] Widget frames present but no checkbox node yet — waiting for hCaptcha to initialize",
+                                    level="debug")
                         if checkbox_clicked and (time.time() - checkbox_clicked_at) < 5.0:
                             # hCaptcha swaps to the challenge a moment
                             # after the click — the next loop iteration
@@ -4354,7 +4365,15 @@ class DiscordAutomation:
                 # of falsely reporting a landed submit.
                 await asyncio.sleep(0.4)
                 continue
-            if st.get("challenge"):
+            # A hCaptcha CHALLENGE frame only proves the submit when the
+            # register form has actually unmounted. Discord preloads the
+            # captcha iframes inside the modal while the form is still
+            # sitting there unsent, so "challenge present + form still
+            # visible" is NOT a landed submit — accepting it skipped the
+            # Create Account phase and made the bot click an empty
+            # pre-init widget frame (children:0, anyCheckbox:false) in a
+            # Frame-was-detached loop.
+            if st.get("challenge") and not st.get("form"):
                 return "captcha_challenge"
             url = str(st.get("url") or "")
             if any(k in url for k in ("discord.com/app", "discord.com/channels", "/verify")):
